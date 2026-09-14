@@ -8,6 +8,8 @@
  *   fused.stat(path) -> Promise<{path,name,is_dir,size,mtime,writable}>
  *   fused.writeFile(path, content, opts?) -> Promise<stat>
  *   fused.rawUrl(path) -> string
+ *   fused.ai.text({prompt, ...}) -> Promise<result frame>   (Claude CLI tier only)
+ *   fused.ai.models.list() / catalog(), fused.ai.cancel()
  *
  * Everything else the full fused-render runtime exposes (ai, capture,
  * fileIndex, daemon, jobs, uploadFile, mkdir, autoReload, snapshot) is NOT
@@ -498,6 +500,133 @@
       });
   }
 
+  // ---- fused.ai (Claude tier only) ---------------------------------------
+  // Same contract as fused-render's fused.ai.text: one options object,
+  // the shared result frame {text, provider, finishReason, warnings, usage,
+  // response, providerMetadata}, rejections carry `.type`. Streaming is
+  // NDJSON over a chunked HTTP response read with fetch's body reader — no
+  // socket. No local inference in lite: image/video/transcribe/embed and
+  // the local/apple providers reject with type "unavailable".
+  function aiError(type, message) {
+    const err = new Error(message);
+    err.type = type;
+    return err;
+  }
+  function abortSignalOf(opts) {
+    const s = opts && opts.abortSignal;
+    return s && typeof s.aborted === "boolean" && typeof s.addEventListener === "function" ? s : null;
+  }
+  function rethrowAbort(e) {
+    if (e && e.name === "AbortError") throw aiError("cancelled", "the AI call was cancelled");
+    throw e;
+  }
+  function rejectUnknownOptions(opts, allowed, apiName) {
+    const set = new Set(allowed);
+    const unknown = Object.keys(opts).filter((k) => !set.has(k)).sort();
+    if (!unknown.length) return null;
+    const named = unknown.map((k) => "'" + k + "'").join(", ");
+    return aiError("bad_request", named + (unknown.length === 1 ? " is not an option" : " are not options")
+      + " of " + apiName + "; accepted: " + allowed.slice().sort().join(", "));
+  }
+  function failWith(error) {
+    throw aiError((error && error.type) || "ai_error", (error && error.message) || "AI call failed");
+  }
+
+  const TEXT_KEYS = ["prompt", "provider", "model", "systemPrompt", "effort", "history", "raw",
+                     "images", "temperature", "maxTokens", "topP", "onChunk", "abortSignal"];
+
+  function aiText(opts) {
+    opts = opts || {};
+    const unknown = rejectUnknownOptions(opts, TEXT_KEYS, "fused.ai.text");
+    if (unknown) return Promise.reject(unknown);
+    if (typeof opts.prompt !== "string" || !opts.prompt.trim()) {
+      return Promise.reject(aiError("bad_request", "fused.ai.text({prompt}): prompt must be a non-empty string"));
+    }
+    const body = {};
+    for (const k of TEXT_KEYS) {
+      if (k !== "onChunk" && k !== "abortSignal" && opts[k] !== undefined) body[k] = opts[k];
+    }
+    if (body.images !== undefined) {
+      const ownPath = ownQuery("path");
+      if (ownPath) body.base = ownPath;
+    }
+    const onChunk = typeof opts.onChunk === "function" ? opts.onChunk : null;
+    if (onChunk) body.stream = true;
+    const signal = abortSignalOf(opts);
+    if (signal && signal.aborted) return Promise.reject(aiError("cancelled", "the AI call was cancelled"));
+
+    const req = fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Fused": "1" },
+      body: JSON.stringify(body),
+      signal: signal || undefined,
+    }).catch(rethrowAbort);
+
+    if (!onChunk) {
+      return req.then((res) => res.json().catch(rethrowAbort)).then((data) => {
+        if (!data.ok) failWith(data.error);
+        return data.result;
+      });
+    }
+    return req.then((res) => {
+      const ct = res.headers.get("Content-Type") || "";
+      if (!res.ok || ct.indexOf("x-ndjson") === -1) {
+        return res.json().catch(rethrowAbort).then((data) => failWith(data && data.error));
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finished = null;
+      function handleLine(line) {
+        if (!line.trim()) return;
+        const frame = JSON.parse(line);
+        if (frame.type === "chunk") onChunk(frame.text);
+        else if (frame.type === "done") finished = frame;
+      }
+      function pump() {
+        return reader.read().then(({ done, value }) => {
+          if (done) {
+            if (buffer) handleLine(buffer);
+            if (!finished) failWith({ type: "ai_error", message: "stream ended without a done frame" });
+            if (!finished.ok) failWith(finished.error);
+            return finished.result;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+          lines.forEach(handleLine);
+          return pump();
+        }, rethrowAbort);
+      }
+      return pump();
+    });
+  }
+
+  function aiUnavailable(verb) {
+    return function () {
+      return Promise.reject(aiError("unavailable",
+        "fused.ai." + verb + " is not available on fused-render-lite: no local inference in this build"));
+    };
+  }
+  function aiGet(path) {
+    return fetch(path).then((r) => r.json());
+  }
+  const ai = {
+    text: aiText,
+    image: aiUnavailable("image"),
+    video: aiUnavailable("video"),
+    transcribe: aiUnavailable("transcribe"),
+    embed: aiUnavailable("embed"),
+    cancel: () => Promise.resolve(false),
+    models: {
+      list: () => aiGet("/api/ai/runtime"),
+      catalog: () => aiGet("/api/ai/catalog"),
+      load: aiUnavailable("models.load"),
+      download: aiUnavailable("models.download"),
+      unload: aiUnavailable("models.unload"),
+    },
+  };
+
   // ---- the global ---------------------------------------------------------
   window.fused = {
     env: "local",
@@ -517,7 +646,7 @@
     autoReload: unsupportedFn("fused.autoReload"),
     snapshot: unsupportedFn("fused.snapshot"),
     daemon: unsupportedNamespace("fused.daemon"),
-    ai: unsupportedNamespace("fused.ai"),
+    ai,
     capture: unsupportedNamespace("fused.capture"),
     fileIndex: unsupportedNamespace("fused.fileIndex"),
   };

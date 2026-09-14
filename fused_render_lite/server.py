@@ -14,6 +14,9 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/fs/stat?path=                      {path,name,is_dir,size,mtime,writable}
   POST /api/fs/write        {path, content, expected_mtime?, create?} -> stat
   GET  /api/health                             {ok, version, pid}
+  POST /api/ai              fused.ai.text body -> {ok, result} or chunked NDJSON when stream:true
+  GET  /api/ai/runtime, /api/ai/catalog        the Claude tier's models
+  POST /api/ai/cancel, /api/ai/<other>         {cancelled:false} / 409 unavailable (no local inference)
 
 Binds 127.0.0.1 only. Mutating/executing POSTs require ``X-Fused: 1``, which
 forces a CORS preflight a foreign origin cannot pass — same guard as
@@ -33,7 +36,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, appfile, env, paths
+from fused_render_lite import __version__, ai, appfile, env, paths
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +130,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_stat(q)
             if route == "/api/health":
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
+            if route == "/api/ai/runtime":
+                return self._json(ai.runtime())
+            if route == "/api/ai/catalog":
+                return self._json(ai.catalog())
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             self._error("not found", 404)
@@ -147,6 +154,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_run()
             if route == "/api/fs/write":
                 return self._fs_write()
+            if route == "/api/ai":
+                return self._api_ai()
+            if route == "/api/ai/cancel":
+                return self._guarded() and self._json({"cancelled": False})
+            if route.startswith("/api/ai/"):
+                return self._guarded() and self._json(
+                    {"error": "not available on fused-render-lite: no local inference in this "
+                              "build", "type": "unavailable"}, 409)
             self._error("not found", 404)
         except Exception as exc:  # noqa: BLE001
             logger.exception("POST %s failed", self.path)
@@ -268,6 +283,59 @@ class Handler(BaseHTTPRequestHandler):
         result = env.run_python(py, params if isinstance(params, dict) else {}, app_dir)
         result["resolved_py"] = py
         self._json(result)
+
+    # ---- fused.ai.text ----------------------------------------------------
+
+    def _api_ai(self) -> None:
+        """POST /api/ai: ``{ok, result}`` JSON, or with ``stream: true`` an
+        NDJSON body (chunked transfer) of ``{"type":"chunk","text"}`` lines
+        closed by one ``{"type":"done", ok, result|error}`` line. Validation
+        and the missing-binary check happen before the first byte, so those
+        are always proper JSON errors."""
+        if not self._guarded():
+            return
+        body = self._json_body()
+        try:
+            request, warnings = ai.validate(body)
+            if ai.claude_bin() is None:
+                raise ai.AiError("ai_unavailable",
+                                 f"claude CLI not found; install Claude Code or set {ai.BIN_ENV} "
+                                 "to its location")
+        except ai.AiError as exc:
+            return self._json({"ok": False, "error": exc.payload()}, exc.status)
+        run = ai.Completion(request, warnings)
+        if not request["stream"]:
+            try:
+                for _ in run.events():
+                    pass
+            except ai.AiError as exc:
+                return self._json({"ok": False, "error": exc.payload()}, exc.status)
+            return self._json({"ok": True, "result": run.result})
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def chunk(obj: dict) -> None:
+            data = (json.dumps(obj) + "\n").encode("utf-8")
+            self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
+            self.wfile.flush()
+
+        try:
+            try:
+                for piece in run.events():
+                    chunk({"type": "chunk", "text": piece})
+                chunk({"type": "done", "ok": True, "result": run.result})
+            except ai.AiError as exc:
+                chunk({"type": "done", "ok": False, "error": exc.payload()})
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            run.kill()  # the page went away (abortSignal / tab closed): stop paying for tokens
+            self.close_connection = True
 
     # ---- fs ---------------------------------------------------------------
 

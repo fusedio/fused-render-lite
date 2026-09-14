@@ -23,8 +23,9 @@ The page runtime exposes exactly six `fused.*` members:
 | `fused.stat(path)` | `{path, name, is_dir, size, mtime, writable}` |
 | `fused.writeFile(path, content, opts?)` | optimistic lock + create-only, as in fused-render |
 | `fused.rawUrl(path)` | bytes URL, Range requests honoured |
+| `fused.ai.text({prompt, ...})` | Claude tier only, through the local `claude` CLI; streams with `onChunk` |
 
-Every other member the full fused-render runtime has (`ai`, `capture`,
+Every other member the full fused-render runtime has (`capture`,
 `fileIndex`, `daemon`, jobs, `uploadFile`, `mkdir`, `autoReload`, `snapshot`)
 is **not supported**. There are no stubs: calling one, or reading any
 property of `fused.ai` / `fused.capture` / `fused.fileIndex` / `fused.daemon`,
