@@ -63,8 +63,9 @@ def find_running_server() -> int | None:
 
 
 def _write_pidfile(port: int) -> None:
-    with open(paths.pid_path(), "w", encoding="utf-8") as f:
-        json.dump({"pid": os.getpid(), "port": port, "version": __version__}, f)
+    # server.make_server already wrote <home>/server.json ({pid, port, origin,
+    # shared, ...}); nothing more to record here.
+    return
 
 
 def _remove_pidfile() -> None:

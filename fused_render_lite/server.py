@@ -631,6 +631,9 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+SHARED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shared")
+
+
 def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     paths.fix_process_env()
     srv = Server((host, port), Handler)
@@ -638,7 +641,39 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     # keep reporting to /api/jobs after its page is gone (fused-render's
     # documented pattern: plain JSON over HTTP, no fused_render_lite import).
     os.environ["FUSED_RENDER_ORIGIN"] = f"http://{host}:{srv.server_address[1]}"
+    # fused-render's background-apps contract: a daemon (or any app-side
+    # script) finds the server through `<FUSED_RENDER_HOME_DIR>/server.json`
+    # — `origin` to call and `shared` to sys.path for fused_ai/background_app.
+    os.environ["FUSED_RENDER_HOME_DIR"] = paths.home()
+    write_server_json(srv.server_address[1], host)
     return srv
+
+
+def write_server_json(port: int, host: str = "127.0.0.1") -> None:
+    """Publish this server's origin + the shared dir to `<home>/server.json`
+    (fused-render's `write_server_json`, same payload plus `port`, which
+    macapp's single-instance check reads). Write-then-rename; best-effort."""
+    try:
+        path = paths.pid_path()
+        payload = {"origin": f"http://{host}:{port}", "port": port, "pid": os.getpid(),
+                   "shared": SHARED_DIR, "version": __version__, "started": time.time()}
+        tmp = path + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("could not write server.json (non-fatal)", exc_info=True)
+
+
+def remove_server_json() -> None:
+    """Undo `write_server_json` at shutdown — only if THIS process wrote it."""
+    try:
+        with open(paths.pid_path(), "r", encoding="utf-8") as f:
+            if json.load(f).get("pid") != os.getpid():
+                return
+        os.remove(paths.pid_path())
+    except (OSError, ValueError):
+        pass
 
 
 #: Set when the server starts quitting, so `background_apps.resurrect_autostart`
@@ -673,6 +708,7 @@ def stop_ai() -> None:
     """Evict resident models (kills their worker processes), the warm Claude
     instance, and every background-app daemon (fused.daemon). Called on quit."""
     _bg_shutdown.set()
+    remove_server_json()
     try:
         engine_host.stop_all()
     except Exception:  # noqa: BLE001
