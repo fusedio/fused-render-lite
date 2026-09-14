@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.0 | 40.98 MB (40,975,944 B) | +0.00 MB | 96 MB | auto-fit card grid; no packaging change |
 | 0.7.2 | 40.98 MB (40,975,692 B) | +0.03 MB | 96 MB | venv-symlink fix; server.json + shared/ (fused_ai, appenv, background_app) |
 | 0.7.1 | 40.95 MB (40,945,024 B) | +0.00 MB | 96 MB | rebuild from main head; no code change |
 | 0.7.0 | 40.94 MB (40,944,835 B) | +0.10 MB | 96 MB | fused.daemon (pure-Python source) + native windows / menu bar; no packaging change |
