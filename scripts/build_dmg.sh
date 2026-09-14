@@ -159,6 +159,17 @@ rm -rf "$PRUNE_FRAMEWORK/Versions/3.12/include" \
 rm -rf "$PRUNE_FRAMEWORK"/Versions/3.12/lib/tcl* "$PRUNE_FRAMEWORK"/Versions/3.12/lib/tk* \
        "$FW_LIB"/lib-dynload/_tkinter*
 find "$PRUNE_FRAMEWORK" -type d -name __pycache__ -prune -exec rm -rf {} +
+# py2app copies lib-dynload wholesale — setup_py2app.STDLIB_EXCLUDED does not
+# reach these .so files — and then walks their dylib deps into Contents/Frameworks.
+# Lite-only trim (measured on the 0.5.6 DMG: Tcl/Tk 6 MB, ncurses 1.4 MB,
+# CPython test fixtures 1.3 MB): GUI, terminal UI and test modules nothing in a
+# .app or a venv built from it can use.
+DYNLOAD="$PRUNE_PYLIB/lib-dynload"
+rm -f "$DYNLOAD"/_tkinter* "$DYNLOAD"/_curses* "$DYNLOAD"/_test* "$DYNLOAD"/_xxtestfuzz* \
+      "$DYNLOAD"/_ctypes_test* "$DYNLOAD"/xxlimited* "$DYNLOAD"/xxsubtype*
+rm -f "$APP_DIR"/Contents/Frameworks/libtcl* "$APP_DIR"/Contents/Frameworks/libtk* \
+      "$APP_DIR"/Contents/Frameworks/libncurses* "$APP_DIR"/Contents/Frameworks/libpanel* \
+      "$APP_DIR"/Contents/Frameworks/libformw* "$APP_DIR"/Contents/Frameworks/libmenuw*
 
 echo "==> stripping debug symbols from bundled dylibs"
 find "$APP_DIR" -type f \( -name '*.so' -o -name '*.dylib' \) \

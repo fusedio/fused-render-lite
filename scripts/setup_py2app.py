@@ -36,6 +36,23 @@ STDLIB_EXCLUDED = {
     "lib2to3": "2-to-3 dev tooling, removed upstream in 3.13",
     "antigravity": "opens a web browser at import time",
     "this": "an easter egg; the Zen of Python is not a dependency",
+    # Lite-only trims on top of fused-render's list (measured on the 0.5.6 DMG):
+    "_tkinter": "the C half of tkinter; shipping it drags libtcl+libtk (6 MB) into Frameworks",
+    "curses": "terminal UI; nothing in a .app has a terminal",
+    "_curses": "C half of curses, pulls libncurses+libpanel (1.4 MB)",
+    "_curses_panel": "see _curses",
+    "_testcapi": "CPython's own C-API test fixture",
+    "_testinternalcapi": "CPython's own C-API test fixture",
+    "_testbuffer": "CPython test fixture",
+    "_testclinic": "CPython test fixture",
+    "_testimportmultiple": "CPython test fixture",
+    "_testmultiphase": "CPython test fixture",
+    "_testsinglephase": "CPython test fixture",
+    "_xxtestfuzz": "CPython test fixture",
+    "_ctypes_test": "ctypes' test fixture",
+    "xxlimited": "limited-API example module",
+    "xxlimited_35": "limited-API example module",
+    "xxsubtype": "example module",
 }
 
 
