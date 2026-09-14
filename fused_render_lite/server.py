@@ -579,6 +579,7 @@ class Server(ThreadingHTTPServer):
 
 
 def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
+    paths.fix_process_env()
     srv = Server((host, port), Handler)
     # Workers spawned by runPython inherit this, so a detached process can
     # keep reporting to /api/jobs after its page is gone (fused-render's

@@ -45,3 +45,30 @@ def _sub(name: str) -> str:
     path = os.path.join(home(), name)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def fix_process_env() -> None:
+    """Repair what the py2app bootstrap leaves behind, before anything spawns.
+
+    py2app points SSL_CERT_DIR (and sometimes SSL_CERT_FILE) at a path inside
+    the bundle that does not exist, which makes uv — and our own urllib — trust
+    no certificates at all: every download fails. Drop the dangling values and
+    fall back to the system CA bundle. Also make sure a Finder-launched app,
+    whose PATH is launchd's minimal one, can still find Homebrew/uv installs.
+    """
+    for key in ("SSL_CERT_DIR", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        value = os.environ.get(key)
+        if value and not os.path.exists(value):
+            os.environ.pop(key, None)
+    if "SSL_CERT_FILE" not in os.environ:
+        for candidate in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+            if os.path.exists(candidate):
+                os.environ["SSL_CERT_FILE"] = candidate
+                break
+    extra = [os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    for p in extra:
+        if os.path.isdir(p) and p not in parts:
+            parts.append(p)
+    os.environ["PATH"] = os.pathsep.join(parts)

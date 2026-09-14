@@ -386,7 +386,12 @@ def _resolve_script_python() -> tuple[str | None, bool]:
     override = os.environ.get(_SCRIPT_PYTHON_ENV)
     if override:
         return (override, True) if _probe_python(override) else (None, False)
-    if _running_version() == _SCRIPT_PYTHON_VERSION_INFO:
+    # NOT in the packaged app: py2app's interpreter is a stub that cannot run
+    # standalone (no stdlib on its own path — `uv sync --python <it>` dies with
+    # "No module named 'encodings'"), so a frozen build always builds on a
+    # uv-managed 3.12, exactly like a 3.14 dev checkout would.
+    if _running_version() == _SCRIPT_PYTHON_VERSION_INFO \
+            and getattr(sys, "frozen", None) != "macosx_app":
         return None, True
     uv = uv_bin()
     if uv is None:

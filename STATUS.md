@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.5.2 | _CI pending_ | | 29 MB | fix: local runners could not build in the packaged app (stub interpreter, dangling SSL_CERT_DIR) |
 | 0.5.1 | 19.53 MB (19,526,708 B) | +1.80 MB vs 0.4.0 | 29 MB | 0.5.0 minus an accidental pillow bundle (py2app followed lazy `PIL` imports in runner-side modules; excluded) |
 | 0.5.0 | 26.22 MB (26,215,796 B) | +8.49 MB | 42 MB | local inference: fused-render's AI subsystem copied in (text/image/video/transcribe/embed). ~7 MB of the Δ was pillow + libjpeg/libtiff/liblzma pulled in by mistake — fixed in 0.5.1 |
 | 0.4.0 | 17.73 MB (17,729,166 B) | +1.79 KB | 25 MB | legacy env for apps without `pyproject.toml`; `autoReload(true)` throws |
@@ -50,6 +51,11 @@ Dropped from the copy: benchmarking (`benchmark`, `bench_store`, `speed`,
 `gguf_sources`), the AI Models / Preferences pages. Preferences are fixed to
 fused-render's defaults (`shell/prefs.py`: engine `auto`, idle unload 15 min).
 The Apple-Intelligence helper is not bundled in the DMG.
+
+0.5.2 fixed the packaged app: py2app's interpreter is a stub that cannot run
+standalone, so runner venvs are always built on a uv-managed 3.12 when frozen,
+and the dangling `SSL_CERT_DIR` py2app exports is dropped at startup (it made uv
+trust no certificates). Verified from the built .app: cold mlx-text load → answer.
 
 Verified on this Mac (M-series, macOS 26): local text (LFM2.5-1.2B, 4-bit),
 embed (nomic modernbert, 768-d), transcribe (whisper-tiny on a `say` clip,
