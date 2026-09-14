@@ -42,6 +42,9 @@ stdlib-only Python and its imports will fail with a message saying so.
 and failing those is downloaded once (pinned version, sha256-verified) into
 `~/.fused-render-lite/bin/`.
 
+Version, DMG/app size and the full supported/unsupported API table live in
+[STATUS.md](STATUS.md).
+
 ## Run from source
 
 ```
