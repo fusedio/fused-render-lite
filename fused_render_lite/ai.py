@@ -47,6 +47,7 @@ TEXT_OPTIONS = frozenset({"prompt", "provider", "model", "systemPrompt", "effort
 _POSIX_CANDIDATES = (
     "~/.claude/local/claude",
     "~/.local/bin/claude",
+    "~/.bun/bin/claude",
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
 )
