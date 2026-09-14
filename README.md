@@ -8,7 +8,7 @@ hosting a WKWebView, not a browser tab. Open as many as you like: every window
 is on the one local server. The URL behind a window carries the file:
 
 ```
-http://127.0.0.1:8765/open?_file=/Users/you/Downloads/app.fused&n=80
+http://127.0.0.1:2777/open?_file=/Users/you/Downloads/app.fused&n=80
 ```
 
 Everything after `_file` is the app's own `fused.params` state.

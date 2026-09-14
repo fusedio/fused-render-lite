@@ -30,7 +30,7 @@ Isolation defaults (respected when already set):
 
 | Env | dev.sh default | Why |
 |-----|----------------|-----|
-| `FUSED_RENDER_LITE_PORT` | 8766 on main/lite-main, `8767 + crc32(branch) % 1000` elsewhere | the installed app owns 8765; each worktree gets its own port |
+| `FUSED_RENDER_LITE_PORT` | 2778 on main/lite-main, `2779 + crc32(branch) % 1000` elsewhere | the installed app owns 2777; each worktree gets its own port |
 | `FUSED_RENDER_LITE_HOME` | `~/.fused-render-lite-dev/<branch>` | the installed app owns `~/.fused-render-lite`; app venvs/state never mix |
 | `FUSED_RENDER_NO_RELOAD=1` | unset | single launch without watchfiles |
 

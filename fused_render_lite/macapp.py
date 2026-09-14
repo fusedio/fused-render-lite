@@ -30,7 +30,7 @@ from fused_render_lite.cli import open_url
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 2777
 BUNDLE_ID = "io.fused.render.lite"  # must match scripts/setup_py2app.py
 
 

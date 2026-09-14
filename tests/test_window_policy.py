@@ -7,7 +7,7 @@ import pytest
 
 from fused_render_lite import window_policy as wp
 
-PORT = 8765
+PORT = 2777
 APP = f"http://127.0.0.1:{PORT}"
 
 
