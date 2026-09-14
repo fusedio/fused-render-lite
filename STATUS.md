@@ -54,6 +54,13 @@ interpreter from the project venv store" — `engine_host._validate_interpreter`
 realpath'd the venv's `bin/python`, a symlink to the base interpreter outside
 `~/.fused-render-lite/venvs`. Now resolves the venv directory instead.
 
+Fix: apps written to fused-render's background-apps contract could not find
+the server — lite never exported `FUSED_RENDER_HOME_DIR` nor wrote
+`<home>/server.json`. `make_server` now does both (`{origin, port, pid,
+shared, version, started}`), and `fused_render_lite/shared/` ships
+`appenv.py`, `fused_ai.py`, `background_app.py` verbatim from fused-render so
+`sys.path.insert(0, info["shared"])` works the same way.
+
 ## 0.7.1
 
 Rebuild of 0.7.0 from main head — confirms the DMG carries the native-window /
