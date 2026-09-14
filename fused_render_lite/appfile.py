@@ -22,6 +22,7 @@ import shutil
 import stat as stat_mod
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 
 from fused_render_lite import container, paths
 
@@ -158,6 +159,32 @@ def _file_key(fused_path: str, name: str) -> str:
     return key
 
 
+def ensure_dot_fused(app_dir: str) -> bool:
+    """Materialise ``<app>/.fused/data``, ``.fused/cache`` and ``meta.json``.
+
+    Same convention as fused-render's ``app_fused_dir.ensure``: the server
+    creates the folders when an app is opened, so an app never has to
+    ``mkdir`` before its first ``writeFile`` into ``.fused/data``. Best-effort:
+    a failure here must not stop the app from opening.
+    """
+    try:
+        dot = os.path.join(app_dir, ".fused")
+        os.makedirs(os.path.join(dot, "data"), exist_ok=True)
+        os.makedirs(os.path.join(dot, "cache"), exist_ok=True)
+        meta = os.path.join(dot, "meta.json")
+        if not os.path.exists(meta):
+            payload = {"version": 1, "app_dir": app_dir,
+                       "created_at": datetime.now(timezone.utc).isoformat(), "migrations": []}
+            try:
+                with open(meta, "x", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+            except FileExistsError:
+                pass  # a concurrent open won the race with the same content
+        return True
+    except OSError:
+        return False
+
+
 def open_app_file(fused_path: str) -> dict:
     """Extract (or re-use) and answer ``{"dir", "entry", "name", "reused"}``
     with absolute paths."""
@@ -173,6 +200,7 @@ def open_app_file(fused_path: str) -> dict:
 
     if os.path.isdir(dest):
         if os.path.isfile(entry_abs) and has_fused_meta(entry_abs):
+            ensure_dot_fused(dest)
             return {"dir": dest, "entry": entry_abs, "name": name, "reused": True}
         shutil.rmtree(dest, ignore_errors=True)  # half-extracted: rebuild
 
@@ -212,4 +240,5 @@ def open_app_file(fused_path: str) -> dict:
                 raise AppFileError(f"could not place the extracted app at {dest}")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    ensure_dot_fused(dest)
     return {"dir": dest, "entry": entry_abs, "name": name, "reused": False}

@@ -54,3 +54,22 @@ def test_not_a_fused_file(tmp_path):
     p.write_bytes(b"not really")
     with pytest.raises(appfile.AppFileError):
         appfile.read_manifest(str(p))
+
+
+def test_open_materialises_dot_fused(v2_fused):
+    """Apps write state into .fused/data without mkdir first (fused-render
+    convention); the opener must create the folders on every open."""
+    import json
+    import shutil
+
+    result = appfile.open_app_file(v2_fused)
+    dot = os.path.join(result["dir"], ".fused")
+    assert os.path.isdir(os.path.join(dot, "data"))
+    assert os.path.isdir(os.path.join(dot, "cache"))
+    meta = json.load(open(os.path.join(dot, "meta.json")))
+    assert meta["version"] == 1 and meta["app_dir"] == result["dir"]
+    # a cache sweep between opens is recovered on the reused path too
+    shutil.rmtree(dot)
+    again = appfile.open_app_file(v2_fused)
+    assert again["reused"] is True
+    assert os.path.isdir(os.path.join(dot, "data"))
