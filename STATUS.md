@@ -15,8 +15,8 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
-| 0.5.4 | 19.53 MB (19,526,414 B) | +0.5 KB | 29 MB | fix: runner venvs really built on the uv-managed Python in the packaged app (0.5.2 missed the install worker's interpreter slot) |
 | 0.5.5 | _pending CI_ | | | fix: opener materialises `<app>/.fused/{data,cache}` + `meta.json` on every open (fused-render convention) so `writeFile` into `.fused/data` works without `mkdir` |
+| 0.5.4 | 19.53 MB (19,526,414 B) | +0.5 KB | 29 MB | fix: runner venvs really built on the uv-managed Python in the packaged app (0.5.2 missed the install worker's interpreter slot) |
 | 0.5.3 | 19.53 MB (19,525,879 B), ad-hoc until secrets are set | +0.5 KB | 29 MB | release pipeline: Developer ID signing + notarization + stapling (needs repo secrets) |
 | 0.5.2 | 19.53 MB (19,525,398 B) | −1.3 KB | 29 MB | fix: local runners could not build in the packaged app (stub interpreter, dangling SSL_CERT_DIR) |
 | 0.5.1 | 19.53 MB (19,526,708 B) | +1.80 MB vs 0.4.0 | 29 MB | 0.5.0 minus an accidental pillow bundle (py2app followed lazy `PIL` imports in runner-side modules; excluded) |
