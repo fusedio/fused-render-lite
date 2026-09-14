@@ -3,6 +3,11 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to (e.g. v0.2.0)"
+        required: true
 
 permissions:
   contents: write
@@ -14,14 +19,15 @@ jobs:
       NOTARY_PROFILE: ci-notary
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       # actions/setup-python installs a python.org-style framework build on
       # macOS arm64, which is exactly what py2app needs (scripts/build_dmg.sh).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Import signing cert + notary credentials
-        if: ${{ secrets.CODESIGN_CERT_P12 != '' }}
+      - name: Import signing cert + notary credentials (skipped when no secrets)
         env:
           CODESIGN_CERT_P12: ${{ secrets.CODESIGN_CERT_P12 }}
           CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
@@ -31,6 +37,10 @@ jobs:
           NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
         run: |
           set -euo pipefail
+          if [ -z "${CODESIGN_CERT_P12:-}" ]; then
+            echo "no signing secrets configured -> ad-hoc build"
+            exit 0
+          fi
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           echo "$CODESIGN_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -57,6 +67,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
           gh release upload "$TAG" dist/*.dmg dist/*.whl --clobber
