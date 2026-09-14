@@ -212,3 +212,21 @@ def test_no_pyproject_app_gets_the_legacy_env(client, tmp_path, lite_home, monke
     # shared venv lives under the legacy project, not the app
     assert env.venv_dir_for(env.legacy_project_dir()) == env.venv_dir_for(env.project_dir_for(data["dir"]))
     assert "six" in open(os.path.join(env.legacy_project_dir(), "pyproject.toml")).read()
+
+
+def test_old_uv_on_path_is_skipped(tmp_path, monkeypatch):
+    """A stale uv on PATH (no --managed-python / --no-default-groups) must not
+    be picked over downloading the pinned one."""
+    old = tmp_path / "uv"
+    old.write_text("#!/bin/sh\necho 'uv 0.4.30'\n")
+    old.chmod(0o755)
+    new = tmp_path / "new" / "uv"
+    new.parent.mkdir()
+    new.write_text("#!/bin/sh\necho 'uv 0.12.13 (abc 2026-01-01)'\n")
+    new.chmod(0o755)
+    monkeypatch.delenv("FUSED_RENDER_LITE_UV", raising=False)
+    monkeypatch.setattr(env.shutil, "which", lambda name: str(old))
+    monkeypatch.setattr(env, "_download_uv", lambda log: "downloaded")
+    assert env.uv_bin(download=True) == "downloaded"
+    monkeypatch.setattr(env.shutil, "which", lambda name: str(new))
+    assert env.uv_bin(download=True) == str(new)

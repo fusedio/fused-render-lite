@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.5.7 | _pending CI_ | | | fix: a stale `uv` on PATH (no `--managed-python`/`--no-default-groups`) is skipped; the pinned uv is downloaded instead |
 | 0.5.6 | _pending CI_ | | | fix: Python packaged exactly as fused-render (whole stdlib, `Contents/lib` symlink, self-locating bundled interpreter builds every venv; no uv-managed Python detour). App size up (full stdlib). |
 | 0.5.5 | 19.53 MB (19,526,644 B) | +0.2 KB | 29 MB | fix: opener materialises `<app>/.fused/{data,cache}` + `meta.json` on every open (fused-render convention) so `writeFile` into `.fused/data` works without `mkdir` |
 | 0.5.4 | 19.53 MB (19,526,414 B) | +0.5 KB | 29 MB | fix: runner venvs really built on the uv-managed Python in the packaged app (0.5.2 missed the install worker's interpreter slot) |

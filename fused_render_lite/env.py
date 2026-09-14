@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 PYTHON_VERSION = "3.12"
 UV_VERSION = "0.12.13"
+# Oldest uv whose CLI has every flag we pass (`uv sync --no-default-groups`,
+# `uv python find --managed-python`). An older uv found on PATH is skipped in
+# favour of downloading UV_VERSION — a user's stale ~/.local/bin/uv otherwise
+# fails with "unexpected argument '--managed-python'".
+UV_MIN_VERSION = (0, 8, 0)
 _UV_BASE = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/"
 READY_MARKER = ".fused-lite-ready"
 RUN_TIMEOUT_S = 600.0
@@ -84,15 +89,25 @@ def uv_bin(download: bool = False, log=None) -> str | None:
         os.path.join(exe_dir, name),
         os.path.join(paths.bin_dir(), name),
     )
-    for candidate in candidates:
-        if os.path.isfile(candidate):
+    if os.path.isfile(candidates[0]):
+        return candidates[0]  # shipped with the app: trusted as-is, like fused-render's
+    for candidate in list(candidates[1:]) + [shutil.which("uv")]:
+        if candidate and os.path.isfile(candidate) and _uv_recent(candidate):
             return candidate
-    found = shutil.which("uv")
-    if found:
-        return found
     if download:
         return _download_uv(log or (lambda _msg: None))
     return None
+
+
+def _uv_recent(path: str) -> bool:
+    """Does `uv --version` report at least UV_MIN_VERSION?"""
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, text=True,
+                              timeout=15, creationflags=_no_window())
+        ver = proc.stdout.split()[1].split("+")[0]
+        return tuple(int(x) for x in ver.split(".")[:3]) >= UV_MIN_VERSION
+    except Exception:  # noqa: BLE001 - an unparseable uv is not one we rely on
+        return False
 
 
 def _fetch_with_progress(url: str, log, label: str) -> bytes:
