@@ -1,60 +1,82 @@
 # fused-render-lite status
 
-Update this file with every release. Sizes come from `bash scripts/build_dmg.sh`
-(the `app size` line and the `done:` line), measured on macOS arm64.
+One section per version: what the `fused.*` runtime supports, what it does
+not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
+(`app size` line and `done:` line), macOS arm64, ad-hoc signed.
 
-## Build
+## Size by version
 
-| | value |
-| --- | --- |
-| version | 0.2.0 |
-| DMG | 12 MB (`FusedRenderLite-0.2.0.dmg`, 12,215,018 bytes, ULFO) |
-| .app | 25 MB unpacked |
-| runtime Python deps | 0 (`rumps` + `pyobjc-framework-Cocoa` in the `[app]` extra, macOS shell only) |
-| bundled Python packages | none — each app's `pyproject.toml` builds its own venv via `uv sync` |
-| uv | not bundled, downloaded on first use (0.12.13, sha256-verified); `FUSED_RENDER_BUNDLE_UV=1` bundles it |
+| version | DMG | .app | Δ DMG vs previous | what changed |
+| --- | --- | --- | --- | --- |
+| fused-render (full) | ~hundreds of MB | ~400 MB installed packages | — | reference point |
+| 0.1.0 | 12.20 MB (12,202,154 B) | 25 MB | — | first lite build |
+| 0.2.0 | 12.22 MB (12,215,018 B) | 25 MB | +12.9 KB | `fused.ai.text` (Claude CLI tier) |
 
-## fused API
+The Claude tier costs nothing beyond one Python module and ~150 lines of
+runtime JS: inference runs in the user's own `claude` CLI, which is not
+bundled.
 
-Supported — identical semantics to full fused-render:
+Constant across versions: 0 runtime Python deps (`rumps` + `pyobjc-framework-Cocoa`
+only in the `[app]` extra); no bundled data packages (each app's
+`pyproject.toml` → `uv sync`); `uv` downloaded on first use (0.12.13,
+sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
-| member | notes |
-| --- | --- |
-| `fused.runPython(py, params, opts?)` | `main(**params)` in the app's own venv; stale-call supersession via `opts.key`, `opts.signal` |
-| `fused.params.get / getAll / set / onChange` | URL-backed, reserved `_keys` hidden, batched history writes |
-| `fused.readFile(path)` | text |
-| `fused.stat(path)` | `{path, name, is_dir, size, mtime, writable}` |
-| `fused.writeFile(path, content, opts?)` | `expectedMtime` lock (409 → `type: "conflict"`), `create` (409 → `type: "exists"`), read-only → `type: "readonly"` |
-| `fused.rawUrl(path)` | `/api/fs/raw`, Range requests honoured |
-| `fused.env` / `fused.device` / `fused.lite` | `"local"` / `"desktop"` / `true` |
-| `fused.ai.text({prompt, ...})` | **Claude tier only**, via the local `claude` CLI (one `claude -p` per call). Options: `model` (`haiku` default, `sonnet`, `opus`, `fable`, or a `claude-*` id), `systemPrompt`, `effort` (`low` = no thinking, `medium`/`high`/`xhigh`), `onChunk` (streams NDJSON over chunked HTTP, no socket), `abortSignal` (aborting kills the CLI process). `temperature`/`maxTokens`/`topP` dropped with `warnings[]`; `history`/`raw`/`images` → `bad_request`. Result frame identical to fused-render. Errors: `ai_unavailable` (no `claude` binary), `bad_request`, `unavailable`, `ai_error`, `timeout` (600 s), `cancelled` |
-| `fused.ai.models.list()` / `catalog()` | Claude catalog only; `catalog().unsupported` lists the local capabilities |
-| `fused.ai.cancel()` | resolves `false` (cancel Claude calls with `abortSignal`) |
+---
 
-Not supported — touching any of these throws `Error("<name> is not supported on fused-render-lite")` with `err.type === "unsupported"`:
+## 0.2.0
 
-| member | full fused-render role |
-| --- | --- |
-| `fused.ai.image / video / transcribe / embed` | local inference — reject (async) with `type: "unavailable"`, not a sync throw, so `catch` branches keep working |
-| `fused.ai.models.load / download / unload` | local model management — reject `unavailable` |
-| `fused.ai.text` with `provider: "local"` or `"apple"`, or a repo-id/.gguf model | reject `unavailable` |
-| `fused.capture.*` | screen / audio / screenshot |
-| `fused.fileIndex.*` | filesystem index queries |
-| `fused.daemon.*` | folder background daemons |
-| `fused.trackJob`, `fused.watchJob` | job tracking |
-| `fused.uploadFile`, `fused.mkdir` | binary upload, directories |
-| `fused.autoReload` | live reload on file change |
-| `fused.snapshot` | git snapshot resolution |
+| member | status | notes |
+| --- | --- | --- |
+| `fused.runPython(py, params, opts?)` | ✅ | `main(**params)` in the app's own venv; `opts.key` supersession, `opts.signal` |
+| `fused.params.get / getAll / set / onChange` | ✅ | URL-backed, `_keys` reserved, batched history writes |
+| `fused.readFile(path)` | ✅ | text |
+| `fused.stat(path)` | ✅ | `{path, name, is_dir, size, mtime, writable}` |
+| `fused.writeFile(path, content, opts?)` | ✅ | `expectedMtime` → 409 `conflict`; `create` → 409 `exists`; 403 `readonly` |
+| `fused.rawUrl(path)` | ✅ | Range requests honoured |
+| `fused.env` / `fused.device` / `fused.lite` | ✅ | `"local"` / `"desktop"` / `true` |
+| `fused.ai.text({prompt, ...})` | ✅ Claude only | one `claude -p` per call. `model`: `haiku` (default), `sonnet`, `opus`, `fable`, `claude-*`. `systemPrompt`, `effort` (`low` = no thinking, `medium`, `high`, `xhigh`), `onChunk` (NDJSON over chunked HTTP), `abortSignal` (kills the CLI). `temperature`/`maxTokens`/`topP` → `warnings[]`. Errors: `ai_unavailable`, `bad_request`, `unavailable`, `ai_error`, `timeout` 600 s, `cancelled` |
+| `fused.ai.models.list() / catalog()` | ✅ | Claude catalog; `catalog().unsupported` names the local capabilities |
+| `fused.ai.cancel()` | ✅ | resolves `false`; use `abortSignal` |
+| `fused.ai.text` with `history` / `raw` / `images` | ❌ `bad_request` | need a local model |
+| `fused.ai.text` with `provider: "local"` / `"apple"`, repo-id or `.gguf` model | ❌ `unavailable` | no local inference |
+| `fused.ai.image / video / transcribe / embed` | ❌ `unavailable` | async rejection, `catch` branches keep working |
+| `fused.ai.models.load / download / unload` | ❌ `unavailable` | |
+| `fused.capture.*` | ❌ throws | screen / audio / screenshot |
+| `fused.fileIndex.*` | ❌ throws | filesystem index |
+| `fused.daemon.*` | ❌ throws | folder daemons |
+| `fused.trackJob`, `fused.watchJob` | ❌ throws | jobs |
+| `fused.uploadFile`, `fused.mkdir` | ❌ throws | |
+| `fused.autoReload` | ❌ throws | live reload |
+| `fused.snapshot` | ❌ throws | git snapshots |
 
-The non-AI namespaces are Proxies, so `fused.capture.screen` throws on the property read, not only on call. `fused.ai` is a real object: its unsupported verbs reject asynchronously with `unavailable`, matching the fused-render contract pages already handle. An app that needs any of these belongs in full fused-render.
+"throws" = `Error("<name> is not supported on fused-render-lite")`, `err.type === "unsupported"`, on property read for namespaces (Proxy) or on call.
 
-## Server routes
+Server routes: `GET /`, `/open?_file=`, `/render?path=`, `/api/health`, `/api/fs/raw`, `/api/fs/stat`, `/api/open/status`, `/api/ai/runtime`, `/api/ai/catalog`; `POST /api/open`, `/api/drop`, `/api/run`, `/api/fs/write`, `/api/ai` (JSON or chunked NDJSON), `/api/ai/cancel`; other `POST /api/ai/*` → 409 `unavailable`. POSTs need `X-Fused: 1`. 127.0.0.1 only.
 
-`GET /`, `GET /open?_file=`, `GET /render?path=`, `POST /api/open`, `GET /api/open/status`, `POST /api/drop`, `POST /api/run`, `GET /api/fs/raw`, `GET /api/fs/stat`, `POST /api/fs/write`, `GET /api/health`, `POST /api/ai` (JSON, or chunked NDJSON with `stream: true`), `GET /api/ai/runtime`, `GET /api/ai/catalog`, `POST /api/ai/cancel`. Mutating POSTs require `X-Fused: 1`. Binds 127.0.0.1 only.
+Requires the `claude` CLI on the machine for the AI tier (`FUSED_RENDER_LITE_CLAUDE_BIN`, PATH, `~/.claude/local`, `~/.local/bin`, `~/.bun/bin`, Homebrew).
 
-## History
+---
 
-| version | DMG | .app | note |
-| --- | --- | --- | --- |
-| 0.1.0 | 12 MB | 25 MB | first lite build; fused-render's bundled set was ~400 MB installed |
-| 0.2.0 | 12 MB | 25 MB | `fused.ai.text` on the Claude CLI tier, streaming; no local inference |
+## 0.1.0
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.runPython` | ✅ | as above |
+| `fused.params.*` | ✅ | as above |
+| `fused.readFile` / `stat` / `writeFile` / `rawUrl` | ✅ | as above |
+| `fused.env` / `fused.device` / `fused.lite` | ✅ | |
+| `fused.ai.*` (all verbs, `models`, `cancel`) | ❌ throws | whole namespace a Proxy |
+| `fused.capture.*`, `fused.fileIndex.*`, `fused.daemon.*` | ❌ throws | |
+| `fused.trackJob`, `watchJob`, `uploadFile`, `mkdir`, `autoReload`, `snapshot` | ❌ throws | |
+
+Server routes: as 0.2.0 minus every `/api/ai*` route.
+
+---
+
+## Removed from fused-render (never in lite)
+
+Explorer shell (React/Vite), ~50 preview templates and their vendored JS,
+file index, LAN sharing, background daemons, jobs, capture, git snapshots,
+Claude chat sidebar, local/Apple AI runners (mlx, llama.cpp, whisper, image
+and video models), bookmarks, drafts, updater, Windows/Linux/iOS shells,
+bundled data stack (numpy, pandas, pyarrow, duckdb, botocore, fused engine…).
