@@ -13,9 +13,14 @@
  *   fused.uploadFile(path, blob) / fused.mkdir(path) -> Promise<stat>
  *   fused.trackJob(spec) / fused.watchJob(id)  (in-process job rows)
  *   fused.autoReload(false)  no-op; autoReload(true) throws (no live reload here)
+ *   fused.daemon.status() / start() / stop() / restart() / setAutostart(bool)
+ *   fused.daemon.run(params) / call(path, body) / watch(cb)
+ *     A .fused app's own long-running daemon, declared in its pyproject.toml
+ *     ([tool.fused-render.app] daemon = "x.py" | main = "y.py"); fused-render's
+ *     block, copied verbatim (see background_routes.py).
  *
  * Everything else the full fused-render runtime exposes (capture,
- * fileIndex, daemon, snapshot) is NOT
+ * fileIndex, snapshot) is NOT
  * supported: touching it throws "<name> is not supported on Render Lite".
  */
 (function () {
@@ -1240,6 +1245,364 @@
 
 
   // ---- the global ---------------------------------------------------------
+  // Preview flag fused-render's thumbnail renderer stamps onto /render URLs;
+  // read here so the fused.daemon block below is verbatim fused-render's.
+  const IS_THUMBNAIL = ownQuery("_preview") === "1";
+
+  // ---- background apps (fused.daemon, background_routes.py) ---
+  // fused.daemon is the browser control surface for a FOLDER's declared
+  // long-running daemon, not this page's own script — every method sends the
+  // page's own path as `html`, and the server resolves which app folder that
+  // page belongs to, exactly like resolve_py does for runPython. `run` and
+  // `call` both reach the daemon itself, through the SAME stable-origin
+  // /api/engines/<id>/proxy path a template daemon's traffic already rides
+  // (engine_forward is engine-kind-agnostic), using the engine_id a `status()`
+  // call cached — a page never computes that id itself. `run(params)` is the
+  // `main =` convenience: POST /call with `params` as the body, unwrapping
+  // the {ok, result, error, stdout, resolved_py} envelope the shipped worker
+  // answers with. `call(path, body)` is for a `daemon =` folder's own routes,
+  // proxied and handed back raw — a `main =` folder's single route would
+  // just be `call("/call", ...)` minus the unwrap, which is why `call()`
+  // refuses a `main =` folder outright (use `run()`) and `run()` refuses a
+  // `daemon =` folder outright (use `call()`), each naming the folder's
+  // actual declared protocol and the method to use instead. Both bring the
+  // daemon up transparently — on a page's first call, and to re-warm it
+  // after the idle reaper retires it — rather than requiring an explicit
+  // `start()` first: the preview guard below (D507/D508), not a start-first
+  // gate, is what actually stops a card thumbnail or hover peek from
+  // spawning a daemon, and `engine_forward._forward` already heals a
+  // dead-but-running child on any proxied call regardless of which of the
+  // two methods reaches it.
+  //
+  // Run state and autostart are deliberately independent (D511): `stop`
+  // kills the running daemon but never touches the persisted autostart flag
+  // — if it's on, the server's startup hook (or a later `start`/`restart`)
+  // brings it back; if it's off (the default), it stays down until an
+  // explicit `start`. `setAutostart` is the ONLY thing that flips that flag,
+  // and it never starts or stops anything itself.
+  // `_daemonEngineId` is a hash of the FOLDER, so `status()` always resolves one
+  // whether or not the app is running — it names WHICH app, not whether one is
+  // running. `_daemonKnownRunning` is the separate, actually-gating fact
+  // (bring-up reads this, never engine_id's presence, which is always
+  // truthy and so cannot tell "not running" from "running"). `_daemonProtocol`
+  // is the folder's declared bring-up shape from that same status() payload
+  // ("main" | "daemon" | null for a folder with no valid manifest) — it is
+  // what lets `run()`/`call()` catch an author calling the wrong one of the
+  // two for their folder instead of silently 404ing (a `daemon =` folder
+  // under `run()`) or handing back a raw, unwrapped envelope (a `main =`
+  // folder under `call()`).
+  let _daemonEngineId = null;
+  let _daemonKnownRunning = false;
+  let _daemonProtocol = null;
+
+  function _noteDaemonPayload(data, marksRunning) {
+    if (data && data.engine_id) _daemonEngineId = data.engine_id;
+    if (data && "protocol" in data) _daemonProtocol = data.protocol;
+    if (marksRunning !== undefined) {
+      // start()/restart() succeeding means ensure_background returned a live
+      // child (both 502 on any spawn failure, so a 200 here IS "running");
+      // stop() succeeding means the daemon is now definitely down.
+      _daemonKnownRunning = marksRunning;
+    } else if (data && typeof data.running === "boolean") {
+      // status()'s own report of the live-child boolean.
+      _daemonKnownRunning = data.running;
+    }
+  }
+
+  // A page must not START a background daemon merely by being rendered
+  // (D507, fused-render SPEC §46): in fused-render a card thumbnail or hover
+  // peek mounts the entry html live in a sandboxed iframe, stamped with
+  // `_preview=1` on its /render URL. Lite renders no thumbnails today, so
+  // IS_THUMBNAIL is false for every real open — the guard is kept verbatim
+  // so the block stays identical to fused-render's and a future preview
+  // surface gets it for free. `start()`/`restart()`
+  // obviously spawn; `call()` and `run()` are in scope too — both bring the
+  // daemon up transparently when not known running, and even set aside
+  // that, engine_forward.py's `_forward` heals a dead-but-running child back
+  // to life on ANY proxied call, so a preview render that calls either
+  // against an app some other session already started can resurrect its
+  // daemon exactly like `start()` would. `stop()` and `setAutostart()` are
+  // gated the same way, NOT left
+  // open (D508): a card thumbnail mounts `entry_html` live in a sandboxed
+  // iframe with `allow-scripts`, so an app whose init path calls
+  // `fused.daemon.stop()` (or flips autostart) would change a real user's
+  // daemon state just because its card scrolled past or was hovered —
+  // `setAutostart(true)` is worse than the old enable bug this guard exists
+  // for in the first place, because it survives a server restart. `status()`
+  // is the one method deliberately left open (read-only — and the pattern
+  // the rejection below points authors at).
+  function _daemonRejectPreview(method) {
+    return Promise.reject(new Error(
+      `fused.daemon.${method}: refused — this page is rendering as a preview ` +
+      "thumbnail (a card peek or hover, not a real open), and a page must " +
+      "never start a background daemon just by being displayed or hovered. " +
+      "Call fused.daemon.status() on load to read state, and call " +
+      "start()/restart() only from an explicit user action, e.g. a " +
+      "button's click handler."
+    ));
+  }
+
+  function _daemonPost(path, marksRunning, extraBody) {
+    return fetch(path, {
+      method: "POST",
+      headers: callHeaders({ "Content-Type": "application/json", "X-Fused": "1" }),
+      body: JSON.stringify(Object.assign({ html: ownQuery("path") }, extraBody || {})),
+    }).then((res) =>
+      res.json().then((data) => {
+        if (!res.ok) {
+          // A failed start/restart/setAutostart is not a state change either
+          // way — the daemon's actual state is whatever it already was, so
+          // only note the engine_id (still useful for status()), never
+          // marksRunning.
+          _noteDaemonPayload(data, undefined);
+          const err = new Error((data && data.error) || `${path} failed`);
+          throw err;
+        }
+        _noteDaemonPayload(data, marksRunning);
+        return data;
+      })
+    );
+  }
+
+  function daemonStatus() {
+    const html = encodeURIComponent(ownQuery("path") || "");
+    return fetch(`/api/apps/background/status?html=${html}`).then((res) =>
+      res.json().then((data) => {
+        if (!res.ok) {
+          const err = new Error((data && data.error) || "app status failed");
+          throw err;
+        }
+        _noteDaemonPayload(data);
+        return data;
+      })
+    );
+  }
+
+  function daemonStart() {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("start");
+    return _daemonPost("/api/apps/background/start", true);
+  }
+
+  function daemonStop() {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("stop");
+    return _daemonPost("/api/apps/background/stop", false);
+  }
+
+  function daemonRestart() {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("restart");
+    return _daemonPost("/api/apps/background/restart", true);
+  }
+
+  function daemonSetAutostart(autostart) {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("setAutostart");
+    return _daemonPost("/api/apps/background/autostart", undefined,
+                       { autostart: !!autostart });
+  }
+
+  // Shared bring-up-then-POST mechanics behind both `call()` and `run()`:
+  // learn engine_id/protocol/running from one status() fetch when nothing is
+  // cached yet, bring the daemon up when it isn't known running (a page's
+  // first-ever call, or an app the idle reaper retired since the last poll),
+  // then POST to the proxy path and hand back the raw response. Carries NO
+  // protocol check — that is each public method's own job, applied before
+  // delegating here, so that `run()`'s internal use of this helper can never
+  // reject itself against `run()`'s own check.
+  function _daemonProxyPost(path, body) {
+    const doPost = () =>
+      fetch(`/api/engines/${_daemonEngineId}/proxy/${String(path).replace(/^\/+/, "")}`, {
+        method: "POST",
+        headers: callHeaders({ "Content-Type": "application/json", "X-Fused": "1" }),
+        body: JSON.stringify(body || {}),
+      }).then((res) => res.json().then((data) => ({ data, httpOk: res.ok })));
+
+    const ready = _daemonEngineId !== null ? Promise.resolve() : daemonStatus();
+    const bringUp = ready.then(() => (_daemonKnownRunning ? null : daemonStart()));
+    return bringUp.then(() =>
+      doPost().then(({ data, httpOk }) => {
+        if (!httpOk) {
+          const err = new Error((data && data.error) ||
+                                `fused.daemon: proxy call to ${path} failed`);
+          throw err;
+        }
+        return data;
+      })
+    );
+  }
+
+  function _daemonWrongProtocolError(method, declared, wantMethod, wantArgs) {
+    return new Error(
+      `fused.daemon.${method}: refused — this folder declares \`${declared} =\` ` +
+      (declared === "daemon"
+        ? "and serves its own routes; use "
+        : "and the shipped worker serves exactly one route; use ") +
+      `fused.daemon.${wantMethod}(${wantArgs}) instead.`
+    );
+  }
+
+  function daemonCall(path, body) {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("call");
+    // Nothing cached yet — learn the folder's declared protocol from one
+    // status() fetch before deciding, same round trip _daemonProxyPost would
+    // need anyway.
+    const ready = _daemonEngineId !== null ? Promise.resolve() : daemonStatus();
+    return ready.then(() => {
+      if (_daemonProtocol === "main") {
+        return Promise.reject(
+          _daemonWrongProtocolError("call", "main", "run", "params")
+        );
+      }
+      return _daemonProxyPost(path, body);
+    });
+  }
+
+  // Fields that count as "the daemon's state changed" for watch()'s diff.
+  // `running`/`autostart` are the two facts a page's UI actually reflects
+  // (a switch, a checkbox); `pid`/`version` catch a restart that leaves
+  // `running` true throughout (a crash-and-resurrect, or an explicit
+  // restart() from elsewhere) — a page that cached a stale engine call
+  // target wants to know that happened too. `engine_id` is deliberately
+  // excluded: it is a hash of the FOLDER, stable for the page's whole
+  // lifetime, and would never fire on its own.
+  const DAEMON_WATCH_FIELDS = ["running", "autostart", "pid", "version"];
+
+  function _daemonStatusChanged(a, b) {
+    if (!a || !b) return true;
+    for (let i = 0; i < DAEMON_WATCH_FIELDS.length; i++) {
+      const f = DAEMON_WATCH_FIELDS[i];
+      if (a[f] !== b[f]) return true;
+    }
+    return false;
+  }
+
+  function daemonWatch(callback) {
+    if (typeof callback !== "function") {
+      throw new TypeError("fused.daemon.watch: callback must be a function");
+    }
+
+    // Preview guard (D507/D508's rationale, applied to a READ-only method):
+    // watch() is status() underneath, and status() is the one fused.daemon
+    // method a thumbnail may legitimately call — but a live poll loop plus
+    // two page-level listeners have no business running in a sandboxed
+    // preview iframe that gets mounted and unmounted on every hover. Do the
+    // one status() read a thumbnail is allowed, hand it to the caller, and
+    // return an unsubscribe that has nothing to clean up.
+    if (IS_THUMBNAIL) {
+      daemonStatus().then(callback).catch(function () {});
+      return function unsubscribe() {};
+    }
+
+    let last = null;
+    let timer = null;
+
+    function poll() {
+      return daemonStatus().then(function (data) {
+        if (_daemonStatusChanged(last, data)) {
+          last = data;
+          callback(data);
+        } else {
+          last = data;
+        }
+      }).catch(function () {
+        // A failed status() read (offline, server restarting) must not kill
+        // the watch loop or spam the callback with an error it didn't ask
+        // for — skip this tick, the next poll or focus/visibility event
+        // tries again.
+      });
+    }
+
+    // 5s: fast enough that quitting from the tray reads as "immediate" to a
+    // human glancing at a foregrounded tab, slow enough to be free — status()
+    // is a single in-memory dict read plus one Popen.poll() server-side (no
+    // folder walk, no toml parse, see the endpoint's own docstring), and this
+    // only ever runs while the tab is visible in the first place.
+    const POLL_MS = 5000;
+
+    function stopTimer() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function startTimerIfVisible() {
+      stopTimer();
+      if (document.visibilityState === "visible") {
+        timer = setInterval(poll, POLL_MS);
+      }
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        poll();
+      }
+      startTimerIfVisible();
+    }
+
+    function onFocus() {
+      poll();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", onFocus);
+    poll();
+    startTimerIfVisible();
+
+    return function unsubscribe() {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", onFocus);
+      stopTimer();
+    };
+  }
+
+  // `run(params)` is the shipped-worker convenience over the same
+  // `_daemonProxyPost` mechanics `call()` uses: a `main =` daemon speaks
+  // exactly one route, POST /call with the raw params object as the body,
+  // answering the same {ok, result, error, stdout, resolved_py} envelope
+  // runPython does — so `run` unwraps that envelope the way runPython does,
+  // instead of handing back the raw proxy response `call` gives a
+  // `daemon =` author talking to their own routes.
+  function daemonRun(params) {
+    if (IS_THUMBNAIL) return _daemonRejectPreview("run");
+    // Nothing cached yet — learn the folder's declared protocol from one
+    // status() fetch before deciding, same round trip _daemonProxyPost would
+    // need anyway. Bring-up itself (spawning on the first call, re-warming
+    // after the idle reaper retires it) lives entirely in _daemonProxyPost
+    // now — run() adds nothing on top of it besides its own protocol check
+    // and the envelope unwrap `call()` deliberately leaves raw.
+    const ready = _daemonEngineId !== null ? Promise.resolve() : daemonStatus();
+    return ready.then(() => {
+      if (_daemonProtocol === "daemon") {
+        return Promise.reject(
+          _daemonWrongProtocolError("run", "daemon", "call", "path, body")
+        );
+      }
+      return _daemonProxyPost("/call", params || {});
+    }).then((data) => {
+      if (data && data.stdout) console.log("[python]", data.stdout);
+      // (fused-render also feeds data.resolved_py to its auto-reload watcher;
+      // lite has no live reload, so nothing to watch here.)
+      if (!data.ok) {
+        const err = new Error(data.error && data.error.message);
+        err.type = data.error && data.error.type;
+        err.traceback = data.error && data.error.traceback;
+        err.stdout = data.stdout;
+        throw err;
+      }
+      return data.result;
+    });
+  }
+
+  const daemon = {
+    status: daemonStatus,
+    start: daemonStart,
+    stop: daemonStop,
+    restart: daemonRestart,
+    setAutostart: daemonSetAutostart,
+    call: daemonCall,
+    run: daemonRun,
+    watch: daemonWatch,
+  };
+
   window.fused = {
     env: "local",
     device: "desktop",
@@ -1257,7 +1620,7 @@
     watchJob,
     autoReload,
     snapshot: unsupportedFn("fused.snapshot"),
-    daemon: unsupportedNamespace("fused.daemon"),
+    daemon,
     ai,
     capture: unsupportedNamespace("fused.capture"),
     fileIndex: unsupportedNamespace("fused.fileIndex"),

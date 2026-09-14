@@ -27,13 +27,36 @@ The page runtime exposes these `fused.*` members:
 | `fused.uploadFile(path, blob)` / `fused.mkdir(path)` | binary save, directories |
 | `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
 | `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws (no live reload) |
+| `fused.daemon.status / start / stop / restart / setAutostart / run / call / watch` | the app's own long-running daemon, fused-render's implementation copied in (see Background daemons below) |
 
 Every other member the full fused-render runtime has (`capture`,
-`fileIndex`, `daemon`, `snapshot`)
+`fileIndex`, `snapshot`)
 is **not supported**. There are no stubs: calling one, or reading any
-property of `fused.capture` / `fused.fileIndex` / `fused.daemon`,
-throws `<name> is not supported on fused-render-lite` and logs it to the
+property of `fused.capture` / `fused.fileIndex`,
+throws `<name> is not supported on Render Lite` and logs it to the
 console. An app that needs those belongs in full fused-render.
+
+## Background daemons (`fused.daemon`)
+
+Same contract as fused-render. An app opts in with a table in its own
+`pyproject.toml`, declaring exactly one of:
+
+```toml
+[tool.fused-render.app]
+main = "compute.py"      # the shipped worker calls main(**params); fused.daemon.run(params)
+                         # warm process, re-imported on edit, reaped after 15 min idle
+# or
+daemon = "daemon.py"     # your own HTTP server; fused.daemon.call(path, body)
+                         # resident until stop(); must answer GET /ping?t=<token> with {"ok": true, "version": <--version>}
+```
+
+The daemon runs on the app's own venv (the one `/api/open` builds), one
+instance per app, killed when Render Lite quits. Optional keys:
+`idle_timeout_s` (0 = resident), `retry_post = true` (POSTs are idempotent,
+may be retried after a heal-restart). `setAutostart(true)` brings it back at
+every launch; `start()` alone never does. State lives under
+`~/.fused-render-lite/engines/<engine_id>/` (`daemon.log`) and
+`~/.fused-render-lite/background_apps.json` (autostart list).
 
 ## AI
 

@@ -20,6 +20,13 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/health                             {ok, version, pid}
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
+  fused.daemon (background_routes.py, copied from fused-render):
+  GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
+  POST /api/apps/background/start|stop|restart {html}     /autostart {html, autostart}
+  GET  /api/apps/background/running            {running: {folder: true}}
+  GET  /api/engines/running                    {engines: [...]}
+  POST /api/engines/<id>/stop
+  ANY  /api/engines/<id>/proxy/<path>          forwarded to that daemon (POST guarded)
   /api/ai, /api/ai/*        fused-render's own AI routers (server/ai_relay.py, server/ai_routes.py),
                             copied verbatim and mounted through _web.APIRouter
 
@@ -41,7 +48,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, appfile, env, showcase, jobs, paths
+from fused_render_lite import __version__, appfile, background_apps, background_routes, engine_host, env, showcase, jobs, paths
 from fused_render_lite._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_lite.routes import ai_relay, ai_routes
 
@@ -149,6 +156,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._showcase_preview(q)
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
+            if route == "/api/apps/background/status":
+                return background_routes.status(self, q)
+            if route == "/api/apps/background/running":
+                return background_routes.running(self)
+            if route == "/api/engines/running":
+                return background_routes.engines_running(self)
+            m = background_routes.PROXY_RE.match(route)
+            if m:  # proxied GET/HEAD: read-only, unguarded like every other GET
+                return background_routes.proxy(self, m.group(1), m.group(2), self.command, b"")
             if self._dispatch("GET", route, q):
                 return
             self._error("not found", 404)
@@ -180,6 +196,16 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/jobs/([^/]+)/(cancel|dismiss)$", route)
             if m:
                 return self._jobs_action(urllib.parse.unquote(m.group(1)), m.group(2))
+            if route.startswith("/api/apps/background/"):
+                return self._background(route[len("/api/apps/background/"):])
+            m = background_routes.STOP_RE.match(route)
+            if m:
+                return self._guarded() and background_routes.engine_stop(self, m.group(1))
+            m = background_routes.PROXY_RE.match(route)
+            if m:
+                if not self._guarded():
+                    return
+                return background_routes.proxy(self, m.group(1), m.group(2), "POST", self._body())
             if self._dispatch("POST", route, {}):
                 return
             self._error("not found", 404)
@@ -329,6 +355,21 @@ class Handler(BaseHTTPRequestHandler):
             row = jobs.request_cancel(job_id)
             return self._json(row) if row else self._error("no such job", 404)
         return self._json({"dismissed": jobs.dismiss(job_id)})
+
+    # ---- fused.daemon (background_routes.py) --------------------------------
+
+    def _background(self, action: str) -> None:
+        fn = {"start": background_routes.start, "stop": background_routes.stop,
+              "restart": background_routes.restart,
+              "autostart": background_routes.autostart}.get(action)
+        if fn is None:
+            return self._error("not found", 404)
+        if not self._guarded():
+            return
+        body = self._json_body()
+        if body is None:
+            return self._error("body must be a JSON object")
+        fn(self, body)
 
     # ---- copied fused-render routers (AI) ----------------------------------
 
@@ -600,14 +641,28 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     return srv
 
 
+#: Set when the server starts quitting, so `background_apps.resurrect_autostart`
+#: stops bringing daemons up (and tears down one that finished spawning after
+#: `engine_host.stop_all` already ran — see its docstring).
+_bg_shutdown = threading.Event()
+
+
+def _start_background_apps() -> None:
+    _bg_shutdown.clear()
+    threading.Thread(target=background_apps.resurrect_autostart, args=(_bg_shutdown,),
+                     name="background-apps-resurrect", daemon=True).start()
+
+
 def start_ai() -> None:
     """The AI subsystem's background threads, as fused-render wires them at
     startup: the warm Claude process, the idle-model reaper, hardware and
-    Hub-metadata refresh. Each is best-effort."""
+    Hub-metadata refresh — plus the background-apps autostart resurrection
+    (fused.daemon). Each is best-effort."""
     for name, fn in (("prewarm_ai", lambda: call_on_loop(ai_relay.prewarm_ai, None)),
                      ("reaper", ai_routes.supervisor.start_reaper),
                      ("hardware", ai_routes.supervisor.start_hardware_refresh),
-                     ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh)):
+                     ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
+                     ("background-apps", _start_background_apps)):
         try:
             fn()
         except Exception:  # noqa: BLE001
@@ -615,8 +670,13 @@ def start_ai() -> None:
 
 
 def stop_ai() -> None:
-    """Evict resident models (kills their worker processes) and the warm
-    Claude instance. Called on quit."""
+    """Evict resident models (kills their worker processes), the warm Claude
+    instance, and every background-app daemon (fused.daemon). Called on quit."""
+    _bg_shutdown.set()
+    try:
+        engine_host.stop_all()
+    except Exception:  # noqa: BLE001
+        logger.exception("engine_host.stop_all failed")
     try:
         ai_routes.supervisor.unload_all()
     except Exception:  # noqa: BLE001

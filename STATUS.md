@@ -45,6 +45,28 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.7.0
+
+`fused.daemon` supported — fused-render's background-apps feature copied in
+(`background_apps.py`, `engine_host.py`, `engine_worker.py`,
+`background_app.py`, runtime.js block verbatim). Lite-specific: routes ported
+from FastAPI onto the stdlib `Handler` (`background_routes.py`), the proxy is
+synchronous (`engine_forward.py`: same pool / at-most-once / 504-never-heals /
+heal-then-retry-once rules, minus the browser-hangup 204 path), the daemon
+runs on the venv `env.py` built for the app, macOS spawns through a
+posix_spawn-safe bootstrap (no fork; setsid + chdir in the child), and the
+cache lives under `~/.fused-render-lite/engines/<id>/`.
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.daemon.status / start / stop / restart / setAutostart` | ✅ new | `[tool.fused-render.app]` manifest in the app's pyproject.toml |
+| `fused.daemon.run(params)` | ✅ new | `main =` apps; warm `engine_worker.py`, 60 s call budget, reaped after 15 min idle |
+| `fused.daemon.call(path, body)` | ✅ new | `daemon =` apps' own HTTP routes, proxied |
+| `fused.daemon.watch(cb)` | ✅ new | 5 s poll while visible |
+
+Server routes added: `GET/POST /api/apps/background/{status,start,stop,restart,autostart,running}`,
+`GET /api/engines/running`, `POST /api/engines/<id>/stop`, `ANY /api/engines/<id>/proxy/<path>`.
+
 ## 0.6.1
 
 App renamed to **Render Lite**: `RenderLite.app`, `RenderLite-<version>.dmg`, menu-bar title,
@@ -93,7 +115,7 @@ a running job, page-driven calls in headless Chrome.
 | `fused.ai.embed` | ✅ new | direct; mlx-embeddings / onnx; `kind: query\|document`, `paths` on dual encoders |
 | `fused.ai.models.list / catalog / load / download / unload`, `fused.ai.cancel(capability)` | ✅ new | fused-render's contract |
 | `fused.ai.text` / `transcribe` with `provider: "apple"` / `afm-*` ids | ⚠️ checkout only | fused-render's host compiles the Swift helper on demand when Xcode with the macOS 26 SDK is present (verified here: `afm-2025` answered). The DMG ships without the helper → `unavailable` |
-| `fused.capture.*`, `fused.fileIndex.*`, `fused.daemon.*`, `fused.snapshot`, `autoReload(true)` | ❌ throws | |
+| `fused.capture.*`, `fused.fileIndex.*`, `fused.snapshot`, `autoReload(true)` | ❌ throws | |
 
 Disk on first use (this Mac, measured): mlx-text runner venv 581 MB + the default
 0.7 GB text model; other capabilities pull their own runner venv (200 MB–4 GB)

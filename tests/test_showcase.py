@@ -8,8 +8,7 @@ import pytest
 from fused_render_lite import appfile, container, env, showcase
 
 # Every member a showcase app must NOT call: lite throws on these.
-UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.daemon", "fused.snapshot",
-               "autoReload(true")
+UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.snapshot", "autoReload(true")
 
 
 @pytest.fixture(autouse=True)

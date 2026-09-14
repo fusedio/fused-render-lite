@@ -187,6 +187,7 @@ def test_runtime_no_longer_throws_for_030_members():
     js = open(os.path.join(os.path.dirname(env.__file__), "static", "runtime.js")).read()
     for name in ("uploadFile", "mkdir", "trackJob", "watchJob", "autoReload"):
         assert f'unsupportedFn("fused.{name}")' not in js
+    assert 'unsupportedNamespace("fused.daemon")' not in js  # 0.7.0: fused.daemon supported
     assert 'throw unsupported("fused.autoReload(true)")' in js
 
 
