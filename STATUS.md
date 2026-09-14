@@ -46,6 +46,11 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.7.1
+
+Rebuild of 0.7.0 from main head — confirms the DMG carries the native-window /
+menu-bar work (PR #2) alongside `fused.daemon`. No code change.
+
 ## 0.7.0
 
 `fused.daemon` supported — fused-render's background-apps feature copied in
