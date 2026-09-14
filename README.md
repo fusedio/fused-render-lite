@@ -79,9 +79,13 @@ shared "legacy" venv holding fused-render's old bundled set (numpy, pandas,
 requests, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3), also built
 on first use, so older `.fused` exports keep working.
 
-`uv` is looked for at `FUSED_RENDER_LITE_UV`, next to the app, on `PATH`,
-and failing those is downloaded once (pinned version, sha256-verified) into
-`~/.fused-render-lite/bin/`.
+`uv` ships inside the app (`Contents/Resources/bin/uv`, copied from the build
+host exactly as fused-render does). Running from source, it is looked for at
+`FUSED_RENDER_LITE_UV`, beside the interpreter, in `~/.fused-render-lite/bin/`
+and on `PATH` (a uv older than 0.8 is skipped), and failing those is downloaded
+once (pinned version, sha256-verified). The Apple-Intelligence helper
+(`fused-apple-ai`) is compiled and bundled when the build host has the macOS 26
+SDK; below that the apple tier reports itself unavailable.
 
 Version, DMG/app size and the full supported/unsupported API table live in
 [STATUS.md](STATUS.md).
@@ -109,11 +113,16 @@ keychain profile) additionally notarizes and staples.
 
 ### Release pipeline (GitHub Actions)
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, the same flow as
-fusedio/fused-render: an ephemeral keychain gets the Developer ID cert and an
-App Store Connect API key, `build_dmg.sh` signs + notarizes + staples, the
-ticket is verified, and the DMG lands on the GitHub Release. It needs these
-repository secrets (copy them from fusedio/fused-render):
+Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
+macOS release job step for step (no S3/CloudFront, update manifest or Homebrew
+bump): `prepare-release` creates the GitHub Release, then on `macos-26` an
+ephemeral keychain gets the Developer ID cert and an App Store Connect API key,
+`build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified,
+and the DMG lands on the Release. To rebuild an existing tag:
+`gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
+tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
+packaging files change. Signing needs these repository secrets (values are
+write-only on GitHub; re-enter them from the originals):
 
 | secret | what |
 | --- | --- |
@@ -124,7 +133,7 @@ repository secrets (copy them from fusedio/fused-render):
 | `NOTARY_API_KEY_P8` | App Store Connect API key (`.p8` contents) |
 | `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID` | its key id and issuer id |
 
-Without them the workflow still runs and publishes an ad-hoc-signed DMG.
+Without them the workflow still runs and publishes an ad-hoc-signed DMG (lite-only fallback).
 
 ## Layout
 

@@ -1,41 +1,96 @@
 name: release
 
+# Mirrors fusedio/fused-render's release.yml, macOS job only (no S3/CloudFront,
+# update manifest, Windows/Linux builds or Homebrew bump). Same shape:
+# prepare-release creates the GitHub Release, the macOS job builds, signs,
+# notarizes and staples the DMG on an ephemeral keychain, then attaches it.
+
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and attach to (e.g. v0.2.0)"
+        description: "Tag to release (created at the current commit if it doesn't exist yet). To rebuild an existing tag run with --ref <tag>."
         required: true
 
-permissions:
-  contents: write
-
 jobs:
-  dmg:
-    runs-on: macos-14
-    env:
-      NOTARY_PROFILE: ci-notary
-      KEYCHAIN_PATH: ${{ github.workspace }}/ci-signing.keychain-db
+  prepare-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      # actions/setup-python installs a python.org-style framework build on
-      # macOS arm64, which is exactly what py2app needs (scripts/build_dmg.sh).
+          fetch-depth: 0 # previous-tag lookup needs all tags
+
+      - name: Resolve release tag
+        id: resolve
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+            RUN_SHA="$(git rev-parse "${{ github.sha }}^{commit}")"
+            if [ "$TAG_SHA" != "$RUN_SHA" ]; then
+              echo "::error::tag $TAG points at $TAG_SHA but this run builds $RUN_SHA — refusing to publish mismatched artifacts"
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, reusing it."
+            exit 0
+          fi
+          PREV_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n1 || true)"
+          gh release create "$TAG" --target "${{ github.sha }}" \
+            --title "FusedRenderLite $TAG" \
+            --generate-notes ${PREV_TAG:+--notes-start-tag "$PREV_TAG"}
+
+  build-sign-notarize-release:
+    needs: prepare-release
+    # macos-26: build_dmg.sh compiles the apple tier helper against the macOS 26
+    # SDK, and setup-python installs the python.org-style framework 3.12 that
+    # py2app bundles (an old deployment target, so the DMG runs on older macOS).
+    runs-on: macos-26
+    permissions:
+      contents: write # needed to attach the DMG to the GitHub Release
+    env:
+      RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
+      KEYCHAIN_PATH: ${{ github.workspace }}/ci-signing.keychain-db
+      NOTARY_PROFILE: ci-notary
+    steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      # Signing + notarization, as fusedio/fused-render does it: an ephemeral
-      # keychain holds the Developer ID cert and the App Store Connect API key
-      # for notarytool; both die with the runner. Requires the repo secrets
-      # CODESIGN_CERT_P12 (base64 .p12), CODESIGN_CERT_PASSWORD, CODESIGN_IDENTITY
-      # (SHA-1 of the Developer ID Application cert), KEYCHAIN_PASSWORD,
-      # NOTARY_API_KEY_P8, NOTARY_API_KEY_ID, NOTARY_API_ISSUER_ID. Without them
-      # the build is ad-hoc signed and not notarized (see README).
-      - name: Import signing cert + notary credentials (skipped when no secrets)
+      - name: Select an Xcode with the macOS 26 SDK (apple tier helper)
+        run: |
+          set -euo pipefail
+          XCODE="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -n "$XCODE" ]]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+
+      # build_dmg.sh copies the host's uv INTO the bundle: the app ships no
+      # venv/ensurepip/pip, so every environment it builds is `uv sync`.
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      # Requires the repo secrets CODESIGN_CERT_P12 (base64 .p12),
+      # CODESIGN_CERT_PASSWORD, CODESIGN_IDENTITY (SHA-1 of the Developer ID
+      # Application cert), KEYCHAIN_PASSWORD, NOTARY_API_KEY_P8, NOTARY_API_KEY_ID,
+      # NOTARY_API_ISSUER_ID. Without them the build is ad-hoc signed and not
+      # notarized (lite-only fallback; main requires them).
+      - name: Import signing cert + notary credentials into ephemeral keychain
         env:
           CODESIGN_CERT_P12: ${{ secrets.CODESIGN_CERT_P12 }}
           CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
@@ -49,25 +104,30 @@ jobs:
             echo "no signing secrets configured -> ad-hoc build"
             exit 0
           fi
-          echo "$CODESIGN_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          CERT_PATH="$RUNNER_TEMP/codesign-cert.p12"
+          echo "$CODESIGN_CERT_P12" | base64 --decode -o "$CERT_PATH"
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 14400 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" -P "$CODESIGN_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CODESIGN_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
-          echo "$NOTARY_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+
+          API_KEY_PATH="$RUNNER_TEMP/notary-api-key.p8"
+          printf '%s' "$NOTARY_API_KEY_P8" > "$API_KEY_PATH"
           xcrun notarytool store-credentials "$NOTARY_PROFILE" \
-            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" \
-            --issuer "$NOTARY_API_ISSUER_ID" --keychain "$KEYCHAIN_PATH"
-          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12"
+            --key "$API_KEY_PATH" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID" \
+            --keychain "$KEYCHAIN_PATH"
+          rm -f "$API_KEY_PATH"
+
+          rm -f "$CERT_PATH"
           echo "FUSED_RENDER_CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "FUSED_RENDER_NOTARY_PROFILE=$NOTARY_PROFILE" >> "$GITHUB_ENV"
 
       - name: Build, sign, notarize, staple DMG
         env:
-          # Ad-hoc unless signing secrets are configured (then Developer ID +
-          # hardened runtime + notarize + staple, via build_dmg.sh).
           FUSED_RENDER_CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: bash scripts/build_dmg.sh
 
@@ -86,11 +146,7 @@ jobs:
             echo "not notarized (no signing secrets) — ad-hoc build"
           fi
 
-      - name: Attach to GitHub Release
+      - name: Upload DMG + wheel to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
-          gh release upload "$TAG" dist/*.dmg dist/*.whl --clobber
+        run: gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.whl --clobber

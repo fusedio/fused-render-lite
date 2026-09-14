@@ -3,7 +3,14 @@
 #
 #   framework python -> wheel -> build venv (wheel[app] + py2app + dmgbuild)
 #   -> icon -> py2app -> prune -> Contents/lib symlink -> sanity probes
-#   -> [optional: bundle uv] -> codesign -> dmgbuild -> [notarize]
+#   -> bundle uv -> bundle the apple tier helper -> minos floor check
+#   -> codesign -> dmgbuild -> [notarize] -> hygiene
+#
+# Same pipeline as fused-render's scripts/build_dmg.sh, step for step, minus
+# what lite does not ship (rclone, the fused CLI, staged packages). The one
+# deliberate difference: signing defaults to ad-hoc unless an identity is given
+# or FUSED_RENDER_SIGN=1 asks for keychain auto-detection (main always
+# auto-detects; that prompts on a dev keychain). CI always passes the identity.
 #
 # The Python packaging mirrors fused-render's build_dmg.sh exactly: py2app
 # ships a REAL interpreter at Contents/MacOS/python (sys.executable in the
@@ -16,8 +23,9 @@
 #
 # Env:
 #   FUSED_RENDER_FRAMEWORK_PYTHON  a framework-build python3 (py2app needs one)
-#   FUSED_RENDER_BUNDLE_UV=1       copy the host's uv into Contents/Resources/bin
-#                                  (default: not bundled; env.py downloads it on first use)
+#   FUSED_RENDER_APPLE_HELPER_SRC  prebuilt fused-apple-ai (default: built here when
+#                                  the selected Xcode has the macOS 26 SDK)
+#   FUSED_RENDER_MACOS_FLOOR       oldest macOS the bundle may require (default 14.0)
 #   FUSED_RENDER_SIGN=1               Developer ID signing (auto-detect identity); default is ad-hoc
 #   FUSED_RENDER_CODESIGN_IDENTITY  explicit identity ("-" = ad-hoc)
 #   FUSED_RENDER_SKIP_CODESIGN=1   no signing at all (measurement builds)
@@ -26,7 +34,15 @@ set -euo pipefail
 
 _build_failed() {
   local status=$?
-  echo "FATAL: build_dmg.sh failed at line ${BASH_LINENO[0]:-?} (exit $status): ${BASH_COMMAND}" >&2
+  echo "" >&2
+  echo "FATAL: build_dmg.sh failed at line ${BASH_LINENO[0]:-?} (exit $status)" >&2
+  echo "       command: ${BASH_COMMAND}" >&2
+  if [[ $status -gt 128 ]]; then
+    echo "       exit > 128 means KILLED BY SIGNAL $((status - 128)) — most likely" >&2
+    echo "       the OS reclaiming memory, not a bug in the command itself." >&2
+  fi
+  echo "       disk:" >&2
+  df -h "${BUILD_DIR:-$PWD}" >&2 2>/dev/null || true
   exit "$status"
 }
 trap _build_failed ERR
@@ -81,16 +97,21 @@ fi
 echo "    python: $FRAMEWORK_PYTHON ($("$FRAMEWORK_PYTHON" --version))"
 
 # --- 2. build venv + wheel -------------------------------------------------
-echo "==> build venv"
-rm -rf "$BUILD_VENV"
-"$FRAMEWORK_PYTHON" -m venv "$BUILD_VENV"
-"$BUILD_VENV/bin/pip" install --quiet --upgrade pip build
+if [[ ! -x "$BUILD_VENV/bin/python" ]]; then
+  echo "==> creating build venv"
+  "$FRAMEWORK_PYTHON" -m venv "$BUILD_VENV"
+fi
+"$BUILD_VENV/bin/pip" install --quiet --upgrade pip
 echo "==> building wheel"
-rm -rf "$DIST_DIR"/fused_render_lite-*.whl
-"$BUILD_VENV/bin/python" -m build --wheel --outdir "$DIST_DIR" "$REPO_ROOT" >/dev/null
-WHEEL_PATH="$(ls -t "$DIST_DIR"/fused_render_lite-*.whl | head -1)"
-echo "==> installing ${WHEEL_PATH##*/}[app] + py2app + dmgbuild + pillow"
+rm -f "$DIST_DIR"/*.whl
+"$BUILD_VENV/bin/pip" install --quiet --upgrade build
+"$BUILD_VENV/bin/python" -m build --quiet --wheel --outdir "$DIST_DIR" "$REPO_ROOT"
+WHEEL_PATH="$(ls "$DIST_DIR"/*.whl)"
+echo "==> installing ${WHEEL_PATH##*/} [app] + py2app + dmgbuild + pillow into the build venv"
 "$BUILD_VENV/bin/pip" install --quiet "${WHEEL_PATH}[app]" py2app dmgbuild pillow
+# The build venv is reused across builds; make sure THIS wheel's code is what
+# py2app copies, not a cached earlier install of the same version number.
+"$BUILD_VENV/bin/pip" install --quiet --force-reinstall --no-deps --no-cache-dir "${WHEEL_PATH}"
 
 # --- 3. icon -------------------------------------------------------------
 echo "==> generating app icon"
@@ -255,13 +276,106 @@ for STDLIB_WHO in bundled venv; do
 done
 rm -rf "$BUILD_DIR/stdlib-venv" "$STDLIB_CHECK"
 
-# --- 4b. uv (optional) ------------------------------------------------------
-if [[ "${FUSED_RENDER_BUNDLE_UV:-}" == "1" ]]; then
-  UV_SRC="$(command -v uv || true)"
-  [[ -n "$UV_SRC" ]] || { echo "FATAL: FUSED_RENDER_BUNDLE_UV=1 but uv not on PATH" >&2; exit 1; }
-  mkdir -p "$APP_DIR/Contents/Resources/bin"
-  cp "$UV_SRC" "$APP_DIR/Contents/Resources/bin/uv"
-  echo "==> bundled uv $("$APP_DIR/Contents/Resources/bin/uv" --version)"
+# --- 4c. Mach-O-as-.py check (py2app mis-copies a bare C extension as .py) ----
+echo "==> bundle sanity: Mach-O-as-.py check"
+APP_PYLIB="$APP_DIR/Contents/Resources/lib/python3.12"
+BAD_PY=""
+while IFS= read -r -d '' f; do
+  BAD_PY+="$f"$'\n'
+done < <(
+  find "$APP_PYLIB" -name '*.py' -size +1M -exec sh -c '
+    for f do
+      case "$(head -c4 "$f" | xxd -p)" in
+        cffaedfe|cafebabe|feedfacf) printf "%s\0" "$f" ;;
+      esac
+    done
+  ' _ {} +
+)
+if [[ -n "$BAD_PY" ]]; then
+  echo "FATAL: Mach-O binary shipped as .py (would shadow the real extension):" >&2
+  echo "$BAD_PY" >&2
+  exit 1
+fi
+
+# --- 4d. bundle uv (as fused-render does) ----------------------------------
+# NOT a convenience: the bundle has no pip/ensurepip, so every environment the
+# app builds (app pyproject, legacy set, AI runners) is `uv sync`. env.uv_bin
+# looks here first; the download path is only the from-source fallback.
+echo "==> bundling uv"
+UV_SRC="$(command -v uv || true)"
+if [[ -z "$UV_SRC" ]]; then
+  echo "FATAL: uv not found on PATH, but the bundle needs it: the app cannot build" >&2
+  echo "       a venv without it (no venv/ensurepip/pip in this bundle)." >&2
+  echo "       Install uv (https://docs.astral.sh/uv/) and re-run." >&2
+  exit 1
+fi
+UV_DEST="$APP_DIR/Contents/Resources/bin/uv"
+mkdir -p "$(dirname "$UV_DEST")"
+cp "$UV_SRC" "$UV_DEST"
+chmod +x "$UV_DEST"
+UV_SMOKE_OUT="$("$UV_DEST" --version || true)"
+if ! echo "$UV_SMOKE_OUT" | grep -q "^uv "; then
+  echo "FATAL: bundled uv failed to report its version:" >&2
+  echo "$UV_SMOKE_OUT" >&2
+  exit 1
+fi
+echo "    $UV_SMOKE_OUT"
+
+# --- 4e. the apple tier's Swift helper (fused_render_lite/ai/apple/) ---------
+# Lands in Contents/MacOS beside the interpreter, where ai/apple/host.py looks.
+echo "==> bundling the apple tier helper"
+APPLE_HELPER_DEST="$APP_DIR/Contents/MacOS/fused-apple-ai"
+APPLE_HELPER_SRC="${FUSED_RENDER_APPLE_HELPER_SRC:-}"
+if [[ -z "$APPLE_HELPER_SRC" ]]; then
+  APPLE_SDK_MAJOR="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null | cut -d. -f1 || echo 0)"
+  if [[ "${APPLE_SDK_MAJOR:-0}" -ge 26 ]]; then
+    APPLE_HELPER_SRC="$BUILD_DIR/fused-apple-ai"
+    bash "$REPO_ROOT/scripts/build_apple_helper.sh" "$APPLE_HELPER_SRC"
+  fi
+fi
+if [[ -n "$APPLE_HELPER_SRC" && -f "$APPLE_HELPER_SRC" ]]; then
+  cp "$APPLE_HELPER_SRC" "$APPLE_HELPER_DEST"
+  chmod +x "$APPLE_HELPER_DEST"
+  echo "    $(file -b "$APPLE_HELPER_DEST" | cut -c1-80)"
+elif [[ -n "${FUSED_RENDER_CODESIGN_IDENTITY:-}" && "${FUSED_RENDER_CODESIGN_IDENTITY}" != "-" ]]; then
+  echo "FATAL: a release build needs the apple tier helper; select an Xcode 26 (xcode-select -s)" >&2
+  echo "       or set FUSED_RENDER_APPLE_HELPER_SRC to a binary built by scripts/build_apple_helper.sh" >&2
+  exit 1
+else
+  echo "    skipped: no prebuilt helper and no macOS 26 SDK here (the apple tier will report itself unavailable)"
+fi
+
+# --- 4f. every Mach-O must load on the oldest macOS the bundle claims ---------
+# A per-OS Homebrew python bottle or a too-new wheel tag shows up here, not on
+# a user's older Mac. The helper is exempt: it targets macOS 26 by design and
+# host.py reports the tier unavailable below that.
+MINOS_FLOOR="${FUSED_RENDER_MACOS_FLOOR:-14.0}"
+MINOS_EXEMPT=("Contents/MacOS/fused-apple-ai")
+echo "==> bundle sanity: no Mach-O requires a macOS newer than ${MINOS_FLOOR}"
+for rel in "${MINOS_EXEMPT[@]}"; do
+  if [[ -f "$APP_DIR/$rel" ]]; then
+    v="$(otool -l "$APP_DIR/$rel" 2>/dev/null | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; exit}')"
+    echo "    exempt: $rel (minos ${v:-?})"
+  fi
+done
+MINOS_REPORT="$(find "$APP_DIR" -type f \( -name '*.so' -o -name '*.dylib' -o -perm -u+x \) \
+    ! -path "$APP_DIR/Contents/MacOS/fused-apple-ai" -print0 \
+  | xargs -0 -n 64 sh -c 'for f do
+      case "$(head -c 4 "$f" | od -An -tx1 | tr -d " \n")" in
+        cffaedfe|cafebabe|feedfacf) ;;
+        *) continue ;;
+      esac
+      v="$(otool -l "$f" 2>/dev/null | awk "/LC_BUILD_VERSION/{b=1} b&&/minos/{print \$2; exit} /LC_VERSION_MIN_MACOSX/{m=1} m&&/version/{print \$2; exit}")"
+      [ -n "$v" ] && printf "%s %s\n" "$v" "$f"
+    done' _ | sort -t. -k1,1n -k2,2n | tail -5)"
+MINOS_MAX="$(echo "$MINOS_REPORT" | tail -1 | cut -d" " -f1)"
+echo "    highest minos in the bundle: ${MINOS_MAX:-none} (floor ${MINOS_FLOOR})"
+if [[ -n "$MINOS_MAX" ]] && [[ "$(printf '%s\n%s\n' "$MINOS_FLOOR" "$MINOS_MAX" | sort -t. -k1,1n -k2,2n | tail -1)" != "$MINOS_FLOOR" ]]; then
+  echo "FATAL: the bundle carries code that will not load below macOS ${MINOS_MAX}:" >&2
+  echo "$MINOS_REPORT" | sed "s|$APP_DIR/||; s|^|       |" >&2
+  echo "       Either the interpreter is a per-OS bottle (see step 1) or pip picked a newer" >&2
+  echo "       wheel tag on this host. Fix the source, do not raise the floor." >&2
+  exit 1
 fi
 
 echo "==> app size: $(du -sh "$APP_DIR" | cut -f1)"
@@ -333,7 +447,16 @@ rm -f "$DMG_PATH"
 "$BUILD_VENV/bin/dmgbuild" -s "$SETTINGS" -D app="$APP_DIR" "$APP_NAME" "$DMG_PATH"
 
 if [[ -n "${FUSED_RENDER_NOTARY_PROFILE:-}" ]]; then
-  [[ -n "$SIGN_IDENTITY" ]] || { echo "FATAL: notarization needs a Developer ID signature" >&2; exit 1; }
+  if [[ "${FUSED_RENDER_SKIP_CODESIGN:-}" == "1" ]]; then
+    echo "FATAL: FUSED_RENDER_NOTARY_PROFILE and FUSED_RENDER_SKIP_CODESIGN are both set —" >&2
+    echo "       the app is completely unsigned; there is nothing to notarize." >&2
+    exit 1
+  fi
+  if [[ -z "$SIGN_IDENTITY" ]]; then
+    echo "FATAL: FUSED_RENDER_NOTARY_PROFILE is set but the app was signed ad-hoc." >&2
+    echo "       Notarization requires a Developer ID signature — configure FUSED_RENDER_CODESIGN_IDENTITY." >&2
+    exit 1
+  fi
   echo "==> notarizing $DMG_PATH (profile: $FUSED_RENDER_NOTARY_PROFILE)"
   NOTARY_KC=()
   [[ -n "${FUSED_RENDER_CODESIGN_KEYCHAIN:-}" ]] && NOTARY_KC=(--keychain "$FUSED_RENDER_CODESIGN_KEYCHAIN")
@@ -344,6 +467,11 @@ if [[ -n "${FUSED_RENDER_NOTARY_PROFILE:-}" ]]; then
   echo "==> stapling notarization ticket"
   xcrun stapler staple "$DMG_PATH"
   xcrun stapler validate "$DMG_PATH"
+else
+  echo "==> skipping notarization (FUSED_RENDER_NOTARY_PROFILE unset)"
 fi
+
+# --- 7. hygiene: the .app is sealed in the DMG; drop the loose copies ---------
+rm -rf "$APP_DIR" "$ICONSET_DIR"
 
 echo "==> done: $DMG_PATH ($(du -h "$DMG_PATH" | cut -f1))"
