@@ -8,15 +8,22 @@ import pytest
 
 from fused_render_lite import env
 
-_REAL_MANAGED_PYTHON = env.managed_python
+_REAL = {name: getattr(env, name) for name in ("managed_python", "is_ready", "interpreter_for")}
 
 
 @pytest.fixture(autouse=True)
 def stdlib_python(monkeypatch):
-    # Apps without a pyproject run on the managed 3.12; in tests use this
-    # interpreter so nothing is downloaded.
+    # Every app would otherwise get a venv built by uv (its own, or the shared
+    # legacy set). Unit tests run the .py on this interpreter instead; the
+    # integration tests below restore the real functions.
     monkeypatch.setattr(env, "managed_python", lambda log=None: sys.executable)
-    monkeypatch.setattr(env, "_bootstrap_ready", lambda: True)
+    monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
+    monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
+
+
+def _real_env(monkeypatch):
+    for name, fn in _REAL.items():
+        monkeypatch.setattr(env, name, fn)
 
 
 def q(**kw):
@@ -114,7 +121,7 @@ def test_unsupported_apis_throw():
 def test_pyproject_builds_a_venv(client, tmp_path, lite_home, monkeypatch):
     from fused_render_lite import container
 
-    monkeypatch.setattr(env, "managed_python", _REAL_MANAGED_PYTHON)  # uv finds/downloads 3.12
+    _real_env(monkeypatch)  # uv finds/downloads 3.12 and builds the venv
     entry = b'<html><head><meta name="fused-app"></head><body></body></html>'
     py = b"def main():\n    import six\n    return six.__version__\n"
     pyproject = b'[project]\nname = "six-app"\nversion = "0.1"\nrequires-python = ">=3.12"\n' \
@@ -181,3 +188,27 @@ def test_runtime_no_longer_throws_for_030_members():
     for name in ("uploadFile", "mkdir", "trackJob", "watchJob", "autoReload"):
         assert f'unsupportedFn("fused.{name}")' not in js
     assert 'throw unsupported("fused.autoReload(true)")' in js
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv (integration)")
+def test_no_pyproject_app_gets_the_legacy_env(client, tmp_path, lite_home, monkeypatch):
+    from fused_render_lite import container
+
+    _real_env(monkeypatch)
+    monkeypatch.setenv(env.LEGACY_DEPS_ENV, "six")  # stand-in for the real ~150 MB set
+    entry = b'<html><head><meta name="fused-app"></head><body></body></html>'
+    py = b"def main():\n    import six\n    return 'legacy ok ' + six.__version__\n"
+    out = tmp_path / "plain.fused"
+    container.write(str(out), {"name": "plain", "entry": "index.html"},
+                    [("index.html", entry), ("app.py", py)])
+    status, _, body = client.post("/api/open", {"file": str(out)})
+    data = json.loads(body)
+    assert status == 200, body
+    assert data["install"]["status"] in ("pending", "running", "done")
+    status, _, body = client.post("/api/run", {"py": "app.py", "html": data["entry"], "params": {}})
+    result = json.loads(body)
+    assert result["ok"] is True, result
+    assert result["result"].startswith("legacy ok ")
+    # shared venv lives under the legacy project, not the app
+    assert env.venv_dir_for(env.legacy_project_dir()) == env.venv_dir_for(env.project_dir_for(data["dir"]))
+    assert "six" in open(os.path.join(env.legacy_project_dir(), "pyproject.toml")).read()

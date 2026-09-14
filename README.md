@@ -39,8 +39,10 @@ console. An app that needs those belongs in full fused-render.
 
 Nothing is bundled. Each `.fused` app carries its own `pyproject.toml`; on
 open, `uv sync` builds a venv for it under `~/.fused-render-lite/venvs/` and
-`runPython` runs inside it. An app without a `pyproject.toml` runs on a
-stdlib-only Python and its imports will fail with a message saying so.
+`runPython` runs inside it. An app without a `pyproject.toml` runs in one
+shared "legacy" venv holding fused-render's old bundled set (numpy, pandas,
+requests, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3), also built
+on first use, so older `.fused` exports keep working.
 
 `uv` is looked for at `FUSED_RENDER_LITE_UV`, next to the app, on `PATH`,
 and failing those is downloaded once (pinned version, sha256-verified) into

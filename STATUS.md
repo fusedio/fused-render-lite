@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.4.0 | _CI pending_ | | 25 MB | legacy env for apps without `pyproject.toml`; `autoReload(true)` throws |
 | 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload(false)` no-op, runPython timeout 600 s |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
@@ -30,6 +31,25 @@ Constant across versions: 0 runtime Python deps (`rumps` + `pyobjc-framework-Coc
 only in the `[app]` extra); no bundled data packages (each app's
 `pyproject.toml` → `uv sync`); `uv` downloaded on first use (0.12.13,
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
+
+---
+
+## 0.4.0
+
+Changes from 0.3.0: an app that ships **no `pyproject.toml`** no longer runs on a
+stdlib-only Python. It runs in one shared "legacy" venv holding fused-render's
+old `[bundled]` set minus the cloud credential chains and the fused engine —
+built by `uv sync` on the first such open (~120 MB on disk, once), so `.fused`
+files exported before pyproject was required keep working. `fused.autoReload(true)`
+now throws (only `autoReload(false)` is a no-op).
+
+Legacy set: `numpy`, `pandas`, `requests`, `pillow`, `openpyxl`, `python-pptx`,
+`msgpack>=1.0`, `fpdf2>=2.8.7`, `drain3>=0.9.11`. Not carried over from
+`[bundled]`: `botocore`, `google-auth`, `fused`, `mcp`. Override for tests with
+`FUSED_RENDER_LITE_LEGACY_DEPS` (comma list). Generated project lives at
+`~/.fused-render-lite/legacy/pyproject.toml`; a changed set invalidates the venv.
+
+API table: identical to 0.3.0 except `fused.autoReload(true)` → ❌ throws.
 
 ---
 
