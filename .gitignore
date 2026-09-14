@@ -5,6 +5,7 @@ venv/
 uv.lock
 build/
 dist/
+.fused/
 *.egg-info/
 .DS_Store
 .pytest_cache/
