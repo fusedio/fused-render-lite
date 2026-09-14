@@ -47,6 +47,13 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.7.2
+
+Fix: `fused.daemon.start()` refused every real app venv with "not an
+interpreter from the project venv store" — `engine_host._validate_interpreter`
+realpath'd the venv's `bin/python`, a symlink to the base interpreter outside
+`~/.fused-render-lite/venvs`. Now resolves the venv directory instead.
+
 ## 0.7.1
 
 Rebuild of 0.7.0 from main head — confirms the DMG carries the native-window /

@@ -187,8 +187,14 @@ def _validate_interpreter(python: str) -> None:
     invariant check, not a trust boundary."""
     venvs = os.path.realpath(paths.venvs_dir())
     requested = os.path.realpath(python)
+    # A venv's bin/python is a SYMLINK to the base interpreter (uv-managed
+    # 3.12, or the .app's bundled python), so realpath(python) lands outside
+    # the store for every legitimate venv. Resolve the venv DIRECTORY the
+    # path names (bin/../) instead — that is what must live in the store.
+    venv_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(python))))
     if (requested != os.path.realpath(sys.executable)
-            and not requested.startswith(venvs + os.sep)):
+            and not requested.startswith(venvs + os.sep)
+            and not venv_root.startswith(venvs + os.sep)):
         raise EngineError(
             f"refusing to spawn {python!r}: not an interpreter from the "
             f"project venv store ({venvs})")
