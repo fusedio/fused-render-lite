@@ -655,10 +655,13 @@
     };
   }
 
-  // autoReload: accepted and ignored. A .fused extract never changes under
-  // the page, so there is nothing to watch; pages call this at boot and must
-  // not die for it.
-  function autoReload() {}
+  // autoReload(enabled): turning it OFF is a no-op — a .fused extract never
+  // changes under the page, so there was nothing to watch anyway, and pages
+  // that opt out at boot must not die for it. Turning it ON asks for a live
+  // file watcher lite does not have, and the app should know: throw.
+  function autoReload(enabled) {
+    if (enabled) throw unsupported("fused.autoReload(true)");
+  }
 
   // ---- fused.ai (Claude tier only) ---------------------------------------
   // Same contract as fused-render's fused.ai.text: one options object,
