@@ -47,6 +47,8 @@
   .showcase[hidden] { display: none; }
   .showcase h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); text-align: center; }
   .showcase p.lead { margin: 0 0 16px; text-align: center; font-size: 13px; }
+  .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; }
+  .version:empty { display: none; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; justify-content: center; }
   .card {
     display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; border-radius: 12px;
@@ -81,6 +83,7 @@
   <p class="lead">Apps that ship with Render Lite. Click one to open it.</p>
   <div class="cards" id="cards"></div>
 </section>
+<div class="version" id="version"></div>
 </div>
 <script>
   const zone = document.getElementById("zone");
@@ -180,6 +183,11 @@
     document.getElementById("showcase").hidden = false;
   }
   loadShowcase();
+
+  // Version footer, from the server so it can never drift from __version__.
+  fetch("/api/health").then(r => r.ok ? r.json() : null).then(h => {
+    if (h && h.version) document.getElementById("version").textContent = "Render Lite v" + h.version;
+  }).catch(() => {});
 </script>
 </body>
 </html>
