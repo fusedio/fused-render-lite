@@ -48,6 +48,14 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.0
+
+Card grid: `auto-fill` → `auto-fit` with centered content, so the launcher
+lays out correctly at narrow viewport widths (e.g. embedded in an iframe).
+
+Dev: `dev-iframe.html` at the repo root hosts the UI in an iframe for
+testing the embedded case. No packaging change.
+
 ## 0.7.2
 
 Fix: `fused.daemon.start()` refused every real app venv with "not an
