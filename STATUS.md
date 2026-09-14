@@ -13,8 +13,6 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
-| 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
-| 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
 | 0.6.1 | 40.85 MB (40,848,435 B) | −0.07 MB | 95 MB | rename to Render Lite; no packaging change |
 | 0.6.0 | 40.92 MB (40,915,928 B) | +16.52 MB | 95 MB | build/CI parity with fused-render: uv bundled in the app (`Resources/bin/uv`, ~+15 MB), apple tier helper compiled + bundled (macos-26 runner), Mach-O/minos probes, prepare-release job, DMG smoke build in test.yml |
 | 0.5.8 | 24.39 MB (24,393,863 B) | −3.30 MB | 60 MB | size: drop Tcl/Tk, ncurses and CPython's `_test*` fixtures that the whole-stdlib copy dragged in (lite-only trim on top of fused-render's list) |
@@ -28,6 +26,8 @@ users download.
 | 0.5.0 | 26.22 MB (26,215,796 B) | +8.49 MB | 42 MB | local inference: fused-render's AI subsystem copied in (text/image/video/transcribe/embed). ~7 MB of the Δ was pillow + libjpeg/libtiff/liblzma pulled in by mistake — fixed in 0.5.1 |
 | 0.4.0 | 17.73 MB (17,729,166 B) | +1.79 KB | 25 MB | legacy env for apps without `pyproject.toml`; `autoReload(true)` throws |
 | 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload(false)` no-op, runPython timeout 600 s |
+| 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
