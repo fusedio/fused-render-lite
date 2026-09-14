@@ -44,6 +44,13 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.6.1
+
+App renamed to **Render Lite**: `RenderLite.app`, `RenderLite-<version>.dmg`, menu-bar title,
+placeholder page and runtime error text. Python package (`fused_render_lite`), state dir
+(`~/.fused-render-lite`), env vars and bundle id `io.fused.render.lite` unchanged so existing
+installs keep their venvs and settings.
+
 ## 0.5.0
 
 Changes from 0.4.0: **local inference**, by copying fused-render's AI subsystem

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build FusedRenderLite.app + a DMG via py2app.
+# Build RenderLite.app + a DMG via py2app.
 #
 #   framework python -> wheel -> build venv (wheel[app] + py2app + dmgbuild)
 #   -> icon -> py2app -> prune -> Contents/lib symlink -> sanity probes
@@ -48,7 +48,7 @@ _build_failed() {
 trap _build_failed ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="FusedRenderLite"
+APP_NAME="RenderLite"
 VERSION="$(python3 -c "
 import re
 print(re.search(r'(?m)^__version__\s*=\s*\"([^\"]+)\"', open('${REPO_ROOT}/fused_render_lite/__init__.py').read()).group(1))

@@ -16,7 +16,7 @@
  *
  * Everything else the full fused-render runtime exposes (capture,
  * fileIndex, daemon, snapshot) is NOT
- * supported: touching it throws "<name> is not supported on fused-render-lite".
+ * supported: touching it throws "<name> is not supported on Render Lite".
  */
 (function () {
   "use strict";
@@ -25,7 +25,7 @@
   // unsupported namespace, throws — the page fails loudly at the exact line
   // that needs a capability lite does not have.
   function unsupported(name) {
-    const err = new Error(name + " is not supported on fused-render-lite");
+    const err = new Error(name + " is not supported on Render Lite");
     err.type = "unsupported";
     console.error("[fused-lite] " + err.message);
     return err;

@@ -51,7 +51,7 @@ jobs:
           fi
           PREV_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n1 || true)"
           gh release create "$TAG" --target "${{ github.sha }}" \
-            --title "FusedRenderLite $TAG" \
+            --title "RenderLite $TAG" \
             --generate-notes ${PREV_TAG:+--notes-start-tag "$PREV_TAG"}
 
   build-sign-notarize-release:

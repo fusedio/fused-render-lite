@@ -113,7 +113,7 @@ def test_unsupported_apis_throw():
     for name in ("ai", "capture", "fileIndex", "daemon", "trackJob", "watchJob",
                  "autoReload", "uploadFile", "mkdir", "snapshot"):
         assert name in js
-    assert "is not supported on fused-render-lite" in js
+    assert "is not supported on Render Lite" in js
     assert "stub" not in js.lower()
 
 

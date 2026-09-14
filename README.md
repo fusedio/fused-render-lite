@@ -1,6 +1,6 @@
 # fused-render-lite
 
-Opens a `.fused` single-file app. Nothing else.
+Ships as **Render Lite** (`RenderLite.app`, `RenderLite-<version>.dmg`). Opens a `.fused` single-file app. Nothing else.
 
 Double-click a `.fused` in Finder (or drop one onto the placeholder page) and
 the app's entry page renders in your browser. The URL carries the file:
@@ -102,7 +102,7 @@ pytest
 
 ```
 pip install ".[app]"            # rumps + pyobjc, for the menu-bar shell
-bash scripts/build_dmg.sh       # dist/FusedRenderLite-<version>.dmg
+bash scripts/build_dmg.sh       # dist/RenderLite-<version>.dmg
 ```
 
 The DMG is ad-hoc signed by default (runs on the building machine; other

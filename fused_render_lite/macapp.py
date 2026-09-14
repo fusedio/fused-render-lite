@@ -176,7 +176,7 @@ def main() -> None:
 
     class App(rumps.App):
         def __init__(self):
-            super().__init__("fused-render-lite", icon=icon if os.path.isfile(icon) else None,
+            super().__init__("Render Lite", icon=icon if os.path.isfile(icon) else None,
                              template=True, quit_button=None)
             self.menu = ["Open in browser", "Open app logs", "Quit"]
 

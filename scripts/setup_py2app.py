@@ -1,4 +1,4 @@
-"""py2app setup for FusedRenderLite.app.
+"""py2app setup for RenderLite.app.
 
 Invoked by build_dmg.sh with FUSED_RENDER_ICNS set. Packaged the same way as
 fused-render's FusedRender.app: the bundle carries the shell's own imports
@@ -97,8 +97,8 @@ OPTIONS = {
     "no_report_missing_conditional_import": True,
     "plist": {
         "CFBundleIdentifier": "io.fused.render.lite",
-        "CFBundleName": "FusedRenderLite",
-        "CFBundleDisplayName": "FusedRenderLite",
+        "CFBundleName": "RenderLite",
+        "CFBundleDisplayName": "Render Lite",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
@@ -123,16 +123,16 @@ OPTIONS = {
                 "UTTypeTagSpecification": {"public.filename-extension": ["fused"]},
             }
         ],
-        "NSDesktopFolderUsageDescription": "FusedRenderLite opens .fused apps from your Desktop.",
-        "NSDocumentsFolderUsageDescription": "FusedRenderLite opens .fused apps from your Documents folder.",
-        "NSDownloadsFolderUsageDescription": "FusedRenderLite opens .fused apps from your Downloads folder.",
+        "NSDesktopFolderUsageDescription": "Render Lite opens .fused apps from your Desktop.",
+        "NSDocumentsFolderUsageDescription": "Render Lite opens .fused apps from your Documents folder.",
+        "NSDownloadsFolderUsageDescription": "Render Lite opens .fused apps from your Downloads folder.",
     },
 }
 
 if __name__ == "__main__":
     setup(
         app=APP,
-        name="FusedRenderLite",
+        name="RenderLite",
         version=VERSION,
         options={"py2app": OPTIONS},
         setup_requires=["py2app"],
