@@ -42,9 +42,28 @@
   .status.err { color: var(--err); }
   .foot { margin-top: 28px; font-size: 12px; color: var(--muted); }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .wrap { width: min(760px, 100%); display: grid; gap: 28px; justify-items: center; }
+  .showcase { width: 100%; }
+  .showcase[hidden] { display: none; }
+  .showcase h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); text-align: center; }
+  .showcase p.lead { margin: 0 0 16px; text-align: center; font-size: 13px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .card {
+    display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; border-radius: 12px;
+    background: var(--card); border: 1px solid var(--line); color: var(--fg); font: inherit; cursor: pointer;
+    transition: border-color .15s, transform .15s, box-shadow .15s;
+  }
+  .card:hover, .card:focus-visible { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,.08); outline: none; }
+  .card .shot { aspect-ratio: 16 / 10; width: 100%; background: var(--bg); object-fit: cover; object-position: top; display: block; border-bottom: 1px solid var(--line); }
+  .card .shot.blank { display: grid; place-items: center; font-size: 32px; color: var(--muted); }
+  .card .body { padding: 12px 14px 14px; display: grid; gap: 4px; }
+  .card .title { font-weight: 600; font-size: 14px; }
+  .card .desc { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+  .card .open { margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--accent-ink); background: var(--accent); padding: 4px 10px; border-radius: 6px; justify-self: start; }
 </style>
 </head>
 <body>
+<div class="wrap">
 <div class="zone" id="zone">
   <h1>Drop a <code>.fused</code> app here</h1>
   <p>or double-click one in Finder, or paste its path.</p>
@@ -56,6 +75,12 @@
   </form>
   <div class="status" id="status"></div>
   <div class="foot">fused-render-lite only opens <code>.fused</code> apps. Supported API: runPython, params, readFile, stat, writeFile, rawUrl.</div>
+</div>
+<section class="showcase" id="showcase" hidden>
+  <h2>Or start from a showcase app</h2>
+  <p class="lead">Apps that ship with fused-render-lite. Click one to open it.</p>
+  <div class="cards" id="cards"></div>
+</section>
 </div>
 <script>
   const zone = document.getElementById("zone");
@@ -104,6 +129,57 @@
     const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) upload(f);
   });
+
+  // Showcase apps packaged with the app (fused_render_lite/showcase/). The
+  // section stays hidden unless the server lists at least one.
+  async function loadShowcase() {
+    let rows;
+    try {
+      const res = await fetch("/api/showcase");
+      if (!res.ok) return;
+      rows = (await res.json()).showcase || [];
+    } catch (e) {
+      return;
+    }
+    if (!rows.length) return;
+    const cards = document.getElementById("cards");
+    for (const ex of rows) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "card";
+      card.title = "Open " + ex.title;
+      if (ex.has_preview) {
+        const img = document.createElement("img");
+        img.className = "shot";
+        img.alt = "";
+        img.loading = "lazy";
+        img.src = "/api/showcase/preview?id=" + encodeURIComponent(ex.id);
+        card.appendChild(img);
+      } else {
+        const blank = document.createElement("div");
+        blank.className = "shot blank";
+        blank.textContent = "\u25A3";
+        card.appendChild(blank);
+      }
+      const body = document.createElement("div");
+      body.className = "body";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = ex.title;
+      const desc = document.createElement("div");
+      desc.className = "desc";
+      desc.textContent = ex.description || "";
+      const open = document.createElement("span");
+      open.className = "open";
+      open.textContent = "Open";
+      body.append(title, desc, open);
+      card.appendChild(body);
+      card.addEventListener("click", () => openPath(ex.file));
+      cards.appendChild(card);
+    }
+    document.getElementById("showcase").hidden = false;
+  }
+  loadShowcase();
 </script>
 </body>
 </html>
