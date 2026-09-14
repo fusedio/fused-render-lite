@@ -55,9 +55,12 @@ compile; it answers `unavailable`. Streaming is NDJSON over chunked HTTP.
 
 ## Python environments
 
-Nothing is bundled. Each `.fused` app carries its own `pyproject.toml`; on
-open, `uv sync` builds a venv for it under `~/.fused-render-lite/venvs/` and
-`runPython` runs inside it. An app without a `pyproject.toml` runs in one
+No packages are bundled. The DMG ships one CPython 3.12 (py2app's real
+interpreter at `Contents/MacOS/python`, whole stdlib, self-locating through a
+`Contents/lib` symlink — packaged exactly as fused-render's FusedRender.app).
+Every environment is built on it. Each `.fused` app carries its own
+`pyproject.toml`; on open, `uv sync --python <that interpreter>` builds a venv
+for it under `~/.fused-render-lite/venvs/` and `runPython` runs inside it. An app without a `pyproject.toml` runs in one
 shared "legacy" venv holding fused-render's old bundled set (numpy, pandas,
 requests, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3), also built
 on first use, so older `.fused` exports keep working.

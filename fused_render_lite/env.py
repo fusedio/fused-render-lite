@@ -148,44 +148,15 @@ def _download_uv(log) -> str:
 # The base interpreter for apps
 # ---------------------------------------------------------------------------
 
-_managed_python: str | None = None
-_managed_lock = threading.Lock()
+def base_python() -> str:
+    """The interpreter every venv is built on — resolved exactly as
+    fused-render's install worker does it (`envinstall.script_python`): this
+    process when it already runs 3.12 (a dev checkout on 3.12, or the packaged
+    app, whose bundled `Contents/MacOS/python` self-locates through the
+    `Contents/lib` symlink build_dmg.sh adds), else a uv-managed 3.12."""
+    from fused_render_lite import envinstall
 
-
-def managed_python(log=None) -> str | None:
-    """A uv-managed CPython ``PYTHON_VERSION`` (downloaded once if absent).
-
-    None when uv is unavailable — the caller falls back to this process's
-    interpreter, which is stdlib-only in the packaged app."""
-    global _managed_python
-    if _managed_python:
-        return _managed_python
-    with _managed_lock:
-        if _managed_python:
-            return _managed_python
-        log = log or (lambda _m: None)
-        uv = uv_bin(download=True, log=log)
-        if uv is None:
-            return None
-        find = [uv, "python", "find", "--managed-python", "--no-project", "--system", PYTHON_VERSION]
-        proc = subprocess.run(find, capture_output=True, text=True, env=clean_env(),
-                              timeout=60, creationflags=_no_window())
-        if proc.returncode != 0 or not proc.stdout.strip():
-            log(f"Downloading Python {PYTHON_VERSION}…")
-            inst = subprocess.run([uv, "python", "install", PYTHON_VERSION],
-                                  capture_output=True, text=True, env=clean_env(),
-                                  timeout=600, creationflags=_no_window())
-            if inst.returncode != 0:
-                raise RuntimeError("Failed to download Python %s:\n%s"
-                                   % (PYTHON_VERSION, (inst.stderr or inst.stdout).strip()))
-            proc = subprocess.run(find, capture_output=True, text=True, env=clean_env(),
-                                  timeout=60, creationflags=_no_window())
-        found = proc.stdout.strip()
-        if proc.returncode != 0 or not found:
-            raise RuntimeError("uv could not locate Python %s:\n%s"
-                               % (PYTHON_VERSION, (proc.stderr or proc.stdout).strip()))
-        _managed_python = found
-        return found
+    return envinstall.script_python() or sys.executable
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +309,7 @@ class Install:
         uv = uv_bin(download=True, log=self.log)
         if uv is None:
             raise RuntimeError("uv is not available and could not be downloaded")
-        base = managed_python(self.log)
+        base = base_python()
         project = project_dir_for(self.app_dir)
         if project != self.app_dir:
             self.log("This app declares no pyproject.toml; installing fused-render's legacy "
@@ -355,7 +326,7 @@ class Install:
         # A bare `uv sync` (no --frozen) honours a shipped uv.lock when it still
         # satisfies pyproject and re-resolves when it does not.
         cmd = [uv, "sync", "--no-default-groups", "--no-install-project",
-               "--python", base or sys.executable]
+               "--python", base]
         if project == self.app_dir:
             # An app folder is scripts, not something to build — and a wheel-less
             # dependency in a user's declaration should fail loudly rather than

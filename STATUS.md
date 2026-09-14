@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.5.6 | _pending CI_ | | | fix: Python packaged exactly as fused-render (whole stdlib, `Contents/lib` symlink, self-locating bundled interpreter builds every venv; no uv-managed Python detour). App size up (full stdlib). |
 | 0.5.5 | 19.53 MB (19,526,644 B) | +0.2 KB | 29 MB | fix: opener materialises `<app>/.fused/{data,cache}` + `meta.json` on every open (fused-render convention) so `writeFile` into `.fused/data` works without `mkdir` |
 | 0.5.4 | 19.53 MB (19,526,414 B) | +0.5 KB | 29 MB | fix: runner venvs really built on the uv-managed Python in the packaged app (0.5.2 missed the install worker's interpreter slot) |
 | 0.5.3 | 19.53 MB (19,525,879 B), ad-hoc until secrets are set | +0.5 KB | 29 MB | release pipeline: Developer ID signing + notarization + stapling (needs repo secrets) |
@@ -55,10 +56,15 @@ Dropped from the copy: benchmarking (`benchmark`, `bench_store`, `speed`,
 fused-render's defaults (`shell/prefs.py`: engine `auto`, idle unload 15 min).
 The Apple-Intelligence helper is not bundled in the DMG.
 
-0.5.2 fixed the packaged app: py2app's interpreter is a stub that cannot run
-standalone, so runner venvs are always built on a uv-managed 3.12 when frozen,
-and the dangling `SSL_CERT_DIR` py2app exports is dropped at startup (it made uv
-trust no certificates). Verified from the built .app: cold mlx-text load → answer.
+0.5.2–0.5.4 worked around venv builds failing in the packaged app by detouring
+to a uv-managed 3.12; 0.5.6 removed the detour once the real cause was found:
+the bundle lacked fused-render's `Contents/lib -> Resources/lib` symlink (so the
+bundled python, run with PYTHONHOME scrubbed, resolved `sys.prefix` to the build
+machine's framework and died on `encodings`) and shipped a traced stdlib subset.
+The bundle is now packaged exactly as FusedRender.app (whole stdlib, symlink,
+self-locate + stdlib-complete probes in build_dmg.sh) and every venv — app,
+legacy, runner — is built on `Contents/MacOS/python`. The dangling
+`SSL_CERT_DIR` py2app exports is still dropped at startup (lite-only).
 
 Verified on this Mac (M-series, macOS 26): local text (LFM2.5-1.2B, 4-bit),
 embed (nomic modernbert, 768-d), transcribe (whisper-tiny on a `say` clip,

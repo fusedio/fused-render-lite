@@ -8,7 +8,7 @@ import pytest
 
 from fused_render_lite import env
 
-_REAL = {name: getattr(env, name) for name in ("managed_python", "is_ready", "interpreter_for")}
+_REAL = {name: getattr(env, name) for name in ("base_python", "is_ready", "interpreter_for")}
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +16,7 @@ def stdlib_python(monkeypatch):
     # Every app would otherwise get a venv built by uv (its own, or the shared
     # legacy set). Unit tests run the .py on this interpreter instead; the
     # integration tests below restore the real functions.
-    monkeypatch.setattr(env, "managed_python", lambda log=None: sys.executable)
+    monkeypatch.setattr(env, "base_python", lambda: sys.executable)
     monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
     monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
 

@@ -2,7 +2,17 @@
 # Build FusedRenderLite.app + a DMG via py2app.
 #
 #   framework python -> wheel -> build venv (wheel[app] + py2app + dmgbuild)
-#   -> icon -> py2app -> [optional: bundle uv] -> codesign -> dmgbuild -> [notarize]
+#   -> icon -> py2app -> prune -> Contents/lib symlink -> sanity probes
+#   -> [optional: bundle uv] -> codesign -> dmgbuild -> [notarize]
+#
+# The Python packaging mirrors fused-render's build_dmg.sh exactly: py2app
+# ships a REAL interpreter at Contents/MacOS/python (sys.executable in the
+# running app), the whole stdlib (setup_py2app.py), and a relative
+# Contents/lib -> Resources/lib symlink so that interpreter self-locates with
+# NO environment variables. That last point is load-bearing: every venv the
+# app builds is `uv sync --python Contents/MacOS/python` with PYTHONHOME
+# scrubbed, and without the symlink that python resolves sys.prefix to the
+# BUILD MACHINE's framework and dies with "No module named 'encodings'".
 #
 # Env:
 #   FUSED_RENDER_FRAMEWORK_PYTHON  a framework-build python3 (py2app needs one)
@@ -61,6 +71,9 @@ else
   brew install python@3.12
   FRAMEWORK_PYTHON="$BREW"
 fi
+# Resolve a toolcache symlink (setup-python's) to the framework it points into,
+# so py2app copies the real Python.framework tree rather than a link farm.
+FRAMEWORK_PYTHON="$("$FRAMEWORK_PYTHON" -c "import os, sys; print(os.path.realpath(sys.executable))")"
 if [[ -z "$("$FRAMEWORK_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("PYTHONFRAMEWORK") or "")')" ]]; then
   echo "FATAL: $FRAMEWORK_PYTHON is not a framework build" >&2
   exit 1
@@ -123,16 +136,113 @@ rm -rf "$PY2APP_DIST" "$BUILD_DIR/py2app-build"
   || { tail -40 "$BUILD_DIR/py2app.log" >&2; exit 1; }
 test -d "$APP_DIR"
 
-# Trim what py2app copied that the shell never loads.
-find "$APP_DIR/Contents/Resources/lib" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
-find "$APP_DIR/Contents/Resources/lib" -type d \( -name "tests" -o -name "test" \) -prune -exec rm -rf {} + 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/python*/test 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/python*/idlelib 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/tcl* "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/tk* 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/python*/lib-dynload/_tkinter* 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/share 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/python*/ensurepip 2>/dev/null || true
-rm -rf "$APP_DIR"/Contents/Frameworks/Python.framework/Versions/*/lib/python*/site-packages/{pip,setuptools,pkg_resources,_distutils_hack} 2>/dev/null || true
+# --- 4a. prune dead weight (same sweep as fused-render) ----------------------
+echo "==> pruning bundle dead weight"
+PRUNE_PYLIB="$APP_DIR/Contents/Resources/lib/python3.12"
+PRUNE_FRAMEWORK="$APP_DIR/Contents/Frameworks/Python.framework"
+find "$PRUNE_PYLIB" -type d \( -name tests -o -name test \) -prune -exec rm -rf {} +
+find "$APP_DIR/Contents/Resources/lib" -type d -name __pycache__ -prune -exec rm -rf {} +
+rm -rf "$PRUNE_PYLIB/pip" "$PRUNE_PYLIB/setuptools" "$PRUNE_PYLIB/wheel" \
+       "$PRUNE_PYLIB/pkg_resources" "$PRUNE_PYLIB/PyObjCTest" \
+       "$PRUNE_PYLIB/_distutils_hack" "$PRUNE_PYLIB/distutils-precedence.pth"
+FW_LIB="$PRUNE_FRAMEWORK/Versions/3.12/lib/python3.12"
+rm -rf "$FW_LIB/test" "$FW_LIB/idlelib" "$FW_LIB/ensurepip" \
+       "$FW_LIB/lib2to3" "$FW_LIB/tkinter" \
+       "$FW_LIB/site-packages/pip" "$FW_LIB/site-packages/setuptools" \
+       "$FW_LIB/site-packages/wheel" \
+       "$FW_LIB/site-packages/_distutils_hack" \
+       "$FW_LIB/site-packages/distutils-precedence.pth"
+rm -rf "$PRUNE_FRAMEWORK/Versions/3.12/include" \
+       "$PRUNE_FRAMEWORK/Versions/3.12/Headers" \
+       "$PRUNE_FRAMEWORK/Versions/3.12/share" \
+       "$PRUNE_FRAMEWORK/Headers"
+rm -rf "$PRUNE_FRAMEWORK"/Versions/3.12/lib/tcl* "$PRUNE_FRAMEWORK"/Versions/3.12/lib/tk* \
+       "$FW_LIB"/lib-dynload/_tkinter*
+find "$PRUNE_FRAMEWORK" -type d -name __pycache__ -prune -exec rm -rf {} +
+
+echo "==> stripping debug symbols from bundled dylibs"
+find "$APP_DIR" -type f \( -name '*.so' -o -name '*.dylib' \) \
+  -exec sh -c 'for f do strip -S -x "$f" 2>/dev/null || true; done' _ {} +
+
+# --- 4a-ter. self-locating interpreter: Contents/lib -> Resources/lib ---------
+# py2app puts the runtime under Contents/Resources/lib but the interpreter at
+# Contents/MacOS/python; CPython's prefix search looks for <prefix>/lib/python3.12
+# next to the executable's parent, misses, and falls back to the prefix compiled
+# into the binary — the build machine's framework. One RELATIVE symlink makes
+# the landmark resolve inside the .app. Before signing, so it is sealed in.
+echo "==> making the bundled interpreter self-locating (Contents/lib -> Resources/lib)"
+test -d "$APP_DIR/Contents/Resources/lib" || { echo "FATAL: py2app layout changed; no Contents/Resources/lib" >&2; exit 1; }
+ln -sfn "Resources/lib" "$APP_DIR/Contents/lib"
+
+# --- 4b. sanity probes (the regression guards fused-render runs) -------------
+echo "==> bundle sanity: interpreter self-locates with PYTHONHOME stripped"
+SELFLOC_OUT="$(env -u PYTHONHOME -u PYTHONPATH -u VIRTUAL_ENV \
+  "$APP_DIR/Contents/MacOS/python" -c '
+import sys
+import fused_render_lite
+print("prefix", sys.prefix)
+print("selflocating OK", fused_render_lite.__version__)
+' 2>&1 || true)"
+if ! echo "$SELFLOC_OUT" | grep -q "^selflocating OK"; then
+  echo "FATAL: the bundled interpreter cannot run without PYTHONHOME:" >&2
+  echo "$SELFLOC_OUT" >&2
+  exit 1
+fi
+SELFLOC_PREFIX="$(echo "$SELFLOC_OUT" | sed -n 's/^prefix //p')"
+if [[ "$SELFLOC_PREFIX" != "$APP_DIR"* ]]; then
+  echo "FATAL: the bundled interpreter's sys.prefix is OUTSIDE the app: $SELFLOC_PREFIX" >&2
+  echo "       (that is the BUILD MACHINE's python; every venv built from it would be dead on arrival)" >&2
+  exit 1
+fi
+echo "    $(echo "$SELFLOC_OUT" | tail -1) (prefix $SELFLOC_PREFIX)"
+
+echo "==> bundle sanity: the bundled stdlib is complete"
+STDLIB_EXPECTED="$("$BUILD_VENV/bin/python" -c "
+import sys
+sys.path.insert(0, '$REPO_ROOT/scripts')
+import setup_py2app as s
+print(','.join(sorted(set(s.STDLIB_PACKAGES) | set(s.STDLIB_INCLUDES))))
+")"
+[[ -n "$STDLIB_EXPECTED" ]] || { echo "FATAL: setup_py2app.py named no stdlib modules to ship" >&2; exit 1; }
+STDLIB_CHECK="$BUILD_DIR/stdlib_check.py"
+cat > "$STDLIB_CHECK" <<'STDLIBEOF'
+import importlib
+import os
+import sys
+
+names = os.environ["STDLIB_EXPECTED"].split(",")
+missing = []
+for name in names:
+    try:
+        importlib.import_module(name)
+    except BaseException as exc:  # noqa: BLE001 - the report IS the product
+        missing.append("%s: %s: %s" % (name, exc.__class__.__name__, exc))
+print("checked %d, missing %d, prefix %s" % (len(names), len(missing), sys.prefix))
+for line in missing[:25]:
+    print("   ", line)
+STDLIBEOF
+for STDLIB_WHO in bundled venv; do
+  if [[ "$STDLIB_WHO" == "bundled" ]]; then
+    STDLIB_PY="$APP_DIR/Contents/MacOS/python"
+  else
+    rm -rf "$BUILD_DIR/stdlib-venv"
+    if ! env -u PYTHONHOME -u PYTHONPATH -u VIRTUAL_ENV \
+        "$APP_DIR/Contents/MacOS/python" -m venv --without-pip "$BUILD_DIR/stdlib-venv" >/dev/null 2>&1; then
+      echo "FATAL: the bundled interpreter cannot create a venv at all — every app env is built exactly that way." >&2
+      exit 1
+    fi
+    STDLIB_PY="$BUILD_DIR/stdlib-venv/bin/python"
+  fi
+  STDLIB_OUT="$(env -u PYTHONHOME -u PYTHONPATH -u VIRTUAL_ENV STDLIB_EXPECTED="$STDLIB_EXPECTED" \
+    "$STDLIB_PY" "$STDLIB_CHECK" 2>&1 || true)"
+  if ! echo "$STDLIB_OUT" | grep -q ", missing 0,"; then
+    echo "FATAL: the $STDLIB_WHO interpreter is missing stdlib modules:" >&2
+    echo "$STDLIB_OUT" >&2
+    exit 1
+  fi
+  echo "    $STDLIB_WHO: $(echo "$STDLIB_OUT" | head -1)"
+done
+rm -rf "$BUILD_DIR/stdlib-venv" "$STDLIB_CHECK"
 
 # --- 4b. uv (optional) ------------------------------------------------------
 if [[ "${FUSED_RENDER_BUNDLE_UV:-}" == "1" ]]; then
@@ -179,6 +289,7 @@ else
 <plist version="1.0">
 <dict>
   <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.cs.allow-jit</key><true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
 </dict>

@@ -24,7 +24,7 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
       # actions/setup-python installs a python.org-style framework build on
       # macOS arm64, which is exactly what py2app needs (scripts/build_dmg.sh).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
