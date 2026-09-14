@@ -28,8 +28,13 @@ OPTIONS = {
     "iconfile": ICONFILE,
     "packages": ["fused_render_lite", "rumps"],
     "resources": [os.path.join(REPO_ROOT, "fused_render_lite", "static")],
+    # PIL is imported lazily by runner-side modules that only ever run inside a
+    # runner's own venv; the build venv has pillow for the icon, and without this
+    # exclude py2app follows those imports and ships 17 MB of pillow + libjpeg/
+    # libtiff/liblzma (which also fails strict codesign).
     "excludes": ["tkinter", "idlelib", "turtle", "turtledemo", "test", "unittest",
-                 "pydoc_data", "ensurepip", "lib2to3", "distutils", "setuptools", "pip"],
+                 "pydoc_data", "ensurepip", "lib2to3", "distutils", "setuptools", "pip",
+                 "PIL", "pillow", "packaging"],
     "no_report_missing_conditional_import": True,
     "plist": {
         "CFBundleIdentifier": "io.fused.render.lite",
