@@ -15,14 +15,14 @@
 #      another version would resolve different wheels than the shipped app.
 #   2. Isolates this checkout/worktree: port and state dir derive from the git
 #      branch, so a dev server never fights the installed Render Lite.app on
-#      8765 / ~/.fused-render-lite, and two worktrees never share venvs.
+#      2777 / ~/.fused-render-lite, and two worktrees never share venvs.
 #   3. Runs `python -m fused_render_lite.cli` under watchfiles: an edit to any
 #      fused_render_lite/**/*.py restarts the server (SIGINT, wait, relaunch).
 #      Static files need no restart — refresh the browser.
 #   4. Opens the browser once, when the port answers (unless --no-browser).
 #
 # Knobs (respected when already set):
-#   FUSED_RENDER_LITE_PORT   port (default: 8766 on main, 8766 + hash(branch) elsewhere)
+#   FUSED_RENDER_LITE_PORT   port (default: 2778 on main, 2779 + hash(branch) elsewhere)
 #   FUSED_RENDER_LITE_HOME   state dir (default: ~/.fused-render-lite-dev/<branch>)
 #   FUSED_RENDER_NO_RELOAD=1 single launch, no watchfiles
 set -euo pipefail
@@ -36,10 +36,10 @@ BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo ma
 SAFE_BRANCH="$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9._-' '_')"
 if [[ -z "${FUSED_RENDER_LITE_PORT:-}" ]]; then
   if [[ "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "HEAD" || "$BRANCH" == "lite-main" ]]; then
-    FUSED_RENDER_LITE_PORT=8766
+    FUSED_RENDER_LITE_PORT=2778
   else
-    # deterministic per branch, 8767..9766; python is on every dev box already
-    FUSED_RENDER_LITE_PORT="$(python3 -c 'import sys,zlib; print(8767 + zlib.crc32(sys.argv[1].encode()) % 1000)' "$BRANCH")"
+    # deterministic per branch, 2779..3778; python is on every dev box already
+    FUSED_RENDER_LITE_PORT="$(python3 -c 'import sys,zlib; print(2779 + zlib.crc32(sys.argv[1].encode()) % 1000)' "$BRANCH")"
   fi
 fi
 export FUSED_RENDER_LITE_PORT

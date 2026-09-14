@@ -3,13 +3,38 @@
 Ships as **Render Lite** (`RenderLite.app`, `RenderLite-<version>.dmg`). Opens a `.fused` single-file app. Nothing else.
 
 Double-click a `.fused` in Finder (or drop one onto the placeholder page) and
-the app's entry page renders in your browser. The URL carries the file:
+the app's entry page opens in a window of Render Lite — a native macOS window
+hosting a WKWebView, not a browser tab. Open as many as you like: every window
+is on the one local server. The URL behind a window carries the file:
 
 ```
-http://127.0.0.1:8765/open?_file=/Users/you/Downloads/app.fused&n=80
+http://127.0.0.1:2777/open?_file=/Users/you/Downloads/app.fused&n=80
 ```
 
 Everything after `_file` is the app's own `fused.params` state.
+
+### Windows
+
+The macOS app (`macapp.py` + `mainwindow.py`) is a regular app: Dock icon,
+menu bar item, a main menu, and one window per opened `.fused`.
+
+| in a window | what happens |
+| --- | --- |
+| Finder open, Dock click, File → Open… (⌘O), New Window (⌘N) | a new window (Dock click focuses the front one if any) |
+| `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window |
+| a link to another site | the default browser |
+| `<a download>`, `Content-Disposition: attachment`, a type WebKit can't show | saved to `~/Downloads` (Finder-style `name 2` on collision) |
+| `alert` / `confirm` / `prompt`, `<input type=file>` | native panels |
+| `getUserMedia` from the app's own page | granted; the system camera/mic prompt still applies |
+| ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
+
+Closing the last window does not quit. The menu-bar item has four entries:
+"Open in app" (focus the front window or open the placeholder), "Open in
+browser", "Open app logs", "Quit". The Dock icon does the same as "Open in
+app"; ⌘Q and the Dock also quit. View → Open in Browser hands the current page
+to the default browser. `FUSED_RENDER_LITE_NO_BROWSER=1` suppresses the
+startup window. The CLI (`fused-render-lite`, `scripts/dev.sh`) is unchanged
+and still opens a browser tab.
 
 ## What it supports
 
@@ -171,7 +196,9 @@ fused_render_lite/
   env.py          uv lookup/download, per-app `uv sync`, running a .py in its venv
   server.py       the HTTP surface (http.server; binds 127.0.0.1)
   cli.py          `fused-render-lite [file] [--port] [--no-browser]`
-  macapp.py       menu-bar shell; Finder open events -> browser
+  macapp.py       macOS shell: server thread, menu-bar item, Finder open events -> windows
+  mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
+  window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts (tested)
   _child.py       worker: import the .py, call main(**params), print JSON
   static/         runtime.js, placeholder (index.html), open page (open.html)
   showcase.py     lists showcase/*.fused for the placeholder; serves their preview.png

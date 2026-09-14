@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="fused-render-lite",
                                  description="Open a .fused single-file app.")
     ap.add_argument("file", nargs="?", help="a .fused file to open")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("FUSED_RENDER_LITE_PORT", "8765")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("FUSED_RENDER_LITE_PORT", "2777")))
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--version", action="version", version=__version__)
     args = ap.parse_args(argv)

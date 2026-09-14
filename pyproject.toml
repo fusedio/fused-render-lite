@@ -15,10 +15,12 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
-# The macOS menu-bar shell (macapp.py). Only the packaged .app installs it.
+# The macOS shell (macapp.py + mainwindow.py). Only the packaged .app installs it.
 app = [
     "rumps",
     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+    # The app's windows are WKWebViews (mainwindow.py).
+    "pyobjc-framework-WebKit; sys_platform == 'darwin'",
 ]
 
 [project.scripts]
