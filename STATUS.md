@@ -8,7 +8,7 @@ Update this file with every release. Sizes come from `bash scripts/build_dmg.sh`
 | | value |
 | --- | --- |
 | version | 0.2.0 |
-| DMG | 12 MB (`FusedRenderLite-0.1.0.dmg`, 12,202,154 bytes, ULFO) |
+| DMG | 12 MB (`FusedRenderLite-0.2.0.dmg`, 12,215,018 bytes, ULFO) |
 | .app | 25 MB unpacked |
 | runtime Python deps | 0 (`rumps` + `pyobjc-framework-Cocoa` in the `[app]` extra, macOS shell only) |
 | bundled Python packages | none — each app's `pyproject.toml` builds its own venv via `uv sync` |
@@ -57,4 +57,4 @@ The non-AI namespaces are Proxies, so `fused.capture.screen` throws on the prope
 | version | DMG | .app | note |
 | --- | --- | --- | --- |
 | 0.1.0 | 12 MB | 25 MB | first lite build; fused-render's bundled set was ~400 MB installed |
-| 0.2.0 | (see Build) | (see Build) | `fused.ai.text` on the Claude CLI tier, streaming; no local inference |
+| 0.2.0 | 12 MB | 25 MB | `fused.ai.text` on the Claude CLI tier, streaming; no local inference |
