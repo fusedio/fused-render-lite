@@ -17,6 +17,7 @@ jobs:
     runs-on: macos-14
     env:
       NOTARY_PROFILE: ci-notary
+      KEYCHAIN_PATH: ${{ github.workspace }}/ci-signing.keychain-db
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +28,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Signing + notarization, as fusedio/fused-render does it: an ephemeral
+      # keychain holds the Developer ID cert and the App Store Connect API key
+      # for notarytool; both die with the runner. Requires the repo secrets
+      # CODESIGN_CERT_P12 (base64 .p12), CODESIGN_CERT_PASSWORD, CODESIGN_IDENTITY
+      # (SHA-1 of the Developer ID Application cert), KEYCHAIN_PASSWORD,
+      # NOTARY_API_KEY_P8, NOTARY_API_KEY_ID, NOTARY_API_ISSUER_ID. Without them
+      # the build is ad-hoc signed and not notarized (see README).
       - name: Import signing cert + notary credentials (skipped when no secrets)
         env:
           CODESIGN_CERT_P12: ${{ secrets.CODESIGN_CERT_P12 }}
@@ -41,7 +49,6 @@ jobs:
             echo "no signing secrets configured -> ad-hoc build"
             exit 0
           fi
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           echo "$CODESIGN_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
@@ -53,14 +60,31 @@ jobs:
           xcrun notarytool store-credentials "$NOTARY_PROFILE" \
             --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" \
             --issuer "$NOTARY_API_ISSUER_ID" --keychain "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12"
           echo "FUSED_RENDER_CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "FUSED_RENDER_NOTARY_PROFILE=$NOTARY_PROFILE" >> "$GITHUB_ENV"
 
-      - name: Build DMG
+      - name: Build, sign, notarize, staple DMG
         env:
-          # Ad-hoc unless signing secrets are configured (then Developer ID + notarize).
+          # Ad-hoc unless signing secrets are configured (then Developer ID +
+          # hardened runtime + notarize + staple, via build_dmg.sh).
           FUSED_RENDER_CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: bash scripts/build_dmg.sh
+
+      - name: Delete ephemeral keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
+      - name: Verify notarization ticket
+        run: |
+          set -euo pipefail
+          DMG="$(ls dist/*.dmg | head -1)"
+          if [ -n "${FUSED_RENDER_NOTARY_PROFILE:-}" ]; then
+            xcrun stapler validate "$DMG"
+            spctl -a -t open --context context:primary-signature -v "$DMG"
+          else
+            echo "not notarized (no signing secrets) — ad-hoc build"
+          fi
 
       - name: Attach to GitHub Release
         env:

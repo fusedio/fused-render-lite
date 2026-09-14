@@ -85,9 +85,29 @@ bash scripts/build_dmg.sh       # dist/FusedRenderLite-<version>.dmg
 ```
 
 The DMG is ad-hoc signed by default (runs on the building machine; other
-Macs need right-click → Open). `FUSED_RENDER_SIGN=1` switches to Developer ID
-signing with the hardened runtime, and `FUSED_RENDER_NOTARY_PROFILE` also
-notarizes and staples. Not wired up for now.
+Macs need right-click → Open). `FUSED_RENDER_SIGN=1` or a
+`FUSED_RENDER_CODESIGN_IDENTITY` switches to Developer ID signing with the
+hardened runtime, and `FUSED_RENDER_NOTARY_PROFILE` (a `notarytool`
+keychain profile) additionally notarizes and staples.
+
+### Release pipeline (GitHub Actions)
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`, the same flow as
+fusedio/fused-render: an ephemeral keychain gets the Developer ID cert and an
+App Store Connect API key, `build_dmg.sh` signs + notarizes + staples, the
+ticket is verified, and the DMG lands on the GitHub Release. It needs these
+repository secrets (copy them from fusedio/fused-render):
+
+| secret | what |
+| --- | --- |
+| `CODESIGN_CERT_P12` | base64 of the Developer ID Application `.p12` |
+| `CODESIGN_CERT_PASSWORD` | its password |
+| `CODESIGN_IDENTITY` | the cert's SHA-1 (`security find-identity -v -p codesigning`) |
+| `KEYCHAIN_PASSWORD` | any string; unlocks the ephemeral keychain |
+| `NOTARY_API_KEY_P8` | App Store Connect API key (`.p8` contents) |
+| `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID` | its key id and issuer id |
+
+Without them the workflow still runs and publishes an ad-hoc-signed DMG.
 
 ## Layout
 

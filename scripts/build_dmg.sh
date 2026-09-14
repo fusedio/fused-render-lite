@@ -212,8 +212,14 @@ rm -f "$DMG_PATH"
 
 if [[ -n "${FUSED_RENDER_NOTARY_PROFILE:-}" ]]; then
   [[ -n "$SIGN_IDENTITY" ]] || { echo "FATAL: notarization needs a Developer ID signature" >&2; exit 1; }
-  echo "==> notarizing"
-  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$FUSED_RENDER_NOTARY_PROFILE" --wait
+  echo "==> notarizing $DMG_PATH (profile: $FUSED_RENDER_NOTARY_PROFILE)"
+  NOTARY_KC=()
+  [[ -n "${FUSED_RENDER_CODESIGN_KEYCHAIN:-}" ]] && NOTARY_KC=(--keychain "$FUSED_RENDER_CODESIGN_KEYCHAIN")
+  # --wait blocks until Apple answers (minutes); a rejection prints the log id,
+  # fetch it with `xcrun notarytool log <id> --keychain-profile ...`.
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$FUSED_RENDER_NOTARY_PROFILE" \
+    "${NOTARY_KC[@]}" --wait
+  echo "==> stapling notarization ticket"
   xcrun stapler staple "$DMG_PATH"
   xcrun stapler validate "$DMG_PATH"
 fi
