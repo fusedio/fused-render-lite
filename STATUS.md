@@ -9,7 +9,7 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 | version | DMG (local, Homebrew py) | DMG (CI release asset, python.org py) | .app | Δ DMG vs previous (local) | what changed |
 | --- | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | — | reference point |
-| 0.1.0 | 12.20 MB (12,202,154 B) | 17.73 MB | 25 MB | — | first lite build |
+| 0.1.0 | 12.20 MB (12,202,154 B) | 17.72 MB (17,723,156 B) | 25 MB | — | first lite build |
 | 0.2.0 | 12.22 MB (12,215,018 B) | 17.73 MB (17,729,146 B) | 25 MB | +12.9 KB | `fused.ai.text` (Claude CLI tier) |
 
 The GitHub release asset is built on `macos-14` with actions/setup-python's
