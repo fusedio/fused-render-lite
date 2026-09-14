@@ -15,7 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
-| 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload` no-op, runPython timeout 600 s |
+| 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload(false)` no-op, runPython timeout 600 s |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
@@ -38,8 +38,8 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 Changes from 0.2.0: `fused.uploadFile` and `fused.mkdir` land; `fused.trackJob` /
 `fused.watchJob` land on an in-process job store (no shell UI, but rows survive a
 page reload and a worker can be told to stop via `cancel_requested`);
-`fused.autoReload(...)` is accepted as a no-op instead of throwing (a `.fused`
-extract never changes under the page); `runPython` timeout 60 s → 600 s, matching
+`fused.autoReload(false)` is accepted as a no-op instead of throwing (a `.fused`
+extract never changes under the page); `autoReload(true)` still throws; `runPython` timeout 60 s → 600 s, matching
 fused-render. Workers spawned by `runPython` get `FUSED_RENDER_ORIGIN` so a
 detached process can `POST /api/jobs`.
 
@@ -52,7 +52,8 @@ detached process can `POST /api/jobs`.
 | `fused.mkdir(path)` | ✅ new | 409 → `type: "exists"`, 403 → `readonly` |
 | `fused.trackJob(spec)` | ✅ new | `update/finish/fail/cancelled`, `cancelRequested`, `state`; fire-and-forget |
 | `fused.watchJob(id)` | ✅ new | `get()`, `watch(cb, ms)`, `stop()`, `cancel()` |
-| `fused.autoReload(...)` | ✅ no-op | accepted, does nothing |
+| `fused.autoReload(false)` | ✅ no-op | opting out of live reload is accepted; nothing to watch in a .fused extract |
+| `fused.autoReload(true)` | ❌ throws | live reload needs a file watcher lite does not have; the app should know |
 | `fused.env` / `fused.device` / `fused.lite` | ✅ | |
 | `fused.ai.text` | ✅ Claude only | as 0.2.0 |
 | `fused.ai.models.list() / catalog()`, `fused.ai.cancel()` | ✅ | as 0.2.0 |

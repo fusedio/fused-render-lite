@@ -26,7 +26,7 @@ The page runtime exposes these `fused.*` members:
 | `fused.ai.text({prompt, ...})` | Claude tier only, through the local `claude` CLI; streams with `onChunk` |
 | `fused.uploadFile(path, blob)` / `fused.mkdir(path)` | binary save, directories |
 | `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
-| `fused.autoReload(...)` | accepted, no-op |
+| `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws (no live reload) |
 
 Every other member the full fused-render runtime has (`capture`,
 `fileIndex`, `daemon`, `snapshot`)

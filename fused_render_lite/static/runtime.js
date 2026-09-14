@@ -12,7 +12,7 @@
  *   fused.ai.models.list() / catalog(), fused.ai.cancel()
  *   fused.uploadFile(path, blob) / fused.mkdir(path) -> Promise<stat>
  *   fused.trackJob(spec) / fused.watchJob(id)  (in-process job rows)
- *   fused.autoReload(...)  accepted, no-op
+ *   fused.autoReload(false)  no-op; autoReload(true) throws (no live reload here)
  *
  * Everything else the full fused-render runtime exposes (capture,
  * fileIndex, daemon, snapshot) is NOT
