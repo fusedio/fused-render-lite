@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fused-render-lite"
+dynamic = ["version"]
+description = "Opens .fused single-file apps. Nothing else."
+readme = "README.md"
+requires-python = ">=3.11"
+# Zero runtime dependencies: the server is http.server, the .fused format is
+# zlib + json, app environments are built by uv on demand. Every megabyte
+# in the DMG has to earn its place.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+# The macOS menu-bar shell (macapp.py). Only the packaged .app installs it.
+app = [
+    "rumps",
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+fused-render-lite = "fused_render_lite.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.version]
+path = "fused_render_lite/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fused_render_lite"]
