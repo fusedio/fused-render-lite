@@ -1,0 +1,131 @@
+# The ltx_video runner's environment (SPEC §40, PY-16).
+#
+# LTX-2.3 on MLX, through `ltx-2-mlx` (https://github.com/xocialize/ltx-2-mlx)
+# — a pure-MLX, MIT-licensed port that is the only accessible engine keeping
+# AUDIO in the output (see the plan's "ltx-2-mlx, not mlx-video" decision:
+# mlx-video's own LTX loader wants the 57-108 GB bf16 trees and its Wan path
+# renders silent video). `worker.py` constructs `DistilledPipeline` from
+# `ltx_pipelines_mlx` and calls `generate_and_save` — the same "one folder,
+# one `pyproject.toml`, one `worker.py`" shape every runner here uses.
+#
+# **Both packages are declared, and that is not redundant.** `ltx-pipelines-
+# mlx` depends on `ltx-core-mlx` BY NAME with no version bound at all — there
+# is no PyPI release of either to version against; upstream's own workspace
+# resolves the pair through a root `uv.lock` this folder does not share. Name
+# only `ltx-pipelines-mlx` here and `uv sync` has no source for `ltx-core-mlx`
+# and fails to resolve; the runner would never build. See
+# `tests/test_ai_runner_deps.py`'s `SPLIT_DISTRIBUTIONS` table, which this
+# pair now shares an entry with the whisper runners' `sherpa-onnx` split —
+# same defect class (a project naming a companion it does not itself supply
+# a source for), different cause (no version bound to lose vs. no PyPI
+# listing to route to at all).
+#
+# **Pinned to a commit SHA, not a branch or a tag — because there is neither.**
+# Upstream ships no tags or releases (checked 2026-08-22; HEAD had moved as
+# recently as 2026-08-21), so a bare `git = "..."` source would re-resolve
+# HEAD on every fresh venv key, on a user's machine, with nothing here to
+# explain what changed — the exact unbounded-dependency risk
+# `test_every_runner_BOUNDS_its_model_runtimes` exists to catch for versioned
+# PyPI releases. A 40-hex `rev` is the only form of "pinned" a tagless,
+# releaseless repo can offer, and that test's git-aware half now accepts
+# exactly this shape (and only this shape — a branch name in `rev` still
+# fails it, see that test's own two synthetic cases). Bumping the sha is a
+# normal, deliberate change; it should happen with a render behind it, the
+# same discipline every version ceiling on this page already gets.
+#
+# `subdirectory` routes each source to its own package folder inside the one
+# monorepo checkout uv makes for the pin above — `packages/ltx-core-mlx` and
+# `packages/ltx-pipelines-mlx` are siblings in the same tree, not two repos.
+#
+# **ffmpeg.** `ltx_pipelines_mlx.utils.media_io` shells out to a real ffmpeg
+# executable to mux frames for I2V preprocessing, through `ltx_core_mlx.
+# utils.ffmpeg.find_ffmpeg()`. That function does not read an environment
+# variable — it is a bare `shutil.which("ffmpeg")` — so `worker.py` cannot
+# simply point an env var at `imageio_ffmpeg.get_ffmpeg_exe()`; it has to make
+# the bundled ffmpeg resolvable on PATH instead (see `worker.py` for exactly
+# how). `imageio-ffmpeg` is the right dependency for it: one wheel per
+# platform with a real, statically-linked executable inside, no source build,
+# no compiler — this folder's "wheels-only" rule.
+#
+# **`[tool.fused-render.runner] allow_build = true` — this folder's opt-out of
+# the wheels-only default, and why it is safe here specifically.**
+# `ai/supervisor.py._ensure_venv` builds every bundled runner's environment
+# through `envinstall.start`, which leaves `allow_build` at its default False —
+# `_env_install_worker.py` then appends `--no-build` to `uv sync`, refusing
+# anything that is not resolvable to a wheel (PY-18, the wheels-only rule:
+# a random runner's PyPI dependency must not silently start compiling a
+# C/C++/Rust extension on a user's machine, minutes and a working compiler
+# toolchain they may not have). A git source can ONLY be satisfied by BUILDING
+# the checkout uv makes of it — there is no wheel to fetch instead, ever — so
+# under that default this folder's own two sources above are structurally
+# uninstallable: every automatic build dies before it starts, for every
+# packaged-app user, with no consent-and-retry prompt in this code path to
+# recover with (that flow exists only behind the explicit `/api/env/install`
+# retry a user clicks after a real no-wheel failure, never from this
+# supervisor-driven bring-up). That was exactly the shipped bug this table
+# fixes.
+#
+# The table is the ONE declared, per-folder exception to that default, read by
+# `projectenv.runner_allows_build` and passed through as `allow_build=True` for
+# this runner alone — every other bundled runner keeps `--no-build` unchanged.
+# It earns the exception on the two facts the wheels-only rule actually exists
+# to guard against, both false here:
+#
+# 1. **No PyPI release, no wheels, upstream tags or releases at all** (checked
+#    2026-08-22 against `xocialize/ltx-2-mlx`) — so "wheels-only" cannot mean
+#    "prefer a wheel" for this dependency, there is categorically no wheel to
+#    prefer. `--no-build` does not make this install safer; it makes it
+#    impossible.
+# 2. **Both packages are pure Python — no compiler needed.** Verified against
+#    the pinned commit's own tree, not asserted from memory: neither
+#    `packages/ltx-core-mlx` nor `packages/ltx-pipelines-mlx` ships a `.c`,
+#    `.pyx`, `.cpp`, `.h` or prebuilt `.so`, and each declares
+#    `build-backend = "hatchling.build"` — a pure-Python wheel builder with no
+#    compiler invocation of its own. "Building from source" for this pair
+#    means uv copying `.py` files into a wheel, the same operation `pip
+#    install .` would do for any pure-Python project; it is not the arbitrary
+#    native compilation PY-18 exists to keep off a user's machine.
+#
+# **Accepted requirement: a working `git` executable on PATH.** uv satisfies
+# a `git = "..."` source by shelling out to `git`, not by any pure-Python
+# means. In a packaged macOS app launched from Finder, PATH is minimal and
+# `/usr/bin/git` is the Command Line Tools shim — on a machine with no CLT
+# installed, that shim fails (or pops the CLT installer) rather than
+# cloning, so this install can still die for exactly the "every packaged-app
+# user" audience this opt-in exists for. Not detected or worked around here;
+# accepted as a real, if narrow, gap rather than silently assumed away.
+#
+# Bounded per this folder's own rule: the floor is the version installed when
+# this folder was written, the ceiling is the next major.
+[project]
+name = "fused-render-runner-ltx-video"
+version = "0.1.0"
+# ">=3.11", not this folder's siblings' ">=3.10": `ltx-core-mlx` and
+# `ltx-pipelines-mlx` both declare `requires-python = ">=3.11"` upstream
+# (gemma4-checkpoint support needs an mlx-lm only 3.11+ wheels carry), and `uv
+# sync` refuses to resolve a manifest whose own floor promises a Python this
+# folder's actual dependencies do not support. Every runner still builds on
+# the app's pinned 3.12 interpreter (`setting-up-dev-env`), so this changes
+# nothing about which Python is ever actually used — it only stops this one
+# folder's manifest from lying about what it needs.
+requires-python = ">=3.11"
+dependencies = [
+    "ltx-core-mlx",
+    "ltx-pipelines-mlx",
+    "imageio-ffmpeg>=0.5,<1",
+    "huggingface_hub",
+    "psutil",
+]
+
+# Not a distribution — a folder of scripts, not something to build and install.
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+ltx-core-mlx = { git = "https://github.com/xocialize/ltx-2-mlx", rev = "8ebae0a7cb08312fbf884790b91b4d155e714cdc", subdirectory = "packages/ltx-core-mlx" }
+ltx-pipelines-mlx = { git = "https://github.com/xocialize/ltx-2-mlx", rev = "8ebae0a7cb08312fbf884790b91b4d155e714cdc", subdirectory = "packages/ltx-pipelines-mlx" }
+
+# See the header comment above for the full account of why this folder, and
+# only this folder, needs it.
+[tool.fused-render.runner]
+allow_build = true

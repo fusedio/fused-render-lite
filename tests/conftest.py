@@ -78,8 +78,9 @@ class Client:
 
 @pytest.fixture
 def client():
-    from fused_render_lite import server
+    from fused_render_lite import jobs, server
 
+    jobs.reset()  # the job registry is process-wide; each server starts clean
     srv, thread = server.serve_in_thread(0)
     yield Client(srv.server_address[1])
     srv.shutdown()

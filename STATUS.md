@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.5.0 | _CI pending_ | | | local inference: fused-render's AI subsystem copied in (text/image/video/transcribe/embed) |
 | 0.4.0 | 17.73 MB (17,729,166 B) | +1.79 KB | 25 MB | legacy env for apps without `pyproject.toml`; `autoReload(true)` throws |
 | 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload(false)` no-op, runPython timeout 600 s |
 
@@ -31,6 +32,51 @@ Constant across versions: 0 runtime Python deps (`rumps` + `pyobjc-framework-Coc
 only in the `[app]` extra); no bundled data packages (each app's
 `pyproject.toml` → `uv sync`); `uv` downloaded on first use (0.12.13,
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
+
+---
+
+## 0.5.0
+
+Changes from 0.4.0: **local inference**, by copying fused-render's AI subsystem
+verbatim (`fused_render_lite/ai/`: registry, catalog, fit, hw_detect, hub_cache,
+supervisor, and every runner folder; `routes/ai_relay.py` + `routes/ai_routes.py`
+are fused-render's own `/api/ai*` routers mounted through a 250-line FastAPI-compat
+layer, `_web.py`). Runners are folders with a `pyproject.toml` + `worker.py`; the
+supervisor builds each runner's venv with `uv sync` on first use, spawns the
+worker on that venv, and talks HTTP to it. Nothing ML ships in the DMG.
+
+Dropped from the copy: benchmarking (`benchmark`, `bench_store`, `speed`,
+`gguf_sources`), the AI Models / Preferences pages. Preferences are fixed to
+fused-render's defaults (`shell/prefs.py`: engine `auto`, idle unload 15 min).
+The Apple-Intelligence helper is not bundled in the DMG.
+
+Verified on this Mac (M-series, macOS 26): local text (LFM2.5-1.2B, 4-bit),
+embed (nomic modernbert, 768-d), transcribe (whisper-tiny on a `say` clip,
+exact transcript), image (FLUX.2-Klein 4B, 256×256 PNG), Claude tier, cancel of
+a running job, page-driven calls in headless Chrome.
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.runPython`, `params`, `readFile/stat/writeFile/rawUrl`, `uploadFile/mkdir`, `trackJob/watchJob`, `autoReload(false)` | ✅ | as 0.4.0 |
+| `fused.ai.text` — Claude tier | ✅ | fused-render's relay: one warm `claude` stream-json process, `/clear` between calls, `effort`, streaming |
+| `fused.ai.text` — local tier (repo id / `.gguf` / `provider: "local"`) | ✅ new | first call → `model_loading` + `err.jobId`, `watchJob` it, retry; `history`, `raw`, `images` (vision models), `temperature/maxTokens/topP` honoured |
+| `fused.ai.image` | ✅ new | job-backed; mflux on Apple Silicon, diffusers elsewhere; `onProgress` with `previewUrl` |
+| `fused.ai.video` | ✅ new | job-backed; LTX-2 via MLX, Apple Silicon only (28 GB model) |
+| `fused.ai.transcribe` | ✅ new | job-backed; mlx-whisper on Apple Silicon, faster-whisper elsewhere; progressive segments via `onChunk`, `diarize`, `words` |
+| `fused.ai.embed` | ✅ new | direct; mlx-embeddings / onnx; `kind: query\|document`, `paths` on dual encoders |
+| `fused.ai.models.list / catalog / load / download / unload`, `fused.ai.cancel(capability)` | ✅ new | fused-render's contract |
+| `fused.ai.text` / `transcribe` with `provider: "apple"` / `afm-*` ids | ⚠️ checkout only | fused-render's host compiles the Swift helper on demand when Xcode with the macOS 26 SDK is present (verified here: `afm-2025` answered). The DMG ships without the helper → `unavailable` |
+| `fused.capture.*`, `fused.fileIndex.*`, `fused.daemon.*`, `fused.snapshot`, `autoReload(true)` | ❌ throws | |
+
+Disk on first use (this Mac, measured): mlx-text runner venv 581 MB + the default
+0.7 GB text model; other capabilities pull their own runner venv (200 MB–4 GB)
+and model on first call. Models live in the Hugging Face cache; worker state
+under `~/.fused-render-lite/ai/`.
+
+Routes added: `POST /api/ai/image|video|transcribe|embed`, `GET /api/ai/runtime`,
+`GET /api/ai/catalog`, `POST /api/ai/runtime/load|download|unload`,
+`POST /api/ai/cancel`, `GET /api/ai/metrics`. `/api/jobs` now runs fused-render's
+`jobs.py` (tiers, stall detection) behind the same page contract.
 
 ---
 

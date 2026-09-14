@@ -1,0 +1,138 @@
+"""User-data dir (~/.fused-render-lite) and atomic JSON I/O.
+
+Shared foundation for every shell state backend: one home dir, one pair of
+read/write helpers. Adding a resource = a new module that resolves a path
+under home_dir() and uses read_json/write_json.
+
+The dir also roots the user-template override channel under its templates/
+subdir (server.py's USER_TEMPLATES_DIR = home_dir()/templates, D76): the home
+holds bookmarks.json + templates/. server imports home_dir from here, never
+the reverse (no server <-> shell import cycle).
+"""
+import json
+import os
+import tempfile
+import time
+
+
+def home_dir() -> str:
+    """fused-render-lite's state dir (``~/.fused-render-lite``, or
+    ``FUSED_RENDER_LITE_HOME``). The AI subsystem keeps its caches, worker
+    status files and hardware profile under here, as it did in fused-render."""
+    from fused_render_lite import paths
+
+    return paths.home()
+
+
+def base_home_dir() -> str:
+    return home_dir()
+
+
+def read_json(path: str):
+    """Parse the JSON at `path`; return None if it is absent OR corrupt. The
+    None-vs-value distinction lets a caller tell 'never written' from an empty
+    resource (e.g. the bookmarks `exists` flag / one-time import gate).
+
+    The read is retried on a Windows sharing violation — a concurrent
+    write_json's os.replace can transiently refuse a reader's open() there;
+    see _retrying_on_sharing_violation. FileNotFoundError still returns None
+    on the first try, un-retried."""
+    def _once():
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    try:
+        return _retrying_on_sharing_violation(_once)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def write_json(path: str, data) -> None:
+    """Atomically write `data` as JSON to `path` (temp file in the same dir +
+    os.replace), creating the home dir if needed. Last write wins — no locking
+    (single local user, D3)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        _replace_atomic(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# Not a real backoff schedule: the sharing violation this chases clears as
+# soon as the OTHER writer's own os.replace finishes (or a reader's brief
+# open() closes), which is normally microseconds, not seconds — so a fixed,
+# short interval between tries is enough, and the budget is just "keep trying
+# for a while" rather than anything that needs to grow.
+#
+# The budget itself has to be generous, not merely "a handful": measured
+# against tests/test_mounts_rcd_auth.py's
+# test_concurrent_state_writes_never_pin_a_stale_secret (a background thread
+# doing nothing BUT open()/close() rcd.json in a tight loop while the main
+# thread writes it ~40 times), a real Windows CI runner's disk latency
+# (antivirus real-time scanning is the usual culprit) can stretch what is
+# "microseconds" on a dev machine into tens of milliseconds per contended
+# open — long enough that the original 8-try/20ms (160ms total) budget ran
+# out mid-test and os.replace's PermissionError escaped write_rcd_state
+# uncaught. The cost of a bigger budget is paid only on the rare path that
+# actually contends — an ordinary write still succeeds on its first try — so
+# there is no reason not to make it generous.
+_REPLACE_RETRIES = 50
+_REPLACE_RETRY_DELAY_S = 0.05
+
+
+def _replace_atomic(tmp: str, path: str) -> None:
+    """os.replace(tmp, path), with a brief retry on Windows only.
+
+    POSIX rename is atomic and never raises for a concurrent replace — that is
+    what lets write_json promise "last write wins" with no locking above. The
+    identical call on Windows is backed by MoveFileExW, which CAN raise
+    PermissionError ([WinError 5] "Access is denied") for a few milliseconds
+    while another writer's os.replace (or a reader's plain open(), which grants
+    no FILE_SHARE_DELETE by default) still holds the destination — a transient
+    sharing violation, not a real permissions problem. Two concurrent
+    write_json calls to the SAME path (rcd.json under racing threads is the
+    known case) can hit this on every real Windows run.
+
+    Retrying rides that out and gives Windows the same "last write wins,
+    the call itself always succeeds" contract POSIX gets for free — a dropped
+    write here is not "last write wins", it is data loss. Gated on os.name so
+    POSIX keeps the exact single-call behavior it always had."""
+    return _retrying_on_sharing_violation(lambda: os.replace(tmp, path))
+
+
+def _retrying_on_sharing_violation(op):
+    """`op()`, retried briefly when Windows reports a sharing violation.
+
+    Both HALVES of the read/write race need this, not just the write:
+    Windows' os.replace holds the destination for the duration of the swap and
+    a plain open() grants no FILE_SHARE_DELETE, so a concurrent READER can be
+    refused with PermissionError just as a concurrent writer can. Retrying only
+    the writer left the reader raising into whatever request touched it — the
+    Windows CI run showed exactly that, a PermissionError escaping read_json
+    through mounts/rcd.py's `_rcd_auth` (a live request path, not just a test).
+
+    PermissionError ONLY: a missing file must stay instant (read_json's
+    "absent → None" is a hot path — retrying it for the whole budget would be
+    a real slowdown on the common never-written case), and a parse error is
+    not a race. Gated on os.name so POSIX keeps its exact single-call
+    behavior. A violation that outlives the budget still raises: at that point
+    it is a genuinely unreadable/unwritable file, not a millisecond of
+    contention, and silently reporting it as absent would degrade auth rather
+    than surface a real problem."""
+    if os.name != "nt":
+        return op()
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            return op()
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_S)
+
+

@@ -663,78 +663,151 @@
     if (enabled) throw unsupported("fused.autoReload(true)");
   }
 
-  // ---- fused.ai (Claude tier only) ---------------------------------------
-  // Same contract as fused-render's fused.ai.text: one options object,
-  // the shared result frame {text, provider, finishReason, warnings, usage,
-  // response, providerMetadata}, rejections carry `.type`. Streaming is
-  // NDJSON over a chunked HTTP response read with fetch's body reader — no
-  // socket. No local inference in lite: image/video/transcribe/embed and
-  // the local/apple providers reject with type "unavailable".
-  function aiError(type, message) {
-    const err = new Error(message);
-    err.type = type;
-    return err;
+  // ---- fused.ai: fused-render's own client code, lifted verbatim -----------
+  // Text (Claude / local / apple by model shape), image, video, transcribe,
+  // embed, models, cancel. Streaming is NDJSON over chunked HTTP; job-backed
+  // verbs poll /api/jobs through watchJob. Two helpers the original took from
+  // elsewhere in its runtime are shimmed here:
+  function callHeaders(extra, _callId) {
+    const h = Object.assign({}, extra || {});
+    const ownPath = ownQuery("path");
+    if (ownPath) h["X-Fused-Page"] = encodeURIComponent(ownPath);
+    return h;
   }
+  function noteFsChanged() {}
+
   function abortSignalOf(opts) {
     const s = opts && opts.abortSignal;
-    return s && typeof s.aborted === "boolean" && typeof s.addEventListener === "function" ? s : null;
+    return s && typeof s.aborted === "boolean" && typeof s.addEventListener === "function"
+      ? s : null;
   }
-  function rethrowAbort(e) {
-    if (e && e.name === "AbortError") throw aiError("cancelled", "the AI call was cancelled");
-    throw e;
+  function cancelledError(what, jobId) {
+    const err = new Error(what + " was cancelled");
+    err.type = "cancelled";
+    if (jobId) err.jobId = jobId;
+    return err;
   }
-  function rejectUnknownOptions(opts, allowed, apiName) {
-    const set = new Set(allowed);
-    const unknown = Object.keys(opts).filter((k) => !set.has(k)).sort();
-    if (!unknown.length) return null;
-    const named = unknown.map((k) => "'" + k + "'").join(", ");
-    return aiError("bad_request", named + (unknown.length === 1 ? " is not an option" : " are not options")
-      + " of " + apiName + "; accepted: " + allowed.slice().sort().join(", "));
+  function rethrowAbort(what) {
+    return (e) => {
+      if (e && e.name === "AbortError") throw cancelledError(what);
+      throw e;
+    };
   }
-  function failWith(error) {
-    throw aiError((error && error.type) || "ai_error", (error && error.message) || "AI call failed");
+  function resultFrame(payload, f) {
+    const meta = {};
+    Object.keys(f.metadata || {}).forEach((k) => {
+      if (f.metadata[k] !== undefined) meta[k] = f.metadata[k];
+    });
+    return {
+      provider: f.provider || "local",
+      finishReason: f.finishReason || "stop",
+      warnings: f.warnings || [],
+      usage: f.usage === undefined ? null : f.usage,
+      response: { id: f.id || null, modelId: f.modelId,
+                  timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, "Z") },
+      providerMetadata: { [f.provider || "local"]: meta },
+      ...payload,
+    };
   }
-
-  const TEXT_KEYS = ["prompt", "provider", "model", "systemPrompt", "effort", "history", "raw",
-                     "images", "temperature", "maxTokens", "topP", "onChunk", "abortSignal"];
+  function frameSegment(s) {
+    if (!s || typeof s !== "object") return s;
+    const { start, end, words, ...rest } = s;
+    const out = { ...rest, startSecond: start, endSecond: end };
+    if (Array.isArray(words)) {
+      out.words = words.map((w) => ({ word: w.word, startSecond: w.start, endSecond: w.end }));
+    }
+    return out;
+  }
+  function startJob(path, body, signal, what) {
+    if (signal && signal.aborted) return Promise.reject(cancelledError(what));
+    return aiPost(path, body).then((started) => {
+      if (!started || typeof started.jobId !== "string" || !started.jobId) {
+        const err = new Error(path + " replied with no jobId");
+        err.type = "ai_error";
+        throw err;
+      }
+      if (signal && signal.aborted) {
+        cancelJob(started.jobId);
+        throw cancelledError(what, started.jobId);
+      }
+      return started;
+    });
+  }
+  function cancelJob(jobId) {
+    return fetch("/api/jobs/" + encodeURIComponent(jobId) + "/cancel", {
+      method: "POST",
+      headers: callHeaders({ "X-Fused": "1" }),
+    }).catch(() => {});
+  }
 
   function aiText(opts) {
     opts = opts || {};
-    const unknown = rejectUnknownOptions(opts, TEXT_KEYS, "fused.ai.text");
-    if (unknown) return Promise.reject(unknown);
-    if (typeof opts.prompt !== "string" || !opts.prompt.trim()) {
-      return Promise.reject(aiError("bad_request", "fused.ai.text({prompt}): prompt must be a non-empty string"));
+    const textKeys = ["prompt", "provider", "model", "systemPrompt", "effort", "history",
+                      "raw", "images", "temperature", "maxTokens", "topP"];
+    const textUnknownErr = rejectUnknownOptions(opts, textKeys, ["onChunk", "abortSignal"], "fused.ai.text");
+    if (textUnknownErr) return Promise.reject(textUnknownErr);
+    const prompt = opts.prompt;
+    if (typeof prompt !== "string" || !prompt.trim()) {
+      const err = new Error("fused.ai.text({prompt}): prompt must be a non-empty string");
+      err.type = "bad_request";
+      return Promise.reject(err);
     }
-    const body = {};
-    for (const k of TEXT_KEYS) {
-      if (k !== "onChunk" && k !== "abortSignal" && opts[k] !== undefined) body[k] = opts[k];
-    }
-    if (body.images !== undefined) {
-      const ownPath = ownQuery("path");
+    const body = { prompt: prompt };
+    if (opts.provider !== undefined) body.provider = opts.provider;
+    if (opts.systemPrompt !== undefined) body.systemPrompt = opts.systemPrompt;
+    if (opts.model !== undefined) body.model = opts.model;
+    if (opts.effort !== undefined) body.effort = opts.effort;
+    if (opts.history !== undefined) body.history = opts.history;
+    if (opts.raw !== undefined) body.raw = opts.raw;
+    if (opts.images !== undefined) {
+      body.images = opts.images;
+      const ownPath = new URLSearchParams(window.location.search).get("path");
       if (ownPath) body.base = ownPath;
     }
+    if (opts.temperature !== undefined) body.temperature = opts.temperature;
+    if (opts.maxTokens !== undefined) body.maxTokens = opts.maxTokens;
+    if (opts.topP !== undefined) body.topP = opts.topP;
     const onChunk = typeof opts.onChunk === "function" ? opts.onChunk : null;
     if (onChunk) body.stream = true;
     const signal = abortSignalOf(opts);
-    if (signal && signal.aborted) return Promise.reject(aiError("cancelled", "the AI call was cancelled"));
-
+    if (signal && signal.aborted) return Promise.reject(cancelledError("the AI call"));
+    const looksLocal = body.provider === "local"
+      || (body.provider === undefined && typeof body.model === "string"
+          && (body.model.indexOf("/") !== -1 || /\.gguf$/i.test(body.model)));
+    const looksApple = body.provider === "apple"
+      || (body.provider === undefined && body.model === "afm-text");
+    const wantsServerCancel = !!signal && !onChunk && (looksLocal || looksApple);
+    const onAbort = () => {
+      aiPost("/api/ai/cancel", looksApple ? { provider: "apple" } : {}).catch(() => {});
+    };
+    if (wantsServerCancel) signal.addEventListener("abort", onAbort, { once: true });
+    const settle = (promise) => wantsServerCancel
+      ? promise.finally(() => signal.removeEventListener("abort", onAbort))
+      : promise;
     const req = fetch("/api/ai", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Fused": "1" },
+      headers: callHeaders({ "Content-Type": "application/json", "X-Fused": "1" }),
       body: JSON.stringify(body),
       signal: signal || undefined,
-    }).catch(rethrowAbort);
-
-    if (!onChunk) {
-      return req.then((res) => res.json().catch(rethrowAbort)).then((data) => {
-        if (!data.ok) failWith(data.error);
-        return data.result;
-      });
+    }).catch(rethrowAbort("the AI call"));
+    function fail(error) {
+      const err = new Error(error && error.message);
+      err.type = error && error.type;
+      if (error && error.jobId) err.jobId = error.jobId;
+      throw err;
     }
-    return req.then((res) => {
-      const ct = res.headers.get("Content-Type") || "";
-      if (!res.ok || ct.indexOf("x-ndjson") === -1) {
-        return res.json().catch(rethrowAbort).then((data) => failWith(data && data.error));
+    if (!onChunk) {
+      return settle(req
+        .then((res) => res.json().catch(rethrowAbort("the AI call")))
+        .then((data) => {
+          if (!data.ok) fail(data.error);
+          return data.result;
+        }));
+    }
+    return settle(req.then((res) => {
+      const ct = (res.headers.get("Content-Type") || "").indexOf("x-ndjson");
+      if (!res.ok || ct === -1) {
+        return res.json().catch(rethrowAbort("the AI call")).then((data) => fail(data && data.error));
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -750,8 +823,8 @@
         return reader.read().then(({ done, value }) => {
           if (done) {
             if (buffer) handleLine(buffer);
-            if (!finished) failWith({ type: "ai_error", message: "stream ended without a done frame" });
-            if (!finished.ok) failWith(finished.error);
+            if (!finished) fail({ type: "ai_error", message: "stream ended without a done frame" });
+            if (!finished.ok) fail(finished.error);
             return finished.result;
           }
           buffer += decoder.decode(value, { stream: true });
@@ -759,36 +832,412 @@
           buffer = lines.pop();
           lines.forEach(handleLine);
           return pump();
-        }, rethrowAbort);
+        }, rethrowAbort("the AI call"));
       }
       return pump();
+    }));
+  }
+
+  const JOB_STATE_RUNNING = "running";
+
+  function newJobId() {
+    return "j" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+
+  async function aiPost(path, body, signal) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: callHeaders({ "Content-Type": "application/json", "X-Fused": "1" }),
+      body: JSON.stringify(body || {}),
+      signal: signal || undefined,
+    }).catch(rethrowAbort("the AI call"));
+    const data = await res.json().catch(rethrowAbort("the AI call")).catch((e) => {
+      if (e && e.type === "cancelled") throw e;
+      return {};
+    });
+    if (!res.ok) {
+      const err = new Error((data && data.error) || res.statusText);
+      err.type = res.status === 409 ? "unavailable" : "bad_request";
+      throw err;
+    }
+    return data;
+  }
+  function rejectUnknownOptions(opts, allowedKeys, extra, apiName) {
+    const allowed = new Set(allowedKeys.concat(extra));
+    const unknown = Object.keys(opts).filter((key) => !allowed.has(key)).sort();
+    if (!unknown.length) return null;
+    const named = unknown.map((key) => "'" + key + "'").join(", ");
+    const verb = unknown.length === 1 ? "is not an option" : "are not options";
+    const accepted = allowedKeys.concat(extra).slice().sort().join(", ");
+    const err = new Error(`${named} ${verb} of ${apiName}; accepted: ${accepted}`);
+    err.type = "bad_request";
+    return err;
+  }
+  function aiImage(opts) {
+    opts = opts || {};
+    const imageKeys = ["prompt", "model", "provider", "width", "height", "steps", "guidance", "seed", "image"];
+    const unknownErr = rejectUnknownOptions(opts, imageKeys, ["onProgress", "abortSignal"], "fused.ai.image");
+    if (unknownErr) return Promise.reject(unknownErr);
+    if (typeof opts.prompt !== "string" || !opts.prompt.trim()) {
+      const err = new Error("fused.ai.image({prompt}): prompt must be a non-empty string");
+      err.type = "bad_request";
+      return Promise.reject(err);
+    }
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const body = {};
+    for (const key of imageKeys) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    const ownPath = new URLSearchParams(window.location.search).get("path");
+    if (ownPath) body.base = ownPath;
+    const signal = abortSignalOf(opts);
+    return startJob("/api/ai/image", body, signal, "the image").then((started) => {
+      const watcher = watchJob(started.jobId);
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          watcher.stop();
+          cancelJob(started.jobId);
+        }, { once: true });
+      }
+      const previewUrl = (job) =>
+        started.previewPath && job && job.state === "running"
+          ? rawUrl(started.previewPath) + "&step=" + (job.done || 0)
+          : null;
+      const done = () => resultFrame(
+        { images: [{ path: started.path, url: rawUrl(started.path), mediaType: "image/png" }] },
+        { provider: started.provider, modelId: started.model, id: started.jobId,
+          warnings: started.warnings, usage: { imagesGenerated: 1 },
+          metadata: { seed: started.seed, width: started.width, height: started.height,
+                      steps: started.steps, guidance: started.guidance, image: started.image,
+                      prompt: started.prompt, previewPath: started.previewPath } });
+      const tick = onProgress
+        ? (job) => onProgress({ ...job, previewUrl: previewUrl(job) })
+        : null;
+      return watcher.watch(tick).then((record) => {
+        if (signal && signal.aborted) throw cancelledError("the image", started.jobId);
+        if (!record) {
+          return stat(started.path).then(done, () => {
+            const err = new Error("the image job is no longer being reported");
+            err.type = "ai_error";
+            err.jobId = started.jobId;
+            throw err;
+          });
+        }
+        if (record.state === "done") return done();
+        const err = new Error(
+          record.state === "cancelled"
+            ? "the image was cancelled"
+            : record.message || "the image failed to render",
+        );
+        err.type = record.state === "cancelled" ? "cancelled" : "ai_error";
+        err.jobId = started.jobId;
+        throw err;
+      });
     });
   }
 
-  function aiUnavailable(verb) {
-    return function () {
-      return Promise.reject(aiError("unavailable",
-        "fused.ai." + verb + " is not available on fused-render-lite: no local inference in this build"));
-    };
+  function aiVideo(opts) {
+    opts = opts || {};
+    const videoKeys = ["prompt", "model", "provider", "width", "height", "frames", "steps", "seed", "image"];
+    const unknownErr = rejectUnknownOptions(opts, videoKeys, ["onProgress", "abortSignal"], "fused.ai.video");
+    if (unknownErr) return Promise.reject(unknownErr);
+    if (typeof opts.prompt !== "string" || !opts.prompt.trim()) {
+      const err = new Error("fused.ai.video({prompt}): prompt must be a non-empty string");
+      err.type = "bad_request";
+      return Promise.reject(err);
+    }
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const body = {};
+    for (const key of videoKeys) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    const ownPath = new URLSearchParams(window.location.search).get("path");
+    if (ownPath) body.base = ownPath;
+    const signal = abortSignalOf(opts);
+    return startJob("/api/ai/video", body, signal, "the video").then((started) => {
+      const watcher = watchJob(started.jobId);
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          watcher.stop();
+          cancelJob(started.jobId);
+        }, { once: true });
+      }
+      const done = () => resultFrame(
+        { videos: [{ path: started.path, url: rawUrl(started.path), mediaType: "video/mp4" }] },
+        { provider: started.provider, modelId: started.model, id: started.jobId,
+          warnings: started.warnings, usage: { videosGenerated: 1 },
+          metadata: { seed: started.seed, width: started.width, height: started.height,
+                      frames: started.frames, steps: started.steps, image: started.image,
+                      prompt: started.prompt } });
+      const tick = onProgress ? (job) => onProgress({ ...job }) : null;
+      return watcher.watch(tick).then((record) => {
+        if (signal && signal.aborted) throw cancelledError("the video", started.jobId);
+        if (!record) {
+          return stat(started.path).then(done, () => {
+            const err = new Error("the video job is no longer being reported");
+            err.type = "ai_error";
+            err.jobId = started.jobId;
+            throw err;
+          });
+        }
+        if (record.state === "done") return done();
+        const err = new Error(
+          record.state === "cancelled"
+            ? "the video was cancelled"
+            : record.message || "the video failed to render",
+        );
+        err.type = record.state === "cancelled" ? "cancelled" : "ai_error";
+        err.jobId = started.jobId;
+        throw err;
+      });
+    });
   }
-  function aiGet(path) {
-    return fetch(path).then((r) => r.json());
+
+  function aiTranscribe(opts) {
+    opts = opts || {};
+    const transcribeKeys = ["path", "model", "provider", "language", "task", "initialPrompt",
+                            "vad", "diarize", "speakers", "words"];
+    const transcribeUnknownErr = rejectUnknownOptions(
+      opts, transcribeKeys, ["onProgress", "onChunk", "abortSignal"], "fused.ai.transcribe");
+    if (transcribeUnknownErr) return Promise.reject(transcribeUnknownErr);
+    if (typeof opts.path !== "string" || !opts.path.trim()) {
+      const err = new Error("fused.ai.transcribe({path}): path must be a non-empty string");
+      err.type = "bad_request";
+      return Promise.reject(err);
+    }
+    if (opts.diarize && opts.speakers !== undefined && opts.speakers !== null
+        && opts.speakers !== "") {
+      const MAX_SPEAKERS = 100;
+      if (
+        !Number.isInteger(opts.speakers) ||
+        opts.speakers < 1 ||
+        opts.speakers > MAX_SPEAKERS
+      ) {
+        const err = new Error(
+          "fused.ai.transcribe({diarize: true}): 'speakers' must be a " +
+            "whole number of people from 1 to " + MAX_SPEAKERS +
+            ", e.g. {diarize: true, speakers: 2} — or leave it out and the " +
+            "count is estimated from the recording.",
+        );
+        err.type = "bad_request";
+        return Promise.reject(err);
+      }
+    }
+    const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+    const onSegment = typeof opts.onChunk === "function" ? opts.onChunk : null;
+    const body = {};
+    for (const key of transcribeKeys) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    const ownPath = new URLSearchParams(window.location.search).get("path");
+    if (ownPath) body.base = ownPath;
+    const signal = abortSignalOf(opts);
+    return startJob("/api/ai/transcribe", body, signal, "the transcription").then((started) => {
+      const watcher = watchJob(started.jobId);
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          watcher.stop();
+          cancelJob(started.jobId);
+        }, { once: true });
+      }
+      let delivered = 0;
+      let offset = 0;
+      let pending = "";
+      let tailing = false;
+      let broken = false;
+      const decoder = onSegment && typeof TextDecoder === "function"
+        ? new TextDecoder("utf-8") : null;
+      const deliver = (raw) => {
+        const segment = frameSegment(raw);
+        delivered += 1;
+        onSegment(segment);
+      };
+      const readNew = async () => {
+        const from = offset;
+        const res = await fetch(rawUrl(started.outputPartial), {
+          headers: callHeaders({ Range: "bytes=" + from + "-" }),
+        });
+        if (res.status === 416 || res.status === 404) return;
+        if (!res.ok && res.status !== 206) return;
+        let bytes = new Uint8Array(await res.arrayBuffer());
+        if (res.status !== 206) {
+          if (bytes.length <= from) return;
+          bytes = bytes.subarray(from);
+        }
+        offset = from + bytes.length;
+        pending += decoder.decode(bytes, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let segment;
+          try {
+            segment = JSON.parse(line);
+          } catch (_unparseable) {
+            broken = true;
+            return;
+          }
+          deliver(segment);
+        }
+      };
+      let tailChain = Promise.resolve();
+      const tail = () => {
+        if (!onSegment || !decoder || tailing || broken || !started.outputPartial) {
+          return tailChain;
+        }
+        tailing = true;
+        tailChain = tailChain
+          .then(readNew)
+          .catch(() => {})
+          .then(() => { tailing = false; });
+        return tailChain;
+      };
+      const drainPartial = () =>
+        tailChain
+          .then(() => {
+            if (!onSegment || !decoder || broken || !started.outputPartial) return;
+            return readNew();
+          })
+          .catch(() => {});
+      const done = () =>
+        tailChain
+          .then(() => readFile(started.output))
+          .then(JSON.parse)
+          .then((written) => {
+            if (onSegment) {
+              for (const segment of (written.segments || []).slice(delivered)) {
+                deliver(segment);
+              }
+            }
+            return written;
+          })
+          .then((written) => resultFrame(
+            {
+              text: written.text,
+              segments: (written.segments || []).map(frameSegment),
+              language: written.language,
+              durationInSeconds: written.duration,
+            },
+            { provider: started.provider, modelId: started.model, id: started.jobId,
+              warnings: started.warnings, usage: null,
+              metadata: {
+                path: started.path,
+                output: started.output,
+                url: rawUrl(started.output),
+                outputText: started.outputText,
+                outputPartial: started.outputPartial,
+                task: started.task,
+                speakers: written.speakers,
+                estimatedSpeakers: written.estimatedSpeakers,
+              } }))
+          .catch((cause) => {
+            const err = new Error(
+              "the transcript could not be read: " + ((cause && cause.message) || cause),
+            );
+            err.type = "ai_error";
+            err.jobId = started.jobId;
+            err.cause = cause;
+            throw err;
+          });
+      const onTick = onSegment
+        ? (record) => { if (onProgress) onProgress(record); tail(); }
+        : onProgress;
+      return watcher.watch(onTick).then((record) => {
+        if (signal && signal.aborted) throw cancelledError("the transcription", started.jobId);
+        if (!record) {
+          return done().catch(() => {
+            const err = new Error("the transcription job is no longer being reported");
+            err.type = "ai_error";
+            err.jobId = started.jobId;
+            err.output = started.output;
+            err.outputPartial = started.outputPartial;
+            return drainPartial().then(() => { throw err; });
+          });
+        }
+        if (record.state === "done") return done();
+        const err = new Error(
+          record.state === "cancelled"
+            ? "the transcription was cancelled"
+            : record.message || "the transcription failed",
+        );
+        err.type = record.state === "cancelled" ? "cancelled" : "ai_error";
+        err.jobId = started.jobId;
+        err.output = started.output;
+        err.outputPartial = started.outputPartial;
+        return drainPartial().then(() => { throw err; });
+      });
+    });
   }
+
+  function aiEmbed(opts) {
+    opts = opts || {};
+    const hasTexts = Array.isArray(opts.texts) && opts.texts.length > 0;
+    const hasPaths = Array.isArray(opts.paths) && opts.paths.length > 0;
+    if (hasTexts === hasPaths) {
+      const err = new Error(
+        "fused.ai.embed({texts|paths}): pass exactly one of 'texts' or "
+          + "'paths' — a non-empty array of strings",
+      );
+      err.type = "bad_request";
+      return Promise.reject(err);
+    }
+    const body = {};
+    if (hasTexts) body.texts = opts.texts;
+    if (hasPaths) body.paths = opts.paths;
+    if (opts.model !== undefined) body.model = opts.model;
+    if (opts.provider !== undefined) body.provider = opts.provider;
+    if (opts.kind !== undefined) body.kind = opts.kind;
+    if (hasPaths) {
+      const ownPath = new URLSearchParams(window.location.search).get("path");
+      if (ownPath) body.base = ownPath;
+    }
+    const signal = abortSignalOf(opts);
+    if (signal && signal.aborted) return Promise.reject(cancelledError("the embedding"));
+    return fetch("/api/ai/embed", {
+      method: "POST",
+      headers: callHeaders({ "Content-Type": "application/json", "X-Fused": "1" }),
+      body: JSON.stringify(body),
+      signal: signal || undefined,
+    })
+      .catch(rethrowAbort("the embedding"))
+      .then((res) => res.json().catch(() => ({})).then((data) => ({ res, data })))
+      .then(({ res, data }) => {
+        if (!res.ok || !data.ok) {
+          const error = data.error || {};
+          const err = new Error(
+            error.message || res.statusText || "the embedding failed");
+          err.type = error.type
+            || (res.status === 409 ? "unavailable" : "ai_error");
+          if (error.jobId) err.jobId = error.jobId;
+          throw err;
+        }
+        return data.result;
+      });
+  }
+
+  const aiModels = {
+    list: () => fetch("/api/ai/runtime", { headers: callHeaders({}) }).then((r) => r.json()),
+    catalog: () => fetch("/api/ai/catalog", { headers: callHeaders({}) }).then((r) => r.json()),
+    load: (model, opts) =>
+      aiPost("/api/ai/runtime/load", { model, ...(opts || {}) }),
+    download: (model, opts) =>
+      aiPost("/api/ai/runtime/download", { model, ...(opts || {}) }),
+    unload: (model) =>
+      aiPost("/api/ai/runtime/unload",
+             typeof model === "string" || model == null
+               ? { model } : { capability: model.capability }),
+  };
   const ai = {
     text: aiText,
-    image: aiUnavailable("image"),
-    video: aiUnavailable("video"),
-    transcribe: aiUnavailable("transcribe"),
-    embed: aiUnavailable("embed"),
-    cancel: () => Promise.resolve(false),
-    models: {
-      list: () => aiGet("/api/ai/runtime"),
-      catalog: () => aiGet("/api/ai/catalog"),
-      load: aiUnavailable("models.load"),
-      download: aiUnavailable("models.download"),
-      unload: aiUnavailable("models.unload"),
-    },
+    models: aiModels,
+    image: aiImage,
+    video: aiVideo,
+    transcribe: aiTranscribe,
+    embed: aiEmbed,
+    cancel: (capability) =>
+      aiPost("/api/ai/cancel", capability ? { capability } : {}).then((r) => !!r.cancelled),
   };
+
 
   // ---- the global ---------------------------------------------------------
   window.fused = {

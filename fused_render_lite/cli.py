@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
+import threading
 import urllib.parse
 import webbrowser
 
@@ -46,11 +48,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"fused-render-lite {__version__} at {url}", flush=True)
     if not args.no_browser:
         webbrowser.open(url)
+    stop = threading.Event()
+    # SIGTERM (a plain `kill`, launchd, a supervisor) must evict resident model
+    # workers like Ctrl-C does — otherwise they outlive the server.
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
     try:
-        _thread.join()
+        while not stop.is_set() and _thread.is_alive():
+            stop.wait(0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        server.stop_ai()
         srv.shutdown()
     return 0
 

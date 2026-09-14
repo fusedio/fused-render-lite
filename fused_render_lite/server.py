@@ -18,9 +18,8 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
-  POST /api/ai              fused.ai.text body -> {ok, result} or chunked NDJSON when stream:true
-  GET  /api/ai/runtime, /api/ai/catalog        the Claude tier's models
-  POST /api/ai/cancel, /api/ai/<other>         {cancelled:false} / 409 unavailable (no local inference)
+  /api/ai, /api/ai/*        fused-render's own AI routers (server/ai_relay.py, server/ai_routes.py),
+                            copied verbatim and mounted through _web.APIRouter
 
 Binds 127.0.0.1 only. Mutating/executing POSTs require ``X-Fused: 1``, which
 forces a CORS preflight a foreign origin cannot pass — same guard as
@@ -40,7 +39,13 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, ai, appfile, env, jobs, paths
+from fused_render_lite import __version__, appfile, env, jobs, paths
+from fused_render_lite._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
+from fused_render_lite.routes import ai_relay, ai_routes
+
+AI_ROUTER = APIRouter()
+AI_ROUTER.include_router(ai_relay.router)
+AI_ROUTER.include_router(ai_routes.router)
 
 logger = logging.getLogger(__name__)
 
@@ -135,13 +140,11 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/health":
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
             if route == "/api/jobs":
-                return self._json({"jobs": jobs.list_all()})
-            if route == "/api/ai/runtime":
-                return self._json(ai.runtime())
-            if route == "/api/ai/catalog":
-                return self._json(ai.catalog())
+                return self._json({"jobs": jobs.list_jobs(mark_read=True)})
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
+            if self._dispatch("GET", route, q):
+                return
             self._error("not found", 404)
         except Exception as exc:  # noqa: BLE001
             logger.exception("GET %s failed", self.path)
@@ -167,18 +170,12 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/jobs":
                 return self._jobs_report()
             if route == "/api/jobs/clear":
-                return self._guarded() and self._json({"cleared": jobs.clear()})
+                return self._guarded() and self._json({"cleared": jobs.clear_finished()})
             m = re.match(r"^/api/jobs/([^/]+)/(cancel|dismiss)$", route)
             if m:
                 return self._jobs_action(urllib.parse.unquote(m.group(1)), m.group(2))
-            if route == "/api/ai":
-                return self._api_ai()
-            if route == "/api/ai/cancel":
-                return self._guarded() and self._json({"cancelled": False})
-            if route.startswith("/api/ai/"):
-                return self._guarded() and self._json(
-                    {"error": "not available on fused-render-lite: no local inference in this "
-                              "build", "type": "unavailable"}, 409)
+            if self._dispatch("POST", route, {}):
+                return
             self._error("not found", 404)
         except Exception as exc:  # noqa: BLE001
             logger.exception("POST %s failed", self.path)
@@ -307,8 +304,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guarded():
             return
         body = self._json_body()
+        page = urllib.parse.unquote(self.headers.get("X-Fused-Page") or "")
         try:
-            self._json(jobs.upsert(body if body is not None else {}))
+            self._json(jobs.upsert(body if body is not None else {}, page=page))
         except jobs.JobError as exc:
             self._error(str(exc))
 
@@ -316,62 +314,69 @@ class Handler(BaseHTTPRequestHandler):
         if not self._guarded():
             return
         if action == "cancel":
-            row = jobs.cancel(job_id)
+            row = jobs.request_cancel(job_id)
             return self._json(row) if row else self._error("no such job", 404)
         return self._json({"dismissed": jobs.dismiss(job_id)})
 
-    # ---- fused.ai.text ----------------------------------------------------
+    # ---- copied fused-render routers (AI) ----------------------------------
 
-    def _api_ai(self) -> None:
-        """POST /api/ai: ``{ok, result}`` JSON, or with ``stream: true`` an
-        NDJSON body (chunked transfer) of ``{"type":"chunk","text"}`` lines
-        closed by one ``{"type":"done", ok, result|error}`` line. Validation
-        and the missing-binary check happen before the first byte, so those
-        are always proper JSON errors."""
-        if not self._guarded():
+    def _dispatch(self, method: str, route: str, q: dict) -> bool:
+        """Route through the FastAPI-shaped routers copied from fused-render
+        (`_web.APIRouter`). Returns False when nothing matched."""
+        fn, path_params = AI_ROUTER.match(method, route)
+        if fn is None:
+            return False
+        body = None
+        if method == "POST":
+            body = self._json_body()
+            if body is None:
+                body = {}
+        request = Request(method, route, dict(self.headers.items()), q)
+        try:
+            result = call_route(fn, body=body, headers=dict(self.headers.items()), query=q,
+                                path_params=path_params or {}, request=request)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s %s failed", method, route)
+            self._error(f"internal error: {exc}", 500)
+            return True
+        self._emit(result)
+        return True
+
+    def _emit(self, result) -> None:
+        if isinstance(result, StreamingResponse):
+            self.send_response(result.status_code)
+            self.send_header("Content-Type", result.media_type)
+            for k, v in result.headers.items():
+                self.send_header(k, v)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                for piece in result.iter_bytes():
+                    if not piece:
+                        continue
+                    self.wfile.write(b"%x\r\n" % len(piece) + piece + b"\r\n")
+                    self.wfile.flush()
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.close_connection = True
+            finally:
+                if result.background:
+                    try:
+                        result.background()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("background task failed")
             return
-        body = self._json_body()
-        try:
-            request, warnings = ai.validate(body)
-            if ai.claude_bin() is None:
-                raise ai.AiError("ai_unavailable",
-                                 f"claude CLI not found; install Claude Code or set {ai.BIN_ENV} "
-                                 "to its location")
-        except ai.AiError as exc:
-            return self._json({"ok": False, "error": exc.payload()}, exc.status)
-        run = ai.Completion(request, warnings)
-        if not request["stream"]:
-            try:
-                for _ in run.events():
-                    pass
-            except ai.AiError as exc:
-                return self._json({"ok": False, "error": exc.payload()}, exc.status)
-            return self._json({"ok": True, "result": run.result})
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-
-        def chunk(obj: dict) -> None:
-            data = (json.dumps(obj) + "\n").encode("utf-8")
-            self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
-            self.wfile.flush()
-
-        try:
-            try:
-                for piece in run.events():
-                    chunk({"type": "chunk", "text": piece})
-                chunk({"type": "done", "ok": True, "result": run.result})
-            except ai.AiError as exc:
-                chunk({"type": "done", "ok": False, "error": exc.payload()})
-            self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            run.kill()  # the page went away (abortSignal / tab closed): stop paying for tokens
-            self.close_connection = True
+        if isinstance(result, Response):
+            self._send(result.status_code, result.body, result.media_type, result.headers)
+            if result.background:
+                try:
+                    result.background()
+                except Exception:  # noqa: BLE001
+                    logger.exception("background task failed")
+            return
+        self._json(result if result is not None else {})
 
     # ---- fs ---------------------------------------------------------------
 
@@ -577,13 +582,41 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     srv = Server((host, port), Handler)
     # Workers spawned by runPython inherit this, so a detached process can
     # keep reporting to /api/jobs after its page is gone (fused-render's
-    # documented pattern: plain JSON over HTTP, no fused_render import).
+    # documented pattern: plain JSON over HTTP, no fused_render_lite import).
     os.environ["FUSED_RENDER_ORIGIN"] = f"http://{host}:{srv.server_address[1]}"
     return srv
 
 
+def start_ai() -> None:
+    """The AI subsystem's background threads, as fused-render wires them at
+    startup: the warm Claude process, the idle-model reaper, hardware and
+    Hub-metadata refresh. Each is best-effort."""
+    for name, fn in (("prewarm_ai", lambda: call_on_loop(ai_relay.prewarm_ai, None)),
+                     ("reaper", ai_routes.supervisor.start_reaper),
+                     ("hardware", ai_routes.supervisor.start_hardware_refresh),
+                     ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh)):
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            logger.exception("ai startup hook %s failed", name)
+
+
+def stop_ai() -> None:
+    """Evict resident models (kills their worker processes) and the warm
+    Claude instance. Called on quit."""
+    try:
+        ai_routes.supervisor.unload_all()
+    except Exception:  # noqa: BLE001
+        logger.exception("unload_all failed")
+    try:
+        run_async(ai_relay.shutdown_ai_session(None), timeout=15)
+    except Exception:  # noqa: BLE001
+        logger.exception("ai shutdown failed")
+
+
 def serve_in_thread(port: int = 0) -> tuple[Server, threading.Thread]:
     srv = make_server(port)
+    start_ai()
     thread = threading.Thread(target=srv.serve_forever, name="fused-render-lite http", daemon=True)
     thread.start()
     return srv, thread

@@ -10,7 +10,7 @@ There is a third consumer that does not import this module: the fused engine's
 child cannot see the package at all (the local backend strips PYTHONPATH), so
 `engine.build_code` reads **this file's source** and `exec`s it inside the code
 it generates (D167). Consequences for anything edited here: keep it stdlib-only
-and self-contained (no `fused_render.*` imports, no reliance on module state),
+and self-contained (no `fused_render_lite.*` imports, no reliance on module state),
 and remember that a change to the coercion rules changes both engines at once —
 which is the point. `tests/test_engine_parity.py` holds them to it.
 """

@@ -1,0 +1,233 @@
+# The diffusers image runner's environment — the CPU variant (SPEC §40, PY-16).
+#
+# This folder exists so that torch and diffusers are named in one place and live
+# in their own interpreter — not fused-render's. They are several GB; a file
+# explorer that could not start without them would be a worse file explorer, and
+# `envinstall` (PY-18) builds this on first use with the same detached `uv sync`
+# and the same verbatim errors any declaring folder gets.
+#
+# **This is one of THREE folders that install the same runner.** `torch` is the
+# only line that differs between them: here it comes from
+# `download.pytorch.org/whl/cpu`, in `diffusers_image_cuda/` from PyPI (whose torch
+# IS the CUDA build), in `diffusers_image_rocm/` from
+# `download.pytorch.org/whl/rocm7.1`. The code they run is `runners/torch_image.py`
+# — one file, shared, because a denoising loop does not know what it is multiplying
+# on. Three folders rather than one manifest with a switch because
+# `_env_install_worker` runs a BARE `uv sync` with cwd set to the runner folder
+# (PY-18): a user never types a uv command, so there is no place to pass an index
+# from, and everything about an environment has to be expressible in the
+# `pyproject.toml` beside it. The Engines tab is where the user picks.
+#
+# **CPU is the DEFAULT, which is the change this folder carries.** Before the
+# split, torch came from PyPI for everyone, so a Linux machine paid several GB of
+# `nvidia-*` wheels whether or not it owned a card and a Windows machine got a
+# CPU-only build it could not opt out of. On macOS nothing changes: the CPU index
+# carries the ordinary `2.13.0` wheel there — no local version, the same file PyPI
+# ships, MPS compiled in — so Apple Silicon keeps its GPU, which this runner needs
+# because it is what a Mac falls back to when `mflux_image` is unavailable.
+#
+# **This first install is genuinely large even on CPU** — a torch wheel is
+# hundreds of MB and the pipeline weights are GB — so it is a reported stage
+# rather than a silent wait, and the AI Models page shows it as "Preparing
+# Diffusers (CPU)…" before any weights are fetched.
+#
+# **`explicit = true` is the whole of the confinement.** Without it the CPU index
+# becomes a candidate for EVERY requirement, and diffusers, transformers, numpy and
+# the rest would come from a mirror that only mirrors what PyTorch builds. With it
+# the override reaches exactly the names under `[tool.uv.sources]` and nothing
+# else — verified against a real resolution: of the 53 packages locked here, 50
+# come from PyPI and only torch comes from the mirror (as two entries,
+# `2.13.0+cpu` and the darwin `2.13.0`).
+#
+# **Every dependency here must be installable as a WHEEL, and that is a rule
+# rather than a preference.** A source build runs a build backend in a subprocess
+# uv creates, and inside the macOS .app that subprocess used to inherit the
+# bundle's `PYTHONHOME` — the app's frozen `_distutils_hack` then hijacked the
+# fresh setuptools and every build died on `No module named 'jaraco.text'`
+# (D266). `_env_install_worker` scrubs the env now, so the trap is disarmed; the
+# rule stands anyway, because a source build in this environment is minutes of
+# compiling on a user's laptop for something a wheel already answers.
+#
+# **The runtime lines carry CEILINGS**, for the reason
+# `mflux_image/pyproject.toml` states at length: no lockfile is committed beside
+# these manifests and `uv sync` runs bare, so an unbounded requirement is
+# re-resolved from PyPI on every new venv key and a major bump lands on users
+# with no commit behind it. The FLOORS are left where they were — `diffusers`
+# keeps `>=0.39` rather than gaining the installed patch, and `transformers`
+# carries a ceiling with NO floor added, because this runner has never declared one
+# and inventing one here would forbid versions that are currently allowed. It
+# also used to disagree with a sibling: `transformers_text/pyproject.toml`
+# pinned `transformers>=5.15` because its catalog had moved to Qwen3.5, and this
+# runner needs no such floor because its own suggestions do not turn on a
+# transformers model CLASS. That folder is gone (D416) and this manifest is now
+# the only place in the app that names `transformers` at all, which removes the
+# disagreement without changing the reasoning. A ceiling only removes the
+# future; a floor removes the present.
+#
+# What each earns:
+#   torch          the tensors and the device (CUDA / MPS / CPU). `<3` — the
+#                  major is the whole ABI and every wheel behind it.
+#   diffusers      the pipelines. `>=0.39` because that is the first RELEASE
+#                  carrying Flux2KleinPipeline — this used to track
+#                  git+https://github.com/huggingface/diffusers.git for exactly
+#                  that class, back when it existed only on main (D266). `<0.40`
+#                  because a pre-1.0 minor is where this library moves pipeline
+#                  signatures, and `torch_image.py` drives one directly.
+#   transformers   the text encoder every text-to-image pipeline puts in front
+#   accelerate     device placement / offload for models bigger than the GPU
+#   sentencepiece  the tokenizer format those text encoders use
+#   protobuf       sentencepiece's model format needs it at load time
+#   gguf           reads the quantized single-file transformer (see torch_image.py)
+#   torchao        reads the OTHER quantized transformer in `catalog.py` — the
+#                  int8 diffusers repo, which is not a GGUF swap but an ordinary
+#                  `from_pretrained` over a component whose `config.json`
+#                  carries `"quant_method": "torchao"`. diffusers turns that into
+#                  a `TorchAoConfig` itself; what it cannot do is import the
+#                  package, and `quantizers/torchao/torchao_quantizer.py` raises
+#                  `ImportError` without it. `>=0.15` is DIFFUSERS' OWN floor —
+#                  that same file refuses an older torchao by version number —
+#                  and it is also the first release whose
+#                  `Int8WeightOnlyConfig` carries the `granularity` field the
+#                  repo's config was serialized with, so the floor is the
+#                  library's requirement rather than a guess. `<0.18` because
+#                  the diffusers-image model
+#                  `tonera/FLUX.2-klein-4B-int8-diffusers` fails to load on
+#                  0.18.0 with `ValueError: Failed to create instance of
+#                  Int8WeightOnlyConfig: version 1 of Int8WeightOnlyConfig has
+#                  been removed, please use version 2`: that repo's
+#                  `transformer/config.json` serializes its
+#                  `Int8WeightOnlyConfig` at `_version: 1`, which 0.15.0
+#                  through 0.17.0 merely warn about as deprecated (the
+#                  dataclass still defaults to `version: int = 1`) and 0.18.0
+#                  refuses outright (the default moved to `version: int = 2`
+#                  and the version-1 path was deleted). This is NOT something
+#                  diffusers can version-gate the way it gates the pipeline
+#                  calls `diffusers` above is ceilinged for: the
+#                  deserialization happens inside torchao itself, driven by
+#                  bytes serialized into a third-party Hub repo this app does
+#                  not control. There is accordingly nothing here to
+#                  upgrade — 0.18.0 is already torchao's newest release, and
+#                  the repo (755 downloads, 1 like, last modified 2026-01-18)
+#                  is not going to be re-serialized to fix this. A ceiling is
+#                  the only fix, and a cheap one: torchao's PyPI metadata
+#                  declares no runtime `requires_dist` outside
+#                  `extra == "dev"`, so it cannot conflict with the pinned
+#                  torch in any of the three folders. No CI test loads a real
+#                  model over the network, so THIS CEILING IS THE ONLY THING
+#                  standing between a future bump and a broken suggestion —
+#                  no longer the RECOMMENDED one (the SDNQ row took that), but
+#                  an entry a user can still pick and still expect to load, and
+#                  the only route to this pipeline for anyone who cannot take
+#                  the `sdnq` dependency. Do not widen it back to `<1` without
+#                  confirming a torchao release has restored a working
+#                  version-1 path (or the Hub repo has been re-serialized to
+#                  version 2).
+#                  **It installs on every platform this app ships to** — PyPI
+#                  carries a manylinux x86_64 wheel and a `py3-none-any` wheel
+#                  beside it, which is what macOS and Windows resolve to — so
+#                  the wheels-only rule above holds in all three folders, and
+#                  torchao is named in all three because the repo it reads is
+#                  suggested to all three (one `catalog.py` list, aliased).
+#                  What is NOT claimed is speed. PyPI's is torchao's GENERIC
+#                  build; the CUDA and XPU builds live on its own indexes, which
+#                  none of these manifests uses, and no benchmark here says what
+#                  an int8 weight-only transformer costs per step on CUDA, ROCm,
+#                  MPS or CPU. So the `catalog.py` note promises a smaller
+#                  download and nothing about the clock.
+#   bitsandbytes   reads the OTHER quantized component in the same repo
+#                  torchao is named for above — `tonera/FLUX.2-klein-4B-
+#                  int8-diffusers` is MIXED quantization, not uniform int8 as
+#                  the catalog's `quantization` label alone suggests: its
+#                  `transformer/config.json` carries `"quant_method":
+#                  "torchao"` but `text_encoder/config.json` carries
+#                  `"quant_method": "bitsandbytes"` (4-bit NF4, double quant,
+#                  bf16 compute dtype). `from_pretrained` builds the text
+#                  encoder BEFORE the transformer, so without this line the
+#                  only `diffusers-image` suggestion — what a bare
+#                  `fused.ai.image()` starts — failed with `ImportError: Using
+#                  `bitsandbytes` 4-bit quantization requires bitsandbytes`
+#                  raised on the text encoder, before the torchao transformer
+#                  this file already declared for was ever reached. See
+#                  `catalog.py`'s entry for the fuller account. `>=0.46.1` is
+#                  what that ImportError itself demands (bitsandbytes'
+#                  `import_utils` version-gates 4-bit loading below that
+#                  release); `<1` rather than a pre-1.0 minor ceiling because
+#                  nothing in `torch_image.py` calls bitsandbytes directly:
+#                  diffusers does, and it version-gates the calls it makes —
+#                  unlike `torchao` above, whose ceiling is narrower because
+#                  what breaks there is a config format serialized into a
+#                  third-party model repo, not a diffusers call diffusers
+#                  itself can gate.
+#   sdnq           reads the THIRD quantized repo in `catalog.py` —
+#                  `Disty0/FLUX.2-klein-4B-SDNQ-4bit-dynamic`, whose every
+#                  component config carries `"quant_method": "sdnq"`. Unlike
+#                  `torchao` and `bitsandbytes` above, diffusers 0.39 has NO
+#                  built-in quantizer for this: its
+#                  `quantizers/auto.py` mapping knows autoround, bitsandbytes,
+#                  gguf, modelopt, quanto and torchao, and nothing else. **The
+#                  package registers itself by MUTATING that mapping at import**
+#                  — `diffusers.quantizers.auto.AUTO_QUANTIZER_MAPPING["sdnq"]
+#                  = SDNQQuantizer` plus the matching config entry, and the
+#                  same pair on `transformers.quantizers.auto` — which is why
+#                  `torch_image._register_extra_quantizers()` imports it for
+#                  its side effect and not for a name.
+#                  **That import is the risk this ceiling is for.** Those
+#                  mappings are not diffusers' public API; a rename inside
+#                  `quantizers/auto.py` would break the registration silently,
+#                  which is exactly the shape of the `torchao` breakage
+#                  documented above — hence `<0.3` rather than `<1`, tighter
+#                  than the `bitsandbytes` line beside it, on a project moving
+#                  fast: the 0.2 line shipped six releases in the eight weeks
+#                  from 0.2.1 (2026-07-04) to 0.2.6 (2026-08-30). The risk is
+#                  freshness, not staleness — 0.2.6 is the NEWEST release, so
+#                  the version this floors on is one a pre-1.0 project cut days
+#                  ago and nobody has run for long.
+#                  `>=0.2.6` is the version the numbers in
+#                  `catalog.py`'s entry were measured on; there is no older
+#                  release this was verified against, so the floor is what was
+#                  actually run rather than the earliest that might work.
+#                  It is a pure-Python `py3-none-any` wheel (141 KiB) whose
+#                  runtime dependencies are torch, diffusers, transformers and
+#                  accelerate — all four already here — so the wheels-only rule
+#                  holds on every platform and it adds nothing transitive.
+#                  Its ROCm support is explicit rather than incidental
+#                  (`kernel_wrappers.py` branches on `torch_backend == "rocm"`
+#                  and enables its triton matmuls there), which is what makes
+#                  the speed number in `catalog.py` a fact about this app's
+#                  hardware rather than about CUDA.
+#   pillow         writes the PNG
+#   huggingface_hub downloads
+#   psutil         answers "how much memory is this costing"
+[project]
+name = "fused-render-runner-diffusers-image"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.13,<3",
+    "diffusers>=0.39,<0.40",
+    "transformers<6",
+    "accelerate>=1.14,<2",
+    "sentencepiece",
+    "protobuf",
+    "gguf",
+    "torchao>=0.15,<0.18",
+    "bitsandbytes>=0.46.1,<1",
+    "sdnq>=0.2.6,<0.3",
+    "pillow",
+    "huggingface_hub",
+    "psutil",
+]
+
+# Not a distribution — a folder of scripts, not something to build and install.
+[tool.uv]
+package = false
+
+# The CPU wheels. `explicit` keeps this index out of every other requirement's
+# candidate list — see the header.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }

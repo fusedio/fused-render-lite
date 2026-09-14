@@ -23,7 +23,7 @@ The page runtime exposes these `fused.*` members:
 | `fused.stat(path)` | `{path, name, is_dir, size, mtime, writable}` |
 | `fused.writeFile(path, content, opts?)` | optimistic lock + create-only, as in fused-render |
 | `fused.rawUrl(path)` | bytes URL, Range requests honoured |
-| `fused.ai.text({prompt, ...})` | Claude tier only, through the local `claude` CLI; streams with `onChunk` |
+| `fused.ai.text / image / video / transcribe / embed`, `fused.ai.models.*`, `fused.ai.cancel` | fused-render's AI subsystem: Claude CLI tier + local runners (see AI below) |
 | `fused.uploadFile(path, blob)` / `fused.mkdir(path)` | binary save, directories |
 | `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
 | `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws (no live reload) |
@@ -34,6 +34,24 @@ is **not supported**. There are no stubs: calling one, or reading any
 property of `fused.capture` / `fused.fileIndex` / `fused.daemon`,
 throws `<name> is not supported on fused-render-lite` and logs it to the
 console. An app that needs those belongs in full fused-render.
+
+## AI
+
+`fused.ai.*` is fused-render's AI subsystem, copied in. Two tiers:
+
+- **Claude** (`haiku`/`sonnet`/`opus`/`fable`, the default): runs `claude -p`
+  from Claude Code, so the machine needs the `claude` CLI installed and logged
+  in. One warm process, reset between calls.
+- **Local** (a Hugging Face repo id or `.gguf`, or `provider: "local"`): text,
+  image, video, transcribe, embed. Each backend is a runner folder under
+  `fused_render_lite/ai/runners/` with its own `pyproject.toml`; the first call
+  builds its venv with `uv sync`, downloads the model into the Hugging Face
+  cache and spawns a worker process the server talks HTTP to. Nothing ML ships
+  in the DMG. Pages get `model_loading` + a `jobId` to `watchJob` while that
+  happens, then retry — fused-render's contract, unchanged.
+
+The Apple-Intelligence tier needs a Swift helper the lite build does not
+compile; it answers `unavailable`. Streaming is NDJSON over chunked HTTP.
 
 ## Python environments
 

@@ -165,6 +165,7 @@ def main() -> None:
 
     def quit_app(_sender) -> None:
         logger.info("quitting")
+        server.stop_ai()  # evict resident models (kills worker processes), stop the warm claude
         srv = state.get("server")
         if srv is not None:
             threading.Thread(target=srv.shutdown, daemon=True).start()

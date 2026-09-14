@@ -1,0 +1,733 @@
+"""Text-to-image on mflux (MLX): one resident model, four routes (SPEC §40).
+
+The Apple Silicon counterpart of `runners/torch_image.py`, and deliberately
+its twin from the outside: the same `/generate` body, the same one-JSON reply,
+the same PNG written to the path the SERVER chose, the same denoising-step
+progress on the caller's job row, the same ✕. `fused.ai.image()` cannot tell
+which of the two rendered for it, and that is the contract — the second image
+runner must not become a second image API.
+
+What is genuinely different is underneath:
+
+* **One repo, already quantized.** The torch runner needs a recipe: a ~2.4GB
+  Q4_K_M GGUF transformer swapped into a pipeline whose text encoder, VAE and
+  tokenizer still come from the ~7.7GB bf16 base repo, because FLUX in full
+  precision OOMs a 16GB machine. The `mlx-community` conversion is 4-bit
+  throughout, so there is nothing to swap and nothing to skip — one snapshot,
+  ~4.6GB, loaded as it is.
+* **Progress comes from mflux's own callback registry**, not from a `callback_
+  on_step_end=` argument. `generate_image()` takes no callback parameter; it
+  calls `ctx.in_loop(t, latents)` on every denoising step, and the registry
+  those callbacks live in is a public attribute of the model. So the hook is a
+  registration rather than an argument — see `_StepReporter`, and note it is
+  registered ONCE per model.
+* **A cancel unwinds through that same callback**, which is the only
+  interruption point in a minutes-long call. mflux's loop catches
+  `KeyboardInterrupt` and nothing else, so a `worker_base.Cancelled` raised
+  inside the hook propagates straight out of `generate_image()` — which is what
+  we want, and is why the ✕ needs no orphan machinery here (unlike
+  `mlx_whisper/worker.py`, whose library call has no per-step hook at all).
+
+**Registered BELOW `diffusers-image` in the registry, so it is opt-in.** The
+speed case is measured and real (D310), but it is measured on ONE 34GB machine,
+and MLX's allocator reserved a ~23.6GB high-water pool there — larger than
+torch's driver allocation on the same render. Nothing has been tried on a 16GB
+Mac, which is exactly the machine this app's own catalog note says full-precision
+FLUX already OOMs. Being available-but-not-default is what the engine picker is
+for.
+"""
+
+import os
+import sys
+import threading
+import time
+
+# The base sits one directory up, in `runners/` — see mlx_text/worker.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import formats  # noqa: E402 - the shared format checks; see formats.py
+import preview  # noqa: E402 - the ONE live-thumbnail writer; see preview.py
+import worker_base  # noqa: E402 - the path insert above is what makes it importable
+
+#: The loaded model. One per process.
+_loaded = {}
+
+#: The MLX streams every thread in this process works on, keyed by device name —
+#: ONE PER DEVICE, which is the whole point. See `_pin_stream`.
+_STREAMS = {}
+_STREAMS_LOCK = threading.Lock()
+
+
+def _pin_stream():
+    """Put this thread's MLX work on the process's shared streams — EVERY device.
+
+    **MLX default streams are per-thread from mlx 0.32 on, and this worker is
+    threaded.** `load` runs on `worker_base.serve`'s bring-up thread, which then
+    exits; `generate` arrives on a `ThreadingTCPServer` request thread. An
+    UNEVALUATED array is a graph pinned to the stream it was built on, and
+    forcing it from another thread throws
+    `std::runtime_error("There is no Stream(cpu, 0) in current thread")` — see
+    `load` for what that costs and `mlx_whisper/worker.py::_pin_stream` for the
+    same mechanism written out at length.
+
+    **`mx.cpu` as well as the default device, which is where a verbatim copy of
+    the whisper runner's version would have been wrong.** The default stream is
+    per (thread, DEVICE): `set_default_stream` is documented to replace the
+    default "for the stream's device", so pinning `default_device()` alone — the
+    GPU — leaves this thread's CPU default exactly where it was. Measured on
+    0.32.1: a gpu-only pin on both threads does not fix this runner, it only
+    moves the index in the abort (`There is no Stream(cpu, 2)`), while the
+    cpu pin alone renders. Both are pinned anyway, because which device holds
+    the next version's lazy graph is not something to re-measure per release.
+
+    Pinning a CPU stream does NOT move the default DEVICE — measured:
+    `mx.default_device()` is still `Device(gpu, 0)` after a render, and the
+    render's own speed is unchanged.
+
+    `new_thread_unsafe_stream` is mlx's own answer: a stream not owned by the
+    thread that made it. **The sharing is the mechanism** — one stream per
+    device for the whole process, so a graph built on any thread is forceable on
+    any other. "Unsafe" means it must not be driven by two threads AT ONCE,
+    which this worker already guarantees: `worker_base.GENERATE_LOCK` serializes
+    renders and the load completes before the server accepts a request.
+
+    A no-op on an mlx too old to have the call, which is the right answer:
+    streams were process-wide there and there was nothing to pin.
+    """
+    import mlx.core as mx
+
+    make = getattr(mx, "new_thread_unsafe_stream", None)
+    pin = getattr(mx, "set_default_stream", None)
+    if make is None or pin is None:
+        return None
+    # `default_device()` rather than `mx.gpu`, and CPU FIRST: on a build with no
+    # Metal the two are the same device and this dedupes to one stream, rather
+    # than naming a device this mlx may not have.
+    devices = [mx.cpu, mx.default_device()]
+    with _STREAMS_LOCK:
+        streams = []
+        for device in devices:
+            key = str(device)
+            # `if key not in`, NOT `setdefault(key, make(device))`: the latter
+            # evaluates `make` on every call and would mint a fresh stream per
+            # thread while keeping the first — the shared stream is the whole
+            # mechanism, so quietly making unshared ones is the bug this guards.
+            if key not in _STREAMS:
+                _STREAMS[key] = make(device)
+            if _STREAMS[key] not in streams:
+                streams.append(_STREAMS[key])
+    for stream in streams:
+        pin(stream)
+    return streams
+
+
+#: Repo id -> the mflux VARIANT class that loads it and the model config that
+#: describes its shape.
+#:
+#: A TABLE rather than a heuristic, for the reason `runners/torch_image.py`'s recipe
+#: table gives: which class loads which checkpoint is an editorial judgement,
+#: not something to infer from a file listing. The difference here is that a
+#: model ABSENT from this table cannot fall back to "load it the ordinary way" —
+#: mflux has no `AutoPipeline`, and the variant and its config are two arguments
+#: nothing can guess. So an unknown repo is refused with a sentence rather than
+#: attempted, which is the same trade the whisper runners make about formats.
+#: In `formats` rather than here, with the layout check below, because the AI
+#: Models page needs BOTH halves to tag a cached repo honestly: a snapshot can
+#: have perfect MLX components and still be a model this build cannot name a
+#: variant class for.
+_VARIANTS = formats.MFLUX_VARIANTS
+
+#: The EDIT counterpart (`fused.ai.image({image})`, mflux-only) is read
+#: through `formats.mflux_edit_recipe`, not through a binding here — its
+#: `variant`/`module` come from `formats.MFLUX_EDIT_VARIANTS`, and its
+#: `config`/`vae` are DERIVED from `_VARIANTS`'s row for the same id rather
+#: than duplicated, since those two are facts about the checkpoint (same
+#: weights, same latent space) and not about which class denoises it. See
+#: `formats.MFLUX_EDIT_VARIANTS`'s own comment for why copying them would be
+#: a drift risk rather than a convenience.
+
+#: What an mflux-readable snapshot always has: component subfolders of MLX
+#: safetensors. Checked by NAME before the import, exactly as the whisper
+#: runners check theirs — a repo in the wrong format is a fact about the
+#: download, and mflux's own error for it is a `ValueError` about path
+#: resolution that says nothing a user can act on.
+_MLX_COMPONENTS = formats.MFLUX_COMPONENTS
+
+
+# --------------------------------------------------------------- model loading
+
+
+def download(model_id):
+    """The whole repo, and nothing clever.
+
+    No `ignore_patterns`, which is the visible difference from the diffusers
+    runner's `download`: there is no full-precision component here being
+    replaced by a quantized one, so every file in the snapshot is a file the
+    load will read.
+    """
+    return worker_base.download_snapshot(model_id)
+
+
+def _recipe_for(model_id, mode):
+    """The full recipe for `model_id` under `mode` ('generate' or 'edit'), or
+    None. `"generate"` reads `_VARIANTS` directly — the untouched path every
+    caller who never passes `image` stays on (Decision 3). `"edit"` goes
+    through `formats.mflux_edit_recipe`, which derives `config`/`vae` off the
+    SAME `_VARIANTS` row rather than a second copy — see that table's own
+    comment. Keying `load()` by `(model_id, mode)` (Gate B) means, in this
+    one-process-per-model worker, choosing between these two lookups and
+    re-running `_build_variant` when the resident mode differs from what a
+    request needs — there is no second worker process to route to instead.
+    """
+    if mode == "edit":
+        return formats.mflux_edit_recipe(model_id)
+    return _VARIANTS.get(model_id)
+
+
+def _build_variant(model_id, fetched, mode):
+    """The mflux model object for `mode` ('generate' or 'edit') over the
+    snapshot at `fetched`, and the vae key its recipe carries.
+
+    Shared by `load()` (first bring-up, always 'generate') and `_ensure_mode`
+    (the lazy swap `generate()` triggers when a request's mode differs from
+    the resident one) — one place that imports the variant class, builds it
+    and registers the step reporter, so the two callers cannot build it two
+    different ways.
+    """
+    recipe = _recipe_for(model_id, mode)
+    if recipe is None:
+        if mode == "edit":
+            # Reached only if a model appears in `_VARIANTS` (so `load()`
+            # accepted it for plain generation) but `formats.mflux_edit_
+            # recipe` has no edit row for it — every model this build knows
+            # about today has both, so this is a future-model gap, not
+            # today's.
+            raise RuntimeError(
+                f"{model_id} is not a model this runner knows how to edit an "
+                "image with — it has no edit variant class named for it, "
+                "only a plain generate one.")
+        raise RuntimeError(
+            f"{model_id} is not a model this runner knows how to build. It "
+            "loads mflux's own MLX conversions, and each one needs a variant "
+            "class this build has to name explicitly. Try "
+            "mlx-community/FLUX.2-Klein-4B-4bit, or switch this capability to "
+            "the Diffusers engine on the AI Models page's Engines tab.")
+
+    import importlib
+
+    from mflux.models.common.config import ModelConfig
+
+    variants = importlib.import_module(recipe["module"])
+    variant_cls = getattr(variants, recipe["variant"])
+    model_config = getattr(ModelConfig, recipe["config"])()
+    # `model_path=fetched` is the SNAPSHOT DIRECTORY, never the repo id. mflux
+    # resolves a local path ahead of anything else, so this load touches no
+    # network — which matters because `download` has already reported those
+    # bytes to the job row, and a second fetch inside `load` would be an
+    # unreported download the user watches as a stalled "Loading…".
+    # **This runner is threaded exactly like `mlx_whisper/worker.py`, and from
+    # mlx 0.32 it needs the same `_pin_stream` — on BOTH devices.** This comment
+    # used to say the opposite, at length, and it was true: under mlx 0.31.x
+    # streams were process-wide and there was nothing to pin. `mflux` declared no
+    # version bound, so the first venv provisioned after mflux 0.19.0 shipped
+    # re-resolved to it, mflux 0.19 pins `mlx>=0.32,<0.33`, and every render
+    # afterwards died on its first denoising step. The dependency moved; the
+    # claim did not. Hence the bound now in this folder's `pyproject.toml`.
+    #
+    # The shape: mlx 0.32 gives every thread its own default stream PER DEVICE,
+    # `load` runs on `worker_base`'s bring-up thread (which then exits), and
+    # `generate` runs on a `ThreadingTCPServer` request thread. An UNEVALUATED
+    # array is a graph owned by the stream it was built on, so forcing one from
+    # another thread throws an uncaught C++ exception that aborts the worker with
+    # no Python traceback. See `_pin_stream` above, and the whisper runner's for
+    # the mechanism in full.
+    #
+    # **The array that actually kills it, because the old note named the wrong
+    # one.** That note claimed "every array in the model arrives through
+    # `WeightLoader` -> `mx.load(...)`, which returns materialised safetensors
+    # data rather than a graph". `mx.load` does no such thing: it returns a LAZY
+    # graph whose single node is MLX's `Load` primitive, and `Load` is scheduled
+    # on the CPU stream whatever the default device is. mflux 0.19's FLUX.2 path
+    # never forces it — `WeightLoader._try_load_mflux_format` reads the shards,
+    # `WeightApplier.apply_and_quantize` installs them with `model.update(...)`
+    # and `nn.quantize(...)`, and `flux2_initializer.py` has no `mx.eval` at all
+    # (unlike the krea2 and ideogram4 initializers, which do). So the
+    # transformer, text encoder and VAE weights reach the request thread as live
+    # `Load` graphs owned by the BRING-UP thread's cpu stream. Whisper's leak was
+    # two derived tensors `parameters()` could not see; this one is the weights
+    # themselves.
+    #
+    # **Measured, not reasoned (mflux 0.19.0, mlx 0.32.1 — 0.32.0 carries the
+    # same hazard, so treat this as 0.32.x):**
+    #   * Unfixed, this exact code — `load` on a thread that then exits, then
+    #     `generate` on a second thread, 2 steps at 256x256 — dies at mflux's
+    #     per-step `mx.eval(latents)` (`flux2_klein.generate_image`) with
+    #     `There is no Stream(cpu, 0) in current thread`. That is the
+    #     supervisor's dropped connection and the page's "the image process did
+    #     not answer".
+    #   * `mx.default_stream(...)` on 0.32.1 reports `Stream(cpu, 0)` and
+    #     `Stream(gpu, 1)` on the first thread to touch MLX, 2/3 on the next and
+    #     4/5 on the one after — the default stream is per (thread, DEVICE).
+    #   * Pinning `default_device()` alone, on BOTH threads, does not fix it:
+    #     the same run dies with `There is no Stream(cpu, 2)`. Pinning cpu alone
+    #     renders. Both are pinned; see `_pin_stream`.
+    #   * With `_pin_stream` on both threads the same run returns a 256x256 PNG
+    #     and `mx.default_device()` is still `Device(gpu, 0)`. Both timings below
+    #     are `generate`'s OWN clock — the render, with the model already loaded
+    #     and the load excluded: ~8.5s for the FIRST render after a load (its
+    #     first step alone is ~6s, Metal compiling kernels), ~3.3-3.4s for every
+    #     warm render after that. Compare like for like when re-running: the
+    #     first number is not reproducible twice in one process.
+    #   * A different configuration, for scale rather than comparison: the same
+    #     fix driven end-to-end through the server at 512x512 / 4 steps, warm HF
+    #     cache, produced a 512x512 RGB PNG with per-step times 8.09s, 6.09s,
+    #     5.50s, 5.78s and ~51s of total wall clock INCLUDING the model load —
+    #     and no `libc++abi` or `Stream(cpu` line in the worker log.
+    #
+    # **Whether the LIVE PREVIEW is on changes only how the failure looks, not
+    # whether it happens.** mflux calls `ctx.in_loop(t, latents)` one line BEFORE
+    # its own `mx.eval(latents)`, so with a preview sink attached `_as_numpy`
+    # forces the graph first, across numpy's `__array__` boundary — which is
+    # `noexcept`, so the process ABORTS (`libc++abi:`) and `preview.Sink.add`'s
+    # `except Exception` cannot see it by construction. With no sink, mflux's own
+    # `mx.eval` forces it and the same fault surfaces as a catchable
+    # `RuntimeError`. The fix is the pin; the preview is not the problem.
+    #
+    # Re-run all of the above if mflux or mlx is bumped — an expired measurement
+    # is exactly what happened last time.
+    _pin_stream()
+    model = variant_cls(model_config=model_config, model_path=fetched)
+    # ONE registration, per BUILD. `CallbackRegistry.register` APPENDS, and the
+    # registry belongs to the MODEL OBJECT rather than to a call — a mode swap
+    # builds a fresh object, so this still runs exactly once for it. The
+    # reporter reads the live request out of `_request` instead.
+    model.callbacks.register(_StepReporter())
+    # The key the live preview's projection table is keyed by. The torch runner
+    # reads it off `type(pipe.vae).__name__`; there is no such object here, so
+    # it comes out of the recipe — see `formats.MFLUX_VARIANTS` for why an
+    # autoencoder class name is the right thing for an MLX table to carry.
+    return model, recipe.get("vae")
+
+
+def load(model_id, fetched):
+    """`fetched` is what `download` returned — the snapshot directory."""
+    # BOTH checks come before the import `_build_variant` does, and they
+    # answer different questions. This one is about the CATALOG: a repo
+    # nobody has written a variant for.
+    if model_id not in _VARIANTS:
+        raise RuntimeError(
+            f"{model_id} is not a model this runner knows how to build. It "
+            "loads mflux's own MLX conversions, and each one needs a variant "
+            "class this build has to name explicitly. Try "
+            "mlx-community/FLUX.2-Klein-4B-4bit, or switch this capability to "
+            "the Diffusers engine on the AI Models page's Engines tab.")
+    # …and this one is about the DOWNLOAD: a repo of the right name in the wrong
+    # format, which is what a torch or GGUF image repo looks like from here.
+    missing = [name for name in _MLX_COMPONENTS
+               if not os.path.isdir(os.path.join(fetched, name))]
+    if missing:
+        raise RuntimeError(
+            f"{model_id} has no {missing[0]}/ folder — this runner loads MLX "
+            "conversions, whose weights are split into transformer/, "
+            "text_encoder/ and vae/ subfolders. A diffusers or GGUF repo will "
+            "not load here.")
+
+    model, vae = _build_variant(model_id, fetched, "generate")
+    _loaded["model"] = model
+    _loaded["vae"] = vae
+    _loaded["mode"] = "generate"
+    # Remembered so `_ensure_mode` can re-run `_build_variant` for the OTHER
+    # mode without a second `download()` — the snapshot is already on disk and
+    # `download` has already reported those bytes to the job row, so a second
+    # fetch here would be an unreported download the user watches as a
+    # stalled render.
+    _loaded["model_id"] = model_id
+    _loaded["fetched"] = fetched
+    # See `worker_base.STATE["device"]`. MLX is Metal or nothing, so unlike the
+    # torch runner there is nothing to detect — but the page shows this field to
+    # explain a speed, and a user comparing the two engines should be able to
+    # read which one they are on.
+    worker_base.set_state(device="mps")
+
+
+def _ensure_mode(mode, job=None):
+    """Make the resident model's MODE match `mode`, swapping if it does not.
+
+    Decision 3: residency is keyed by `(model_id, mode)`. This is a
+    ONE-PROCESS-PER-MODEL worker (`worker_base.serve` builds exactly one
+    model at bring-up) — there is no second worker to route an edit request
+    to, so the swap happens in place, lazily, only when a request's mode
+    actually differs from the one already resident. A run of ordinary
+    generates after an edit (or vice versa) swaps back the same way; neither
+    direction touches the network, since `_build_variant` never re-downloads.
+
+    Plain generate is UNAFFECTED by this function's existence: a caller who
+    never passes `image` always finds `_loaded["mode"] == "generate"` already
+    (`load()` sets it), so this returns on its first line and the resident
+    `Flux2Klein` object built at load time is untouched for the life of the
+    process — Decision 3's "zero behaviour change" in code.
+
+    **Validated before anything is dropped.** A model with no row in the
+    table `mode` needs must leave the worker exactly as resident as it found
+    it — a request that turns out to be refused is not licence to break the
+    NEXT one — so `_recipe_for` is checked first and `_build_variant` is
+    called for its lookup+raise (never returning) before `_loaded["model"]`
+    is touched at all.
+
+    **The OLD model's reference is dropped before the NEW one is built, not
+    after.** `_build_variant` constructs a full second model object — every
+    weight tensor of it — before this function ever assigns the result
+    anywhere; holding `_loaded["model"]` pointed at the outgoing variant for
+    that whole build means this process holds BOTH resident at once, which
+    on the 16GB Macs this runner targets is the difference between a
+    working swap and an OOM mid-request. Dropping the reference first lets
+    the interpreter (and mflux's own allocator, once nothing holds the
+    arrays) reclaim the old weights before the new ones are asked for.
+
+    **`job`, so the swap is not invisible on the row.** A full rebuild
+    measured ~0.6s warm on the hardware that ran Gate B, and worse cold or
+    on a smaller Mac — with no tick here, `snapshot()["state"]` would still
+    read `"ready"` for the whole of it, no detail and no progress, which is
+    exactly the "user watches a stalled render" failure the mode-keyed swap
+    exists to keep from happening anywhere ELSE (see the module docstring's
+    note on why a swap must not re-download). `None` is fine when nothing
+    is watching (a bring-up thread's own first `load()` never swaps, so
+    this path is only ever reached from a request that already has one).
+    """
+    if _loaded.get("mode") == mode:
+        return
+    model_id, fetched = _loaded["model_id"], _loaded["fetched"]
+    if _recipe_for(model_id, mode) is None:
+        _build_variant(model_id, fetched, mode)  # raises; never returns
+    worker_base.report(job=job, state="running", kind="task", unit="",
+                       done=None, total=None,
+                       detail="Switching to %s mode…" % mode)
+    _loaded["model"] = None
+    _loaded["vae"] = None
+    model, vae = _build_variant(model_id, fetched, mode)
+    _loaded["model"] = model
+    _loaded["vae"] = vae
+    _loaded["mode"] = mode
+
+
+def memory():
+    """What MLX itself says it is holding, in bytes.
+
+    `get_active_memory`, deliberately — NOT `get_cache_memory`, which on this
+    model reads roughly 23.6GB against an active figure of about 14.1GB (D310's
+    benchmark). The difference is MLX's allocator pool: buffers it has reserved
+    from Metal and not returned, kept precisely so the next generation does not
+    have to ask again. Reporting the pool would tell the AI Models page that one
+    resident image model costs two thirds of a 34GB machine, which is not what
+    "this model is holding" means anywhere else in this app — the torch runner
+    reports allocated bytes, not the driver's reservation, and the two figures
+    have to be comparable for the page to put them in one column.
+
+    `worker_base` takes the larger of this and RSS, so a wrong answer in either
+    direction is corrected by the other. The pool is still worth knowing about
+    and is written down in D310, because it is a fact about MEMORY PRESSURE even
+    though it is not a fact about this model's size.
+    """
+    import mlx.core as mx
+
+    for probe in (getattr(mx, "get_active_memory", None),
+                  getattr(getattr(mx, "metal", None), "get_active_memory", None)):
+        if probe is None:
+            continue
+        value = probe()
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def peak_memory():
+    """The HIGH-WATER mark MLX's allocator has reached over this process's
+    whole life, in bytes — SPEC AI-8c, D497, `ltx_video.worker.peak_memory`'s
+    own probe, verbatim. `memory()` above answers "right now"; `fit` (AI-16)
+    needs "at its worst" instead, which `mx.get_peak_memory()` already tracks
+    without this process sampling anything — the same defensive getattr pair
+    `memory()` uses, in case a wheel still spells it `mx.metal.get_peak_memory`.
+    """
+    import mlx.core as mx
+
+    for probe in (getattr(mx, "get_peak_memory", None),
+                  getattr(getattr(mx, "metal", None), "get_peak_memory", None)):
+        if probe is None:
+            continue
+        value = probe()
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def release():
+    """Hand MLX's allocator pool back to the OS — `worker_base.serve
+    (release=...)`, fired `worker_base._RELEASE_IDLE_S` after this worker's
+    LAST execution if nothing new has started by then, never per-call. See
+    `worker_base._release`'s docstring for the measured numbers this exists
+    for (a 34.4 GB machine holding "21 GB held" against "1.7 GB now" long
+    after a render finished) and why the reclaim is on a timer rather than
+    unconditional.
+
+    `mx.clear_cache()`, guarded the same way `_pin_stream` guards every MLX
+    API that might be missing: `getattr` rather than a bare attribute access,
+    because `tests/test_ai_mflux_worker.py` stubs `mlx.core` with a
+    `FakeMlxCore` that has no `clear_cache` at all, and a real but older mlx
+    wheel could equally lack it. Absence is a no-op, not a crash — there is
+    nothing to release on either.
+
+    Deliberately does NOT touch `set_cache_limit` or `set_memory_limit` — see
+    the module docstring's boundary: this reclaims what a finished render left
+    behind, it does not change what the NEXT render is allowed to cost.
+    """
+    import mlx.core as mx
+
+    clear = getattr(mx, "clear_cache", None)
+    if clear is not None:
+        clear()
+
+
+# ------------------------------------------------------------------ generation
+
+
+def _eta(remaining):
+    """Wall-clock left. `runners/torch_image.py`'s, and it has to be — the
+    two runners' rows are rendered by the same job manager, and a user
+    comparing engines reads these two strings against each other."""
+    if remaining is None:
+        return ""
+    if remaining < 60:
+        return " · ~%ds left" % round(remaining)
+    return " · ~%.1f min left" % (remaining / 60)
+
+
+#: What the in-flight request is, for the reporter to read. One slot: this
+#: process renders one image at a time (`worker_base.GENERATE_LOCK`), and a
+#: second slot would only be a way for a finished request to keep reporting.
+_request = {}
+
+
+def _sigma_after(config, t):
+    """The noise level the schedule has ARRIVED at, after step index `t`.
+
+    `config.scheduler.sigmas` is the whole schedule with a trailing zero, and
+    the latents the callback is handed after step `t` are at `sigmas[t + 1]` —
+    the same indexing `runners/torch_image.py` documents against
+    `pipeline.scheduler.sigmas`, because it is the same schedule.
+
+    None when there is no schedule to read, which mflux always has — but a
+    preview must not be able to raise out of the one callback this runner
+    cancels through and lose a render that was going to succeed.
+
+    `float(sigmas[t + 1])` is a second MLX force inside this callback, and it is
+    safe for a different reason than `_as_numpy`: the schedule is built per
+    `generate_image()` call, so it is a graph this very thread made. Worth
+    knowing if the schedule ever becomes something `load` computes once — that
+    would put it on the bring-up thread, where `_pin_stream` is what saves it.
+    """
+    sigmas = getattr(getattr(config, "scheduler", None), "sigmas", None)
+    if sigmas is None or len(sigmas) <= t + 1:
+        return None
+    return float(sigmas[t + 1])
+
+
+def _as_numpy(latents):
+    """The step's latents as numpy, for the preview projection.
+
+    `astype(float32)` first because numpy has no bfloat16 and mflux's loop is
+    free to work in it. Both packed `(B, N, 128)` and unpatchified
+    `(B, 128, h, w)` come through unchanged — `preview` takes either, so the
+    unpack rule is not restated here.
+
+    **This costs the render nothing.** Touching the array forces the same
+    `mx.eval` the generation loop performs immediately after the callback
+    returns — one line later, in fact, which is why this is where a stream fault
+    surfaces first and as an ABORT rather than an exception: numpy's `__array__`
+    boundary is `noexcept`, so `preview.Sink.add`'s `except Exception` cannot
+    catch one. That is a reason to keep `_pin_stream` correct, not a reason to
+    move this call; the same fault without a preview sink only changes which
+    line reports it. See `load`.
+    """
+    import mlx.core as mx
+    import numpy
+
+    return numpy.asarray(latents.astype(mx.float32))
+
+
+class _StepReporter:
+    """mflux's in-loop callback, and this runner's only interruption point.
+
+    Duck-typed against `mflux.callbacks.callback.InLoopCallback`:
+    `CallbackRegistry.register` looks for the METHOD, not for a base class, so
+    what is required is the exact name and signature and nothing else. Written
+    out rather than imported because importing mflux's Protocol would put a
+    third-party import at module scope, and this file is stdlib-only at import
+    time so its logic can be tested without Metal.
+
+    The keyword names matter: mflux calls `call_in_loop(t=…, seed=…, …)`.
+    """
+
+    def call_in_loop(self, t, seed, prompt, latents, config, time_steps):
+        request = _request
+        job = request.get("job")
+        steps = request.get("steps") or 0
+        started = request.get("step_times")
+        if started is None:
+            return
+        now = time.time()
+        started.append(now - request["last"])
+        request["last"] = now
+        # `t` is the index of the step just taken.
+        done = t + 1
+        average = sum(started) / len(started) if started else None
+        remaining = (steps - done) * average if average else None
+        # The live thumbnail, from the SAME hook and for the same reason the
+        # progress tick is here: this is the only place in a minutes-long
+        # `generate_image()` where anything can be seen. A CLOSURE, not the
+        # array — a sink that is not writing must not be charged for the
+        # conversion, which is what keeps the branch out of this loop and the
+        # two runners' callbacks the same shape.
+        #
+        # **BEFORE the tick, and the order is load-bearing** — the diffusers
+        # runner's `on_step_end` says why at length, and it is the same reason
+        # here because it is the same page reading the same URL: `done` becomes
+        # the cache-busted `&step=N`, and a tick published ahead of its frame can
+        # get the previous frame's bytes cached under this step's URL for the
+        # step's whole duration. It costs the ✕ one frame-write of latency.
+        sigma = _sigma_after(config, t)
+        if sigma is not None:
+            request["preview"].add(lambda: _as_numpy(latents), sigma=sigma,
+                                   grid=request["grid"])
+        # `report_or_cancel`, not `report`: this callback is the ONLY point in a
+        # minutes-long `generate_image()` where a stop can be honoured, and the
+        # reply to this tick is how the ✕ gets here. Same sentence, same fields
+        # and same unit as the diffusers runner's — two engines, one row.
+        worker_base.report_or_cancel(
+            job=job, kind="task", unit="", done=done, total=steps,
+            # No step count in the detail — `done`/`total` above are the same
+            # numbers and the row draws them itself; see torch_image.py's
+            # matching tick for why repeating them read as a bug.
+            detail="Denoising%s" % _eta(remaining))
+        if worker_base.CANCEL.is_set():
+            # Straight out of `generate_image()`: mflux's loop catches only
+            # `KeyboardInterrupt`, so this is not swallowed and turned into a
+            # half-rendered image — it unwinds the call, which is what a ✕ means.
+            raise worker_base.Cancelled()
+
+
+def generate(body):
+    """Render one image. Returns `{path, seconds, seed, width, height, steps}`.
+
+    Byte-for-byte the diffusers runner's parameters and reply. The defaults are
+    ITS defaults too — 28 steps and guidance 4.0, rather than mflux's own 4 and
+    1.0 — because a caller that omits them must get the same picture-making
+    behaviour from either engine. Switching engines is a performance decision,
+    not a silent change to what an unparameterised render means. (Edit
+    defaults come in through `steps`/`guidance` too — the ROUTE decides them,
+    per Decision 1/AI-9f, so this function stays ignorant of which numbers
+    mean "edit" and which mean "generate".)
+
+    **`image`, if present, is a single base-image PATH — never a list.** Its
+    presence is what selects the mode (`_ensure_mode`): a request that carries
+    it renders through `Flux2KleinEdit` with `image_paths=[image]`, which is
+    the library's own shape (Gate A/D); one that omits it stays on the
+    untouched `Flux2Klein` path, exactly as before this option existed.
+    `image_path`/`image_strength` — the PLAIN variant's own image argument —
+    are never passed from here: Gate A found that argument inert unless
+    `image_strength` also arrives, and even then it is img2img noise strength,
+    not instruction editing, which is not what `image` promises a caller.
+    """
+    if _loaded.get("model") is None:
+        raise RuntimeError("no model is loaded")
+    # `str(... or "")`, the same normalisation every other field out of
+    # `body` already gets (`prompt`, `out`, below) — not only for style:
+    # it is what keeps `image` a concrete `str` rather than whatever
+    # `dict.get` on an untyped request body infers to, which is what let
+    # `kwargs["image_paths"] = [image]` below type-check as `list[str]`
+    # instead of a list of an unknown, possibly-`None` element.
+    image = str(body.get("image") or "")
+    mode = "edit" if image else "generate"
+    _ensure_mode(mode, body.get("job") or None)
+    model = _loaded["model"]
+    # BEFORE anything touches the model: this is a request thread, the weights it
+    # is about to force were built on the bring-up thread, and mlx 0.32's default
+    # streams are per (thread, device). See `_pin_stream`.
+    _pin_stream()
+
+    prompt = str(body.get("prompt") or "")
+    width = int(body.get("width") or 1024)
+    height = int(body.get("height") or 1024)
+    steps = int(body.get("steps") or 28)
+    guidance = float(body.get("guidance") or 4.0)
+    seed = int(body.get("seed") or 0)
+    out = str(body.get("out") or "")
+    job = body.get("job") or None
+    if not out:
+        raise ValueError("'out' must be the path to write the image to")
+
+    started = time.time()
+    # The live thumbnail. A no-op when the request named no preview file or when
+    # nothing has been fitted for this model's latent space — see `preview.sink`.
+    frames = preview.sink(body.get("outPreview"), _loaded.get("vae"))
+    # Published before the call and cleared after it, so the registered reporter
+    # is reporting about THIS request and no other.
+    _request.clear()
+    _request.update({"job": job, "steps": steps, "step_times": [], "last": started,
+                     "preview": frames,
+                     "grid": preview.token_grid(_loaded.get("vae"), width, height)})
+    # Step 0 is the one tick with no frame behind it, and that is not the
+    # ordering rule the reporter documents: a frame needs two latents, so
+    # nothing exists to write until the second step.
+    worker_base.report(job=job, state="running", kind="task", unit="",
+                       done=0, total=steps, detail="Denoising")
+    # The sink wraps the SAVE as well as the render: its exit is the lifecycle,
+    # and a clean one means the real PNG has landed and the preview is now
+    # duplicate bytes. A cancel or a failure discards it too (`preview.Sink`).
+    with frames:
+        try:
+            # Annotated rather than left to widen from the literal's own
+            # inferred type: `dict(seed=..., ...)` alone infers
+            # `dict[str, int | str | float]`, and the `image_paths` line
+            # below is a real mismatch against THAT — a list joining a
+            # dict pyright had already decided held no lists. Untyped at
+            # the call site regardless (`model.generate_image(**kwargs)`
+            # reaches a library this module never imports at parse time),
+            # so this is the honest shape of the local variable, not a
+            # cast papering over a mismatch.
+            kwargs: "dict[str, int | str | float | list[str]]" = dict(
+                seed=seed, prompt=prompt, num_inference_steps=steps,
+                height=height, width=width, guidance=guidance)
+            if mode == "edit":
+                # The library's own shape (Gate A/D): `Flux2KleinEdit` takes
+                # `image_paths`, a LIST, even though `image` here is always
+                # exactly one path (Decision 4 — an array or non-string
+                # `image` is refused before this worker is ever reached).
+                kwargs["image_paths"] = [image]
+            rendered = model.generate_image(**kwargs)
+        finally:
+            # Even on the cancel path: a reporter left pointing at a finished
+            # request would tick a row that is closed.
+            _request.clear()
+
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        # `overwrite=True` is NOT optional. mflux's default resolves a colliding
+        # path by writing somewhere ELSE (`ImageUtil.resolve_output_path`), and
+        # the server has already told the caller where this image will be — so
+        # the default would answer a request with a file at a path nobody was
+        # given, while `out` stayed empty or stale. The server owns the
+        # location; this process owns the pixels.
+        rendered.save(out, overwrite=True)
+    return {
+        "path": out,
+        "seconds": round(time.time() - started, 2),
+        "seed": seed,
+        "width": width,
+        "height": height,
+        "steps": steps,
+    }
+
+
+if __name__ == "__main__":
+    worker_base.serve(download=download, load=load, generate=generate,
+                      streaming=False, memory=memory, peak_memory=peak_memory,
+                      release=release)
