@@ -15,7 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
-| 0.3.0 | _CI pending_ | | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload` no-op, runPython timeout 600 s |
+| 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload` no-op, runPython timeout 600 s |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
