@@ -6,20 +6,24 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 
 ## Size by version
 
-| version | DMG (local, Homebrew py) | DMG (CI release asset, python.org py) | .app | Δ DMG vs previous (local) | what changed |
-| --- | --- | --- | --- | --- | --- |
-| fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | — | reference point |
-| 0.1.0 | 12.20 MB (12,202,154 B) | 17.72 MB (17,723,156 B) | 25 MB | — | first lite build |
-| 0.2.0 | 12.22 MB (12,215,018 B) | 17.73 MB (17,729,146 B) | 25 MB | +12.9 KB | `fused.ai.text` (Claude CLI tier) |
+Shipped size = the DMG attached to the GitHub release (built by CI on
+`macos-14`, python.org framework Python, ad-hoc signed). That is what end
+users download.
 
-The GitHub release asset is built on `macos-14` with actions/setup-python's
-python.org-style framework (built against an old deployment target, so it
-runs on older macOS), which is ~5.5 MB heavier than the Homebrew bottle a
-local build uses. Compare like with like when reading the Δ column.
+| version | shipped DMG | Δ vs previous | .app unpacked | what changed |
+| --- | --- | --- | --- | --- |
+| fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
+| 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
 bundled.
+
+A local `bash scripts/build_dmg.sh` on Homebrew's python@3.12 comes out
+~5.5 MB smaller (12.2 MB) because the Homebrew bottle is leaner than the
+python.org framework; it is not the shipped artifact and runs only on the
+building macOS version.
 
 Constant across versions: 0 runtime Python deps (`rumps` + `pyobjc-framework-Cocoa`
 only in the `[app]` extra); no bundled data packages (each app's
