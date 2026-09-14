@@ -84,7 +84,11 @@ STDLIB_PACKAGES, STDLIB_INCLUDES = _stdlib_split()
 OPTIONS = {
     "argv_emulation": False,  # macapp.py owns AppKit file-open handling directly
     "iconfile": ICONFILE,
-    "packages": ["fused_render_lite", "rumps"] + STDLIB_PACKAGES,
+    # WebKit named explicitly: pyobjc framework packages are half C
+    # extension, half `_metadata.py`, and a traced import can leave the
+    # metadata behind — which surfaces as delegate blocks arriving without a
+    # signature inside the built app only.
+    "packages": ["fused_render_lite", "rumps", "WebKit"] + STDLIB_PACKAGES,
     "includes": STDLIB_INCLUDES,
     "resources": [os.path.join(REPO_ROOT, "fused_render_lite", "static")],
     # Third-party only: the stdlib is shipped whole (STDLIB_EXCLUDED is the
@@ -126,6 +130,12 @@ OPTIONS = {
         "NSDesktopFolderUsageDescription": "Render Lite opens .fused apps from your Desktop.",
         "NSDocumentsFolderUsageDescription": "Render Lite opens .fused apps from your Documents folder.",
         "NSDownloadsFolderUsageDescription": "Render Lite opens .fused apps from your Downloads folder.",
+        # Pages run inside the app's own WKWebView (mainwindow.py), so a
+        # .fused app's getUserMedia is THIS process asking for the camera or
+        # microphone. Without the usage string the OS kills the app instead
+        # of prompting.
+        "NSCameraUsageDescription": "Render Lite uses the camera when a .fused app you opened asks for it.",
+        "NSMicrophoneUsageDescription": "Render Lite uses the microphone when a .fused app you opened asks for it.",
     },
 }
 

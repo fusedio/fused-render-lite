@@ -1,0 +1,135 @@
+"""Navigation and download policy for the app's native windows.
+
+Pure Python, no AppKit: `mainwindow.py` asks these functions what to do with
+a navigation WebKit is about to perform and enacts the answer. Keeping the
+decisions here means they run under pytest on every platform, while the
+AppKit half is only ever imported inside the packaged macOS app.
+
+A URL is one of three kinds relative to the server this process owns:
+
+- ``"app"``       loopback, our port — the placeholder, an `/open` page, a
+                  raw-file URL. Loads inside a window.
+- ``"external"``  any other http(s) — the default browser's job.
+- ``"other"``     anything else (about:blank, data:, blob:, javascript:).
+                  Left to WebKit; never bounced out of the process.
+"""
+from __future__ import annotations
+
+import os
+import re
+from urllib.parse import urlsplit
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
+
+def classify(url: str | None, port: int) -> str:
+    """Kind of ``url`` relative to the server on ``port`` (module docstring)."""
+    if not url:
+        return "other"
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "other"
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return "other"
+    host = (parts.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS or host.startswith("127."):
+        try:
+            url_port = parts.port
+        except ValueError:
+            return "external"
+        if url_port is None:
+            url_port = 443 if scheme == "https" else 80
+        return "app" if url_port == port else "external"
+    return "external"
+
+
+def navigation_action(
+    url: str | None,
+    port: int,
+    *,
+    is_main_frame: bool,
+    has_target_frame: bool,
+    wants_download: bool,
+    new_window_modifier: bool,
+) -> str:
+    """What to do with a navigation WebKit asks about, before any response.
+
+    Returns ``"allow"``, ``"download"``, ``"new_window"`` or
+    ``"open_external"``.
+
+    Order matters: a ``download`` attribute wins over everything (an app's
+    ``<a download href=fused.rawUrl(...)>`` must save, never navigate); then
+    where the URL points; then how the click asked to open it. A navigation
+    with no target frame is ``target=_blank`` / `window.open` — a new tab in a
+    browser, so a new window here. ⌘-click and middle-click mean the same.
+    Sub-frame navigations to foreign hosts are the page's own iframe business
+    (tile servers, embeds) and stay allowed.
+    """
+    if wants_download:
+        return "download"
+    kind = classify(url, port)
+    if kind == "app":
+        if not has_target_frame or (is_main_frame and new_window_modifier):
+            return "new_window"
+        return "allow"
+    if kind == "external":
+        if is_main_frame or not has_target_frame:
+            return "open_external"
+        return "allow"
+    return "allow"
+
+
+def response_action(
+    *,
+    is_main_frame: bool,
+    can_show_mime: bool,
+    content_disposition: str | None,
+) -> str:
+    """``"allow"`` or ``"download"`` for a response WebKit is about to render.
+
+    Anything the engine cannot show inline (a parquet, a zip, a .fused) and
+    anything the server marks ``attachment`` (`_web.FileResponse` with a
+    filename) becomes a download instead of a blank page or a "cannot show"
+    sheet.
+    """
+    if not is_main_frame:
+        return "allow"
+    if _is_attachment(content_disposition):
+        return "download"
+    if not can_show_mime:
+        return "download"
+    return "allow"
+
+
+def _is_attachment(disposition: str | None) -> bool:
+    if not disposition:
+        return False
+    return disposition.split(";", 1)[0].strip().lower() == "attachment"
+
+
+_UNSAFE_NAME = re.compile(r"[\x00-\x1f/\\:]")
+
+
+def download_destination(downloads_dir: str, suggested: str | None,
+                         exists=os.path.exists) -> str:
+    """A path under ``downloads_dir`` that does not exist yet.
+
+    WebKit refuses to write a download over an existing file, so the Finder
+    convention applies: ``name``, ``name 2``, ``name 3`` … The suggested name
+    is reduced to one safe path component first; an empty or unusable one
+    becomes ``download``.
+    """
+    name = _UNSAFE_NAME.sub("_", (suggested or "").strip()) or "download"
+    if name in (".", ".."):
+        name = "download"
+    stem, ext = os.path.splitext(name)
+    if not stem:  # ".bashrc"-style names: keep the whole thing as the stem
+        stem, ext = name, ""
+    candidate = os.path.join(downloads_dir, name)
+    counter = 2
+    while exists(candidate):
+        candidate = os.path.join(downloads_dir, f"{stem} {counter}{ext}")
+        counter += 1
+    return candidate

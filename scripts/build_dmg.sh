@@ -417,6 +417,12 @@ else
   <key>com.apple.security.cs.allow-jit</key><true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+  <!-- Pages run in the app's own WKWebView (mainwindow.py): a .fused app's
+       getUserMedia is this process opening the camera / microphone. Under
+       the hardened runtime these entitlements are what make the TCC prompt
+       possible at all. -->
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
 </dict>
 </plist>
 PLIST
