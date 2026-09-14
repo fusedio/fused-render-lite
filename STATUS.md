@@ -6,11 +6,16 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 
 ## Size by version
 
-| version | DMG | .app | Δ DMG vs previous | what changed |
-| --- | --- | --- | --- | --- |
-| fused-render (full) | ~hundreds of MB | ~400 MB installed packages | — | reference point |
-| 0.1.0 | 12.20 MB (12,202,154 B) | 25 MB | — | first lite build |
-| 0.2.0 | 12.22 MB (12,215,018 B) | 25 MB | +12.9 KB | `fused.ai.text` (Claude CLI tier) |
+| version | DMG (local, Homebrew py) | DMG (CI release asset, python.org py) | .app | Δ DMG vs previous (local) | what changed |
+| --- | --- | --- | --- | --- | --- |
+| fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | — | reference point |
+| 0.1.0 | 12.20 MB (12,202,154 B) | 17.73 MB | 25 MB | — | first lite build |
+| 0.2.0 | 12.22 MB (12,215,018 B) | 17.73 MB (17,729,146 B) | 25 MB | +12.9 KB | `fused.ai.text` (Claude CLI tier) |
+
+The GitHub release asset is built on `macos-14` with actions/setup-python's
+python.org-style framework (built against an old deployment target, so it
+runs on older macOS), which is ~5.5 MB heavier than the Homebrew bottle a
+local build uses. Compare like with like when reading the Δ column.
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
