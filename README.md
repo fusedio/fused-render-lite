@@ -53,6 +53,20 @@ console. An app that needs those belongs in full fused-render.
 The Apple-Intelligence tier needs a Swift helper the lite build does not
 compile; it answers `unavailable`. Streaming is NDJSON over chunked HTTP.
 
+## Showcase apps
+
+The placeholder page (`/`) lists the showcase apps shipped inside the package,
+`fused_render_lite/showcase/*.fused`, as cards; clicking one opens it through
+the ordinary `/open?_file=` path. They ride along in the wheel and the DMG with
+no build step. Two ship today: **Note taker** (HTML only, `readFile` /
+`writeFile`) and **Pipeline Intelligence** (`runPython` + its own
+`pyproject.toml`).
+
+To add one: drop the `.fused` into that folder, give it a `title` and
+`description` in `showcase/showcase.json`, and make sure it carries a
+`pyproject.toml` (even with `dependencies = []`) and a `preview.png` —
+`tests/test_showcase.py` checks both, and that it calls nothing lite rejects.
+
 ## Python environments
 
 Nothing is bundled. Each `.fused` app carries its own `pyproject.toml`; on
@@ -121,6 +135,8 @@ fused_render_lite/
   macapp.py       menu-bar shell; Finder open events -> browser
   _child.py       worker: import the .py, call main(**params), print JSON
   static/         runtime.js, placeholder (index.html), open page (open.html)
+  showcase.py     lists showcase/*.fused for the placeholder; serves their preview.png
+  showcase/       showcase .fused apps + showcase.json (title, description)
 ```
 
 State lives in `~/.fused-render-lite/` (override with `FUSED_RENDER_LITE_HOME`).

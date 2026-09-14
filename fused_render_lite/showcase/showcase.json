@@ -1,0 +1,10 @@
+{
+  "note-taker.fused": {
+    "title": "Note taker",
+    "description": "A single HTML page that saves notes next to itself with fused.readFile and fused.writeFile. No Python."
+  },
+  "pipeline-intelligence.fused": {
+    "title": "Pipeline Intelligence",
+    "description": "A sales-pipeline dashboard: fused.runPython generates and scores deals with a transparent weighted model, with what-if sliders."
+  }
+}

@@ -18,6 +18,8 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
+  GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
+  GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
   /api/ai, /api/ai/*        fused-render's own AI routers (server/ai_relay.py, server/ai_routes.py),
                             copied verbatim and mounted through _web.APIRouter
 
@@ -39,7 +41,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, appfile, env, jobs, paths
+from fused_render_lite import __version__, appfile, env, showcase, jobs, paths
 from fused_render_lite._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_lite.routes import ai_relay, ai_routes
 
@@ -141,6 +143,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
             if route == "/api/jobs":
                 return self._json({"jobs": jobs.list_jobs(mark_read=True)})
+            if route == "/api/showcase":
+                return self._json({"showcase": showcase.list_showcase()})
+            if route == "/api/showcase/preview":
+                return self._showcase_preview(q)
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             if self._dispatch("GET", route, q):
@@ -215,6 +221,12 @@ class Handler(BaseHTTPRequestHandler):
         else:
             html = injection + html
         self._html(html)
+
+    def _showcase_preview(self, q: dict) -> None:
+        data = showcase.preview_bytes(q.get("id") or "")
+        if data is None or len(data) > showcase.MAX_PREVIEW_BYTES:
+            return self._error("not found", 404)
+        self._send(200, data, "image/png")
 
     # ---- open / drop ------------------------------------------------------
 
