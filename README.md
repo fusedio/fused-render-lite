@@ -31,7 +31,7 @@ The page runtime exposes these `fused.*` members:
 Every other member the full fused-render runtime has (`capture`,
 `fileIndex`, `daemon`, `snapshot`)
 is **not supported**. There are no stubs: calling one, or reading any
-property of `fused.ai` / `fused.capture` / `fused.fileIndex` / `fused.daemon`,
+property of `fused.capture` / `fused.fileIndex` / `fused.daemon`,
 throws `<name> is not supported on fused-render-lite` and logs it to the
 console. An app that needs those belongs in full fused-render.
 
