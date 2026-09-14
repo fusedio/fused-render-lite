@@ -14,7 +14,7 @@ UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.daemon", "fused.snapsh
 
 @pytest.fixture(autouse=True)
 def stdlib_python(monkeypatch):
-    monkeypatch.setattr(env, "managed_python", lambda log=None: sys.executable)
+    monkeypatch.setattr(env, "base_python", lambda: sys.executable)
     monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
     monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
 
