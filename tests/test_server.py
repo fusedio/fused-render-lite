@@ -130,3 +130,54 @@ def test_pyproject_builds_a_venv(client, tmp_path, lite_home, monkeypatch):
     assert result["ok"] is True, result
     assert result["result"].count(".") >= 1
     assert env.is_ready(data["dir"])
+
+
+def test_upload_mkdir_and_jobs(client, v2_fused):
+    status, _, body = client.post("/api/open", {"file": v2_fused})
+    entry = json.loads(body)["entry"]
+    app_dir = os.path.dirname(entry)
+    base = urllib.parse.quote(entry, safe="")
+
+    # upload: relative path resolved against base, raw body
+    status, _, body = client.post(f"/api/fs/upload?path=out/blob.bin&base={base}", b"\x00\x01bin",
+                                  raw=True, headers={"Content-Type": "application/octet-stream"})
+    assert status == 404  # parent missing
+    status, _, body = client.post("/api/fs/mkdir", {"path": "out", "base": entry})
+    assert status == 200 and json.loads(body)["is_dir"] is True
+    status, _, body = client.post("/api/fs/mkdir", {"path": "out", "base": entry})
+    assert status == 409 and json.loads(body)["error"] == "exists"
+    status, _, body = client.post(f"/api/fs/upload?path=out/blob.bin&base={base}", b"\x00\x01bin",
+                                  raw=True, headers={"Content-Type": "application/octet-stream"})
+    assert status == 200 and json.loads(body)["size"] == 5
+    assert open(os.path.join(app_dir, "out", "blob.bin"), "rb").read() == b"\x00\x01bin"
+    status, _, _ = client.post("/api/fs/upload?path=/x", b"x", raw=True, headers={"X-Fused": "0"})
+    assert status == 403
+
+    # jobs: report, list, cancel, terminal, dismiss
+    status, _, body = client.post("/api/jobs", {"id": "j1", "title": "Build", "total": 10, "state": "running"})
+    assert status == 200 and json.loads(body)["cancel_requested"] is False
+    status, _, body = client.post("/api/jobs/j1/cancel", {})
+    assert status == 200 and json.loads(body)["cancel_requested"] is True
+    status, _, body = client.post("/api/jobs", {"id": "j1", "done": 4})
+    row = json.loads(body)
+    assert row["done"] == 4 and row["total"] == 10 and row["cancel_requested"] is True
+    status, _, body = client.get("/api/jobs")
+    assert [j["id"] for j in json.loads(body)["jobs"]] == ["j1"]
+    status, _, body = client.post("/api/jobs", {"id": "j1", "state": "bogus"})
+    assert status == 400
+    status, _, body = client.post("/api/jobs", {"id": "j1", "state": "cancelled"})
+    assert json.loads(body)["state"] == "cancelled"
+    status, _, body = client.post("/api/jobs/j1/dismiss", {})
+    assert json.loads(body)["dismissed"] is True
+    assert json.loads(client.get("/api/jobs")[2])["jobs"] == []
+
+
+def test_worker_origin_is_exported(client):
+    assert os.environ["FUSED_RENDER_ORIGIN"] == client.base
+
+
+def test_runtime_no_longer_throws_for_030_members():
+    js = open(os.path.join(os.path.dirname(env.__file__), "static", "runtime.js")).read()
+    for name in ("uploadFile", "mkdir", "trackJob", "watchJob", "autoReload"):
+        assert f'unsupportedFn("fused.{name}")' not in js
+    assert "function autoReload() {}" in js

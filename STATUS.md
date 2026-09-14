@@ -15,6 +15,7 @@ users download.
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
 | 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
+| 0.3.0 | _CI pending_ | | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload` no-op, runPython timeout 600 s |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
@@ -29,6 +30,41 @@ Constant across versions: 0 runtime Python deps (`rumps` + `pyobjc-framework-Coc
 only in the `[app]` extra); no bundled data packages (each app's
 `pyproject.toml` → `uv sync`); `uv` downloaded on first use (0.12.13,
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
+
+---
+
+## 0.3.0
+
+Changes from 0.2.0: `fused.uploadFile` and `fused.mkdir` land; `fused.trackJob` /
+`fused.watchJob` land on an in-process job store (no shell UI, but rows survive a
+page reload and a worker can be told to stop via `cancel_requested`);
+`fused.autoReload(...)` is accepted as a no-op instead of throwing (a `.fused`
+extract never changes under the page); `runPython` timeout 60 s → 600 s, matching
+fused-render. Workers spawned by `runPython` get `FUSED_RENDER_ORIGIN` so a
+detached process can `POST /api/jobs`.
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.runPython(py, params, opts?)` | ✅ | 600 s timeout; `opts.key` supersession, `opts.signal` |
+| `fused.params.get / getAll / set / onChange` | ✅ | |
+| `fused.readFile` / `stat` / `writeFile` / `rawUrl` | ✅ | as 0.2.0 |
+| `fused.uploadFile(path, blob)` | ✅ new | raw body to `/api/fs/upload?path=&base=`; 403 `readonly` → `err.type` |
+| `fused.mkdir(path)` | ✅ new | 409 → `type: "exists"`, 403 → `readonly` |
+| `fused.trackJob(spec)` | ✅ new | `update/finish/fail/cancelled`, `cancelRequested`, `state`; fire-and-forget |
+| `fused.watchJob(id)` | ✅ new | `get()`, `watch(cb, ms)`, `stop()`, `cancel()` |
+| `fused.autoReload(...)` | ✅ no-op | accepted, does nothing |
+| `fused.env` / `fused.device` / `fused.lite` | ✅ | |
+| `fused.ai.text` | ✅ Claude only | as 0.2.0 |
+| `fused.ai.models.list() / catalog()`, `fused.ai.cancel()` | ✅ | as 0.2.0 |
+| `fused.ai.text` with `history`/`raw`/`images` | ❌ `bad_request` | |
+| `fused.ai.text` with `provider: local/apple`, repo-id/`.gguf` model | ❌ `unavailable` | |
+| `fused.ai.image / video / transcribe / embed`, `ai.models.load/download/unload` | ❌ `unavailable` | |
+| `fused.capture.*` | ❌ throws | |
+| `fused.fileIndex.*` | ❌ throws | |
+| `fused.daemon.*` | ❌ throws | |
+| `fused.snapshot` | ❌ throws | |
+
+Server routes added: `POST /api/fs/upload`, `POST /api/fs/mkdir`, `GET/POST /api/jobs`, `POST /api/jobs/<id>/cancel|dismiss`, `POST /api/jobs/clear`.
 
 ---
 

@@ -37,7 +37,7 @@ PYTHON_VERSION = "3.12"
 UV_VERSION = "0.12.13"
 _UV_BASE = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/"
 READY_MARKER = ".fused-lite-ready"
-RUN_TIMEOUT_S = 60.0
+RUN_TIMEOUT_S = 600.0
 
 _STRIPPED_ENV_VARS = ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE",
                       "PYTHONSTARTUP", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__")

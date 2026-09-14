@@ -13,6 +13,10 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/fs/raw?path=&base=                 bytes (Range honoured)
   GET  /api/fs/stat?path=                      {path,name,is_dir,size,mtime,writable}
   POST /api/fs/write        {path, content, expected_mtime?, create?} -> stat
+  POST /api/fs/upload?path=&base=   raw bytes -> stat (fused.uploadFile)
+  POST /api/fs/mkdir        {path} -> stat; 409 when it exists
+  GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
+  POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
   POST /api/ai              fused.ai.text body -> {ok, result} or chunked NDJSON when stream:true
   GET  /api/ai/runtime, /api/ai/catalog        the Claude tier's models
@@ -36,7 +40,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, ai, appfile, env, paths
+from fused_render_lite import __version__, ai, appfile, env, jobs, paths
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +134,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_stat(q)
             if route == "/api/health":
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
+            if route == "/api/jobs":
+                return self._json({"jobs": jobs.list_all()})
             if route == "/api/ai/runtime":
                 return self._json(ai.runtime())
             if route == "/api/ai/catalog":
@@ -154,6 +160,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_run()
             if route == "/api/fs/write":
                 return self._fs_write()
+            if route == "/api/fs/upload":
+                return self._fs_upload()
+            if route == "/api/fs/mkdir":
+                return self._fs_mkdir()
+            if route == "/api/jobs":
+                return self._jobs_report()
+            if route == "/api/jobs/clear":
+                return self._guarded() and self._json({"cleared": jobs.clear()})
+            m = re.match(r"^/api/jobs/([^/]+)/(cancel|dismiss)$", route)
+            if m:
+                return self._jobs_action(urllib.parse.unquote(m.group(1)), m.group(2))
             if route == "/api/ai":
                 return self._api_ai()
             if route == "/api/ai/cancel":
@@ -283,6 +300,25 @@ class Handler(BaseHTTPRequestHandler):
         result = env.run_python(py, params if isinstance(params, dict) else {}, app_dir)
         result["resolved_py"] = py
         self._json(result)
+
+    # ---- jobs ---------------------------------------------------------------
+
+    def _jobs_report(self) -> None:
+        if not self._guarded():
+            return
+        body = self._json_body()
+        try:
+            self._json(jobs.upsert(body if body is not None else {}))
+        except jobs.JobError as exc:
+            self._error(str(exc))
+
+    def _jobs_action(self, job_id: str, action: str) -> None:
+        if not self._guarded():
+            return
+        if action == "cancel":
+            row = jobs.cancel(job_id)
+            return self._json(row) if row else self._error("no such job", 404)
+        return self._json({"dismissed": jobs.dismiss(job_id)})
 
     # ---- fused.ai.text ----------------------------------------------------
 
@@ -417,6 +453,75 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(f"no such file or directory: {q.get('path')}", 404)
         self._json(self._stat_payload(path))
 
+    def _write_target(self, path: str | None, base: str | None) -> str | None:
+        if not path or not isinstance(path, str):
+            return None
+        if not os.path.isabs(path):
+            if not base:
+                return None
+            path = os.path.normpath(os.path.join(os.path.dirname(base), path))
+        return path
+
+    def _fs_upload(self) -> None:
+        """Raw request body -> file. ``?path=`` absolute, or relative to ``?base=``."""
+        if not self._guarded():
+            return
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
+        path = self._write_target(q.get("path"), q.get("base"))
+        if not path:
+            return self._error("'path' must be an absolute path, or relative with 'base'")
+        if os.path.isdir(path):
+            return self._error(f"path is a directory: {path}")
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            return self._error(f"parent directory does not exist: {parent}", 404)
+        exists = os.path.exists(path)
+        if (exists and not os.access(path, os.W_OK)) or (not exists and not os.access(parent, os.W_OK)):
+            return self._json({"error": "readonly"}, 403)
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_DROP_BYTES:
+            return self._error("upload too large", 413)
+        fd, tmp = tempfile.mkstemp(dir=parent, prefix=".fused-upload-")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    out.write(chunk)
+            os.replace(tmp, path)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return self._error(f"cannot write {path}: {e}")
+        self._json({**self._stat_payload(path), "created": not exists})
+
+    def _fs_mkdir(self) -> None:
+        if not self._guarded():
+            return
+        body = self._json_body() or {}
+        path = self._write_target(body.get("path"), body.get("base"))
+        if not path:
+            return self._error("'path' must be an absolute path, or relative with 'base'")
+        if os.path.isdir(path):
+            return self._json({"error": "exists"}, 409)
+        if os.path.exists(path):
+            return self._error(f"path exists and is not a directory: {path}")
+        parent = os.path.dirname(path.rstrip(os.sep))
+        if not os.path.isdir(parent):
+            return self._error(f"parent directory does not exist: {parent}", 404)
+        if not os.access(parent, os.W_OK):
+            return self._json({"error": "readonly"}, 403)
+        try:
+            os.mkdir(path)
+        except OSError as e:
+            return self._error(f"cannot create {path}: {e}")
+        self._json({**self._stat_payload(path), "created": True})
+
     def _fs_write(self) -> None:
         if not self._guarded():
             return
@@ -469,7 +574,12 @@ class Server(ThreadingHTTPServer):
 
 
 def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
-    return Server((host, port), Handler)
+    srv = Server((host, port), Handler)
+    # Workers spawned by runPython inherit this, so a detached process can
+    # keep reporting to /api/jobs after its page is gone (fused-render's
+    # documented pattern: plain JSON over HTTP, no fused_render import).
+    os.environ["FUSED_RENDER_ORIGIN"] = f"http://{host}:{srv.server_address[1]}"
+    return srv
 
 
 def serve_in_thread(port: int = 0) -> tuple[Server, threading.Thread]:

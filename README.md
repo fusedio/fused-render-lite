@@ -13,20 +13,23 @@ Everything after `_file` is the app's own `fused.params` state.
 
 ## What it supports
 
-The page runtime exposes exactly six `fused.*` members:
+The page runtime exposes these `fused.*` members:
 
 | API | Notes |
 | --- | --- |
-| `fused.runPython(py, params, opts?)` | runs `main(**params)` from the app's own venv |
+| `fused.runPython(py, params, opts?)` | runs `main(**params)` from the app's own venv, 600 s cap |
 | `fused.params.get/getAll/set/onChange` | URL-backed state, same semantics as fused-render |
 | `fused.readFile(path)` | text |
 | `fused.stat(path)` | `{path, name, is_dir, size, mtime, writable}` |
 | `fused.writeFile(path, content, opts?)` | optimistic lock + create-only, as in fused-render |
 | `fused.rawUrl(path)` | bytes URL, Range requests honoured |
 | `fused.ai.text({prompt, ...})` | Claude tier only, through the local `claude` CLI; streams with `onChunk` |
+| `fused.uploadFile(path, blob)` / `fused.mkdir(path)` | binary save, directories |
+| `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
+| `fused.autoReload(...)` | accepted, no-op |
 
 Every other member the full fused-render runtime has (`capture`,
-`fileIndex`, `daemon`, jobs, `uploadFile`, `mkdir`, `autoReload`, `snapshot`)
+`fileIndex`, `daemon`, `snapshot`)
 is **not supported**. There are no stubs: calling one, or reading any
 property of `fused.ai` / `fused.capture` / `fused.fileIndex` / `fused.daemon`,
 throws `<name> is not supported on fused-render-lite` and logs it to the

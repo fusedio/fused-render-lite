@@ -10,9 +10,12 @@
  *   fused.rawUrl(path) -> string
  *   fused.ai.text({prompt, ...}) -> Promise<result frame>   (Claude CLI tier only)
  *   fused.ai.models.list() / catalog(), fused.ai.cancel()
+ *   fused.uploadFile(path, blob) / fused.mkdir(path) -> Promise<stat>
+ *   fused.trackJob(spec) / fused.watchJob(id)  (in-process job rows)
+ *   fused.autoReload(...)  accepted, no-op
  *
- * Everything else the full fused-render runtime exposes (ai, capture,
- * fileIndex, daemon, jobs, uploadFile, mkdir, autoReload, snapshot) is NOT
+ * Everything else the full fused-render runtime exposes (capture,
+ * fileIndex, daemon, snapshot) is NOT
  * supported: touching it throws "<name> is not supported on fused-render-lite".
  */
 (function () {
@@ -500,6 +503,163 @@
       });
   }
 
+  // ---- uploadFile / mkdir ---------------------------------------------------
+  // Same page-facing contract as fused-render; the wire differs (raw body +
+  // ?path= instead of multipart) because lite's server has no form parser.
+  function fsUrl(route, path) {
+    let url = route + "?path=" + encodeURIComponent(path);
+    if (path && path[0] !== "/") {
+      const ownPath = ownQuery("path");
+      if (ownPath) url += "&base=" + encodeURIComponent(ownPath);
+    }
+    return url;
+  }
+  function fsFailure(res, data, what) {
+    if (res.status === 409) {
+      const err = new Error(what + " already exists");
+      err.type = "exists";
+      return err;
+    }
+    if (res.status === 403 && data && data.error === "readonly") {
+      const err = new Error(what + " is read-only");
+      err.type = "readonly";
+      return err;
+    }
+    return new Error((data && data.error) || "HTTP " + res.status);
+  }
+
+  function uploadFile(path, blob) {
+    return fetch(fsUrl("/api/fs/upload", path), {
+      method: "POST",
+      headers: { "X-Fused": "1", "Content-Type": "application/octet-stream" },
+      body: blob,
+    })
+      .then((res) => res.json().then((data) => ({ res, data })))
+      .then(({ res, data }) => {
+        if (!res.ok) throw fsFailure(res, data, "file");
+        return data;
+      });
+  }
+
+  function mkdir(path) {
+    const body = { path: path };
+    if (path && path[0] !== "/") body.base = ownQuery("path");
+    return fetch("/api/fs/mkdir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Fused": "1" },
+      body: JSON.stringify(body),
+    })
+      .then((res) => res.json().then((data) => ({ res, data })))
+      .then(({ res, data }) => {
+        if (!res.ok) throw fsFailure(res, data, "directory");
+        return data;
+      });
+  }
+
+  // ---- trackJob / watchJob ----------------------------------------------------
+  // fused-render's contract, minus the shell's download-manager UI: rows live
+  // in the server so a reloaded page (or a worker) can follow or cancel work.
+  function newJobId() {
+    return "j" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+  function postJob(body, onReject) {
+    return fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Fused": "1" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    })
+      .then((res) => res.json().then((data) => {
+        if (res.ok) return data;
+        onReject((data && data.error) || "HTTP " + res.status);
+        return null;
+      }))
+      .catch(() => null);
+  }
+
+  function trackJob(spec) {
+    spec = spec || {};
+    const id = spec.id ? String(spec.id) : newJobId();
+    let last = null;
+    let settled = false;
+    let warned = false;
+    let chain = Promise.resolve(null);
+    function warnOnce(message) {
+      if (warned) return;
+      warned = true;
+      console.warn("fused.trackJob(" + JSON.stringify(id) + "): " + message);
+    }
+    function send(fields) {
+      if (settled && fields.state === undefined) return chain;
+      const body = Object.assign({ id: id }, fields);
+      chain = chain.then(() => postJob(body, warnOnce)).then((record) => {
+        if (record && record.id === id) last = record;
+        return last;
+      });
+      return chain;
+    }
+    const handle = {
+      id: id,
+      update: (fields) => send(fields || {}),
+      finish: (detail) => { settled = true; return send({ state: "done", detail: detail === undefined ? "" : detail }); },
+      fail: (message) => {
+        settled = true;
+        const text = message && message.message ? message.message
+          : message === undefined || message === null ? "failed" : String(message);
+        return send({ state: "error", message: text });
+      },
+      cancelled: () => { settled = true; return send({ state: "cancelled" }); },
+    };
+    Object.defineProperty(handle, "cancelRequested", { get: () => !!(last && last.cancel_requested) });
+    Object.defineProperty(handle, "state", { get: () => (last ? last.state : "running") });
+    send({
+      title: spec.title || "Working…", detail: spec.detail || "", kind: spec.kind || "task",
+      unit: spec.unit || "", done: spec.done === undefined ? null : spec.done,
+      total: spec.total === undefined ? null : spec.total, cancellable: !!spec.cancellable,
+      state: "running",
+    });
+    return handle;
+  }
+
+  function watchJob(id) {
+    let stopped = false;
+    async function get() {
+      const res = await fetch("/api/jobs");
+      const data = await res.json().catch(() => ({}));
+      return (data.jobs || []).find((j) => j.id === id) || null;
+    }
+    return {
+      get,
+      async watch(onUpdate, intervalMs) {
+        const every = Math.max(200, intervalMs || 700);
+        let seen = false;
+        let missing = 0;
+        for (;;) {
+          if (stopped) return null;
+          const record = await get().catch(() => null);
+          if (record) {
+            seen = true;
+            missing = 0;
+            if (typeof onUpdate === "function") onUpdate(record);
+            if (record.state !== "running" && record.state !== "waiting") return record;
+          } else if (seen && ++missing >= 5) {
+            return null;
+          }
+          await new Promise((r) => setTimeout(r, every));
+        }
+      },
+      stop() { stopped = true; },
+      cancel: () => fetch("/api/jobs/" + encodeURIComponent(id) + "/cancel", {
+        method: "POST", headers: { "X-Fused": "1" },
+      }).then((r) => r.ok),
+    };
+  }
+
+  // autoReload: accepted and ignored. A .fused extract never changes under
+  // the page, so there is nothing to watch; pages call this at boot and must
+  // not die for it.
+  function autoReload() {}
+
   // ---- fused.ai (Claude tier only) ---------------------------------------
   // Same contract as fused-render's fused.ai.text: one options object,
   // the shared result frame {text, provider, finishReason, warnings, usage,
@@ -639,11 +799,11 @@
     writeFile,
     params: { get, getAll, set, onChange },
     // Not supported on lite: every one of these throws when touched.
-    uploadFile: unsupportedFn("fused.uploadFile"),
-    mkdir: unsupportedFn("fused.mkdir"),
-    trackJob: unsupportedFn("fused.trackJob"),
-    watchJob: unsupportedFn("fused.watchJob"),
-    autoReload: unsupportedFn("fused.autoReload"),
+    uploadFile,
+    mkdir,
+    trackJob,
+    watchJob,
+    autoReload,
     snapshot: unsupportedFn("fused.snapshot"),
     daemon: unsupportedNamespace("fused.daemon"),
     ai,
