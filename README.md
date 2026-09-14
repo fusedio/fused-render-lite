@@ -98,6 +98,10 @@ fused-render-lite ~/Downloads/app.fused
 pytest
 ```
 
+Or `scripts/dev.sh`: bootstraps a Python 3.12 `.venv` with `[dev,app]`, runs the
+server with auto-reload on `.py` edits, on a per-branch port and state dir so it
+never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
+
 ## Build the macOS app
 
 ```
