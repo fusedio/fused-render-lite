@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.7.0 | 40.94 MB (40,944,835 B) | +0.10 MB | 96 MB | fused.daemon (pure-Python source) + native windows / menu bar; no packaging change |
 | 0.6.1 | 40.85 MB (40,848,435 B) | −0.07 MB | 95 MB | rename to Render Lite; no packaging change |
 | 0.6.0 | 40.92 MB (40,915,928 B) | +16.52 MB | 95 MB | build/CI parity with fused-render: uv bundled in the app (`Resources/bin/uv`, ~+15 MB), apple tier helper compiled + bundled (macos-26 runner), Mach-O/minos probes, prepare-release job, DMG smoke build in test.yml |
 | 0.5.8 | 24.39 MB (24,393,863 B) | −3.30 MB | 60 MB | size: drop Tcl/Tk, ncurses and CPython's `_test*` fixtures that the whole-stdlib copy dragged in (lite-only trim on top of fused-render's list) |
