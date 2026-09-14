@@ -231,23 +231,17 @@ def main() -> None:
         def __init__(self):
             super().__init__("Render Lite", icon=icon if os.path.isfile(icon) else None,
                              template=True, quit_button=None)
-            self.menu = ["Show window", "Open in browser", "Open app logs", "Quit"]
+            # Two items. Quit is ⌘Q or the Dock (regular app); the log file
+            # is Help → Show App Logs in Finder (mainwindow.py's main menu).
+            self.menu = ["Open in app", "Open in browser"]
 
-        @rumps.clicked("Show window")
-        def show_window(self, _sender):
+        @rumps.clicked("Open in app")
+        def open_in_app(self, _sender):
             show_home()
 
         @rumps.clicked("Open in browser")
         def open_browser(self, _sender):
             webbrowser.open(open_url(port, None))
-
-        @rumps.clicked("Open app logs")
-        def open_logs(self, _sender):
-            subprocess.run(["open", "-R", paths.log_path()], check=False)
-
-        @rumps.clicked("Quit")
-        def quit(self, _sender):
-            quit_app(_sender)
 
     app = App()
 

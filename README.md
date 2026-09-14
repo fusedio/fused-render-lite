@@ -28,9 +28,11 @@ menu bar item, a main menu, and one window per opened `.fused`.
 | `getUserMedia` from the app's own page | granted; the system camera/mic prompt still applies |
 | ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
 
-Closing the last window does not quit; Quit is ⌘Q, the menu-bar item, or the
-Dock. "Open in browser" (menu-bar item, View menu) still hands the current
-page to the default browser. `FUSED_RENDER_LITE_NO_BROWSER=1` suppresses the
+Closing the last window does not quit; Quit is ⌘Q or the Dock. The menu-bar
+item has two entries, "Open in app" (focus the front window or open the
+placeholder) and "Open in browser". The Dock icon does the same as "Open in
+app". View → Open in Browser hands the current page to the default browser;
+Help → Show App Logs in Finder reveals the log. `FUSED_RENDER_LITE_NO_BROWSER=1` suppresses the
 startup window. The CLI (`fused-render-lite`, `scripts/dev.sh`) is unchanged
 and still opens a browser tab.
 
