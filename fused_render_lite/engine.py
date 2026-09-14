@@ -6,7 +6,15 @@ from __future__ import annotations
 
 
 class _NoBackend:
-    _python_executable = None
+    @property
+    def _python_executable(self):
+        """The base interpreter venvs are built on — fused-render's backend was
+        constructed with `envinstall.script_python()`, so answer the same:
+        a uv-managed 3.12 (always, in the packaged app), or None for "ours" in
+        a dev checkout already on 3.12. Never the py2app stub."""
+        from fused_render_lite import envinstall
+
+        return envinstall.script_python()
 
 
 def available() -> bool:

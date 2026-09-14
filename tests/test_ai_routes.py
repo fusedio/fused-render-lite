@@ -82,3 +82,34 @@ def test_runner_folders_ship_with_the_package():
     for runner in registry._RUNNERS:
         assert os.path.isfile(os.path.join(runner.folder, "pyproject.toml")), runner.code
         assert os.path.isfile(os.path.join(runner.folder, "worker.py")), runner.code
+
+
+def test_frozen_app_never_builds_venvs_on_its_own_interpreter(monkeypatch):
+    """The py2app interpreter is a stub that cannot run standalone. When frozen,
+    envinstall must resolve a uv-managed 3.12 and the engine shim must hand
+    that to the install worker (an empty slot makes the worker use the stub)."""
+    import sys
+
+    from fused_render_lite import engine, envinstall
+
+    monkeypatch.setattr(sys, "frozen", "macosx_app", raising=False)
+    envinstall.reset_script_python_cache()
+    monkeypatch.setattr(envinstall, "_running_version", lambda: (3, 12))
+    monkeypatch.setattr(envinstall, "uv_bin", lambda: "/fake/uv")
+    calls = []
+
+    class Proc:
+        returncode = 0
+        stdout = "/managed/python3.12\n"
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return Proc()
+
+    monkeypatch.setattr(envinstall.subprocess, "run", fake_run)
+    monkeypatch.setattr(envinstall, "_probe_python", lambda path: True)
+    assert envinstall.script_python() == "/managed/python3.12"
+    assert any("--managed-python" in c for c in calls)
+    assert engine.get_backend()._python_executable == "/managed/python3.12"
+    envinstall.reset_script_python_cache()
