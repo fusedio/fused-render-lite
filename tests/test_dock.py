@@ -7,7 +7,7 @@ import urllib.parse
 
 import pytest
 
-from fused_render_lite import appfile, container, dock_store, env, server
+from fused_render_app import appfile, container, dock_store, env, server
 from tests.conftest import ENTRY_HTML, ICON_SVG
 
 
@@ -45,7 +45,7 @@ def test_record_open_upserts_and_orders_recent_first(tmp_path):
     assert files_of(apps) == [a, b]
     assert apps[0]["name"] == "A2"
     # canonical key on disk
-    stored = json.load(open(os.path.join(os.environ["FUSED_RENDER_LITE_HOME"], "dock.json")))
+    stored = json.load(open(os.path.join(os.environ["FUSED_RENDER_APP_HOME"], "dock.json")))
     assert [e["file"] for e in stored["apps"]] == [a, b]
 
 
@@ -102,9 +102,9 @@ def test_remove_and_reorder(tmp_path):
     assert files_of(dock_store.list_apps()) == [c, a]
 
 
-def test_corrupt_or_missing_json_is_empty(lite_home):
+def test_corrupt_or_missing_json_is_empty(app_home):
     assert dock_store.list_apps() == []
-    path = lite_home / "dock.json"
+    path = app_home / "dock.json"
     path.write_text("{not json")
     assert dock_store.list_apps() == []
     dock_store.record_open("/x/a.fused", "A")  # recovers by overwriting
@@ -113,7 +113,7 @@ def test_corrupt_or_missing_json_is_empty(lite_home):
     assert dock_store.list_apps() == []
 
 
-def test_tilesize_default_clamp_and_survives_app_writes(lite_home):
+def test_tilesize_default_clamp_and_survives_app_writes(app_home):
     assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
     assert dock_store.set_tilesize(64) == 64
     assert dock_store.get_tilesize() == 64
@@ -125,7 +125,7 @@ def test_tilesize_default_clamp_and_survives_app_writes(lite_home):
     assert dock_store.set_tilesize("big") == dock_store.DEFAULT_TILESIZE
     assert dock_store.set_tilesize(True) == dock_store.DEFAULT_TILESIZE
     assert len(dock_store.list_apps()) == 1  # the apps list is intact
-    path = lite_home / "dock.json"
+    path = app_home / "dock.json"
     path.write_text(json.dumps({"apps": [], "tilesize": "nope"}))
     assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
     path.write_text("{not json")

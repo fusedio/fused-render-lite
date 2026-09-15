@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Dev loop for fused-render-lite (Render Lite): venv bootstrap + server with
-# Python auto-reload, one command. The lite counterpart of fused-render's
-# scripts/dev.sh minus everything lite has no need for (there is no frontend
+# Dev loop for fused-render-app (Render App): venv bootstrap + server with
+# Python auto-reload, one command. The Render App counterpart of fused-render's
+# scripts/dev.sh minus everything Render App has no need for (there is no frontend
 # build: the placeholder page and runtime.js are static files read per request).
 #
-#   scripts/dev.sh [fused-render-lite args…]     e.g. scripts/dev.sh --port 9000
+#   scripts/dev.sh [fused-render-app args…]     e.g. scripts/dev.sh --port 9000
 #                                                     scripts/dev.sh ~/x.fused
 #
 # What it does:
@@ -14,40 +14,40 @@
 #      bundled 3.12 (env.base_python() == sys.executable), so a dev server on
 #      another version would resolve different wheels than the shipped app.
 #   2. Isolates this checkout/worktree: port and state dir derive from the git
-#      branch, so a dev server never fights the installed Render Lite.app on
-#      2777 / ~/.fused-render-lite, and two worktrees never share venvs.
-#   3. Runs `python -m fused_render_lite.cli` under watchfiles: an edit to any
-#      fused_render_lite/**/*.py restarts the server (SIGINT, wait, relaunch).
+#      branch, so a dev server never fights the installed Render App.app on
+#      2777 / ~/.fused-render-app, and two worktrees never share venvs.
+#   3. Runs `python -m fused_render_app.cli` under watchfiles: an edit to any
+#      fused_render_app/**/*.py restarts the server (SIGINT, wait, relaunch).
 #      Static files need no restart — refresh the browser.
 #   4. Opens the browser once, when the port answers (unless --no-browser).
 #
 # Knobs (respected when already set):
-#   FUSED_RENDER_LITE_PORT   port (default: 2778 on main, 2779 + hash(branch) elsewhere)
-#   FUSED_RENDER_LITE_HOME   state dir (default: ~/.fused-render-lite-dev/<branch>)
+#   FUSED_RENDER_APP_PORT   port (default: 2778 on main, 2779 + hash(branch) elsewhere)
+#   FUSED_RENDER_APP_HOME   state dir (default: ~/.fused-render-app-dev/<branch>)
 #   FUSED_RENDER_NO_RELOAD=1 single launch, no watchfiles
 set -euo pipefail
 
 REPO_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && cd -P .. && pwd -P)"
-PKG="fused_render_lite"
+PKG="fused_render_app"
 DEV_PYTHON_VERSION="3.12"
 
 # ---------------------------------------------------------------- isolation
 BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 SAFE_BRANCH="$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9._-' '_')"
-if [[ -z "${FUSED_RENDER_LITE_PORT:-}" ]]; then
-  if [[ "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "HEAD" || "$BRANCH" == "lite-main" ]]; then
-    FUSED_RENDER_LITE_PORT=2778
+if [[ -z "${FUSED_RENDER_APP_PORT:-}" ]]; then
+  if [[ "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "HEAD" ]]; then
+    FUSED_RENDER_APP_PORT=2778
   else
     # deterministic per branch, 2779..3778; python is on every dev box already
-    FUSED_RENDER_LITE_PORT="$(python3 -c 'import sys,zlib; print(2779 + zlib.crc32(sys.argv[1].encode()) % 1000)' "$BRANCH")"
+    FUSED_RENDER_APP_PORT="$(python3 -c 'import sys,zlib; print(2779 + zlib.crc32(sys.argv[1].encode()) % 1000)' "$BRANCH")"
   fi
 fi
-export FUSED_RENDER_LITE_PORT
-export FUSED_RENDER_LITE_HOME="${FUSED_RENDER_LITE_HOME:-$HOME/.fused-render-lite-dev/$SAFE_BRANCH}"
-mkdir -p "$FUSED_RENDER_LITE_HOME"
+export FUSED_RENDER_APP_PORT
+export FUSED_RENDER_APP_HOME="${FUSED_RENDER_APP_HOME:-$HOME/.fused-render-app-dev/$SAFE_BRANCH}"
+mkdir -p "$FUSED_RENDER_APP_HOME"
 
 # --port on the command line wins over the derived port (cli.py parses it).
-PORT="$FUSED_RENDER_LITE_PORT"
+PORT="$FUSED_RENDER_APP_PORT"
 NO_BROWSER=0
 prev=""
 for a in "$@"; do
@@ -103,11 +103,11 @@ else
   fi
   VENV_DIR="$REPO_ROOT/.venv"
   install_python_deps "$VENV_DIR"
-  touch "$VENV_DIR/.fused-render-lite-deps"
+  touch "$VENV_DIR/.fused-render-app-deps"
 fi
 PY="$VENV_DIR/bin/python"
 
-DEPS_STAMP="$VENV_DIR/.fused-render-lite-deps"
+DEPS_STAMP="$VENV_DIR/.fused-render-app-deps"
 if [[ ! -e "$DEPS_STAMP" ]]; then
   echo "==> syncing python deps into $VENV_DIR (no install stamp yet)"
   install_python_deps "$VENV_DIR"; touch "$DEPS_STAMP"
@@ -147,7 +147,7 @@ trap 'dev_shutdown' EXIT
 trap 'dev_shutdown; exit 130' INT
 trap 'dev_shutdown; exit 143' TERM
 
-echo "==> $PKG dev server: branch=$BRANCH port=$PORT home=$FUSED_RENDER_LITE_HOME python=$PY"
+echo "==> $PKG dev server: branch=$BRANCH port=$PORT home=$FUSED_RENDER_APP_HOME python=$PY"
 if [[ "$RELOAD" -eq 1 ]]; then
   if [[ "$NO_BROWSER" -eq 0 ]]; then
     (

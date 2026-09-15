@@ -2,16 +2,16 @@ import os
 
 import pytest
 
-from fused_render_lite import appfile, container
+from fused_render_app import appfile, container
 
 
-def test_open_v2_extracts_and_reuses(v2_fused, lite_home):
+def test_open_v2_extracts_and_reuses(v2_fused, app_home):
     first = appfile.open_app_file(v2_fused)
     assert first["name"] == "demo"
     assert first["reused"] is False
     assert os.path.isfile(first["entry"])
     assert open(os.path.join(first["dir"], "data", "note.txt")).read() == "hello"
-    assert first["dir"].startswith(str(lite_home / "apps"))
+    assert first["dir"].startswith(str(app_home / "apps"))
     # writable extract: writeFile is a supported API
     assert os.access(first["entry"], os.W_OK)
     second = appfile.open_app_file(v2_fused)

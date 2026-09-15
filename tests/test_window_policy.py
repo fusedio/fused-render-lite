@@ -1,11 +1,11 @@
-"""The native windows' navigation/download policy (fused_render_lite/window_policy.py).
+"""The native windows' navigation/download policy (fused_render_app/window_policy.py).
 
 `mainwindow.py` is AppKit and never imports in CI; every decision it acts on
 lives in `window_policy.py` so it can be pinned here on any platform.
 """
 import pytest
 
-from fused_render_lite import window_policy as wp
+from fused_render_app import window_policy as wp
 
 PORT = 2777
 APP = f"http://127.0.0.1:{PORT}"

@@ -6,7 +6,7 @@ import urllib.parse
 
 import pytest
 
-from fused_render_lite import env
+from fused_render_app import env
 
 _REAL = {name: getattr(env, name) for name in ("base_python", "is_ready", "interpreter_for")}
 
@@ -95,17 +95,17 @@ def test_mutations_require_header(client, v2_fused):
     assert status == 403
 
 
-def test_drop_saves_and_validates(client, v2_fused, lite_home):
+def test_drop_saves_and_validates(client, v2_fused, app_home):
     raw = open(v2_fused, "rb").read()
     status, _, body = client.post("/api/drop", raw, raw=True,
                                   headers={"X-Filename": "my%20app.fused",
                                            "Content-Type": "application/octet-stream"})
     assert status == 200, body
     saved = json.loads(body)["file"]
-    assert saved.startswith(str(lite_home / "dropped")) and os.path.isfile(saved)
+    assert saved.startswith(str(app_home / "dropped")) and os.path.isfile(saved)
     status, _, body = client.post("/api/drop", b"garbage", raw=True,
                                   headers={"X-Filename": "bad.fused"})
-    assert status == 400 and not os.path.exists(str(lite_home / "dropped" / "bad.fused"))
+    assert status == 400 and not os.path.exists(str(app_home / "dropped" / "bad.fused"))
 
 
 def test_unsupported_apis_throw():
@@ -113,13 +113,13 @@ def test_unsupported_apis_throw():
     for name in ("ai", "capture", "fileIndex", "daemon", "trackJob", "watchJob",
                  "autoReload", "uploadFile", "mkdir", "snapshot"):
         assert name in js
-    assert "is not supported on Render Lite" in js
+    assert "is not supported on Render App" in js
     assert "stub" not in js.lower()
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv (integration)")
-def test_pyproject_builds_a_venv(client, tmp_path, lite_home, monkeypatch):
-    from fused_render_lite import container
+def test_pyproject_builds_a_venv(client, tmp_path, app_home, monkeypatch):
+    from fused_render_app import container
 
     _real_env(monkeypatch)  # uv finds/downloads 3.12 and builds the venv
     entry = b'<html><head><meta name="fused-app"></head><body></body></html>'
@@ -192,8 +192,8 @@ def test_runtime_no_longer_throws_for_030_members():
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv (integration)")
-def test_no_pyproject_app_gets_the_legacy_env(client, tmp_path, lite_home, monkeypatch):
-    from fused_render_lite import container
+def test_no_pyproject_app_gets_the_legacy_env(client, tmp_path, app_home, monkeypatch):
+    from fused_render_app import container
 
     _real_env(monkeypatch)
     monkeypatch.setenv(env.LEGACY_DEPS_ENV, "six")  # stand-in for the real ~150 MB set
@@ -225,7 +225,7 @@ def test_old_uv_on_path_is_skipped(tmp_path, monkeypatch):
     new.parent.mkdir()
     new.write_text("#!/bin/sh\necho 'uv 0.12.13 (abc 2026-01-01)'\n")
     new.chmod(0o755)
-    monkeypatch.delenv("FUSED_RENDER_LITE_UV", raising=False)
+    monkeypatch.delenv("FUSED_RENDER_APP_UV", raising=False)
     monkeypatch.setattr(env.shutil, "which", lambda name: str(old))
     monkeypatch.setattr(env, "_download_uv", lambda log: "downloaded")
     assert env.uv_bin(download=True) == "downloaded"

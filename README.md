@@ -1,9 +1,9 @@
-# fused-render-lite
+# fused-render-app
 
-Ships as **Render Lite** (`RenderLite.app`, `RenderLite-<version>.dmg`). Opens a `.fused` single-file app. Nothing else.
+Ships as **Render App** (`RenderApp.app`, `RenderApp-<version>.dmg`). Opens a `.fused` single-file app. Nothing else.
 
 Double-click a `.fused` in Finder (or drop one onto the placeholder page) and
-the app's entry page opens in a window of Render Lite — a native macOS window
+the app's entry page opens in a window of Render App — a native macOS window
 hosting a WKWebView, not a browser tab. Open as many as you like: every window
 is on the one local server. The URL behind a window carries the file:
 
@@ -32,8 +32,8 @@ Closing the last window does not quit. The menu-bar item has four entries:
 "Open in app" (focus the front window or open the placeholder), "Open in
 browser", "Open app logs", "Quit". The Dock icon does the same as "Open in
 app"; ⌘Q and the Dock also quit. View → Open in Browser hands the current page
-to the default browser. `FUSED_RENDER_LITE_NO_BROWSER=1` suppresses the
-startup window. The CLI (`fused-render-lite`, `scripts/dev.sh`) is unchanged
+to the default browser. `FUSED_RENDER_APP_NO_BROWSER=1` suppresses the
+startup window. The CLI (`fused-render-app`, `scripts/dev.sh`) is unchanged
 and still opens a browser tab.
 
 ## What it supports
@@ -58,7 +58,7 @@ Every other member the full fused-render runtime has (`capture`,
 `fileIndex`, `snapshot`)
 is **not supported**. There are no stubs: calling one, or reading any
 property of `fused.capture` / `fused.fileIndex`,
-throws `<name> is not supported on Render Lite` and logs it to the
+throws `<name> is not supported on Render App` and logs it to the
 console. An app that needs those belongs in full fused-render.
 
 ## Background daemons (`fused.daemon`)
@@ -76,12 +76,12 @@ daemon = "daemon.py"     # your own HTTP server; fused.daemon.call(path, body)
 ```
 
 The daemon runs on the app's own venv (the one `/api/open` builds), one
-instance per app, killed when Render Lite quits. Optional keys:
+instance per app, killed when Render App quits. Optional keys:
 `idle_timeout_s` (0 = resident), `retry_post = true` (POSTs are idempotent,
 may be retried after a heal-restart). `setAutostart(true)` brings it back at
 every launch; `start()` alone never does. State lives under
-`~/.fused-render-lite/engines/<engine_id>/` (`daemon.log`) and
-`~/.fused-render-lite/background_apps.json` (autostart list).
+`~/.fused-render-app/engines/<engine_id>/` (`daemon.log`) and
+`~/.fused-render-app/background_apps.json` (autostart list).
 
 ## AI
 
@@ -92,19 +92,19 @@ every launch; `start()` alone never does. State lives under
   in. One warm process, reset between calls.
 - **Local** (a Hugging Face repo id or `.gguf`, or `provider: "local"`): text,
   image, video, transcribe, embed. Each backend is a runner folder under
-  `fused_render_lite/ai/runners/` with its own `pyproject.toml`; the first call
+  `fused_render_app/ai/runners/` with its own `pyproject.toml`; the first call
   builds its venv with `uv sync`, downloads the model into the Hugging Face
   cache and spawns a worker process the server talks HTTP to. Nothing ML ships
   in the DMG. Pages get `model_loading` + a `jobId` to `watchJob` while that
   happens, then retry — fused-render's contract, unchanged.
 
-The Apple-Intelligence tier needs a Swift helper the lite build does not
+The Apple-Intelligence tier needs a Swift helper the Render App build does not
 compile; it answers `unavailable`. Streaming is NDJSON over chunked HTTP.
 
 ## Showcase apps
 
 The placeholder page (`/`) lists the showcase apps shipped inside the package,
-`fused_render_lite/showcase/*.fused`, as cards; clicking one opens it through
+`fused_render_app/showcase/*.fused`, as cards; clicking one opens it through
 the ordinary `/open?_file=` path. They ride along in the wheel and the DMG with
 no build step. Two ship today: **Note taker** (HTML only, `readFile` /
 `writeFile`) and **Pipeline Intelligence** (`runPython` + its own
@@ -113,7 +113,7 @@ no build step. Two ship today: **Note taker** (HTML only, `readFile` /
 To add one: drop the `.fused` into that folder, give it a `title` and
 `description` in `showcase/showcase.json`, and make sure it carries a
 `pyproject.toml` (even with `dependencies = []`) and a `preview.png` —
-`tests/test_showcase.py` checks both, and that it calls nothing lite rejects.
+`tests/test_showcase.py` checks both, and that it calls nothing Render App rejects.
 
 ## Python environments
 
@@ -122,14 +122,14 @@ interpreter at `Contents/MacOS/python`, whole stdlib, self-locating through a
 `Contents/lib` symlink — packaged exactly as fused-render's FusedRender.app).
 Every environment is built on it. Each `.fused` app carries its own
 `pyproject.toml`; on open, `uv sync --python <that interpreter>` builds a venv
-for it under `~/.fused-render-lite/venvs/` and `runPython` runs inside it. An app without a `pyproject.toml` runs in one
+for it under `~/.fused-render-app/venvs/` and `runPython` runs inside it. An app without a `pyproject.toml` runs in one
 shared "legacy" venv holding fused-render's old bundled set (numpy, pandas,
 requests, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3), also built
 on first use, so older `.fused` exports keep working.
 
 `uv` ships inside the app (`Contents/Resources/bin/uv`, copied from the build
 host exactly as fused-render does). Running from source, it is looked for at
-`FUSED_RENDER_LITE_UV`, beside the interpreter, in `~/.fused-render-lite/bin/`
+`FUSED_RENDER_APP_UV`, beside the interpreter, in `~/.fused-render-app/bin/`
 and on `PATH` (a uv older than 0.8 is skipped), and failing those is downloaded
 once (pinned version, sha256-verified). The Apple-Intelligence helper
 (`fused-apple-ai`) is compiled and bundled when the build host has the macOS 26
@@ -142,7 +142,7 @@ Version, DMG/app size and the full supported/unsupported API table live in
 
 ```
 pip install -e ".[dev]"
-fused-render-lite ~/Downloads/app.fused
+fused-render-app ~/Downloads/app.fused
 pytest
 ```
 
@@ -153,17 +153,17 @@ never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
 ## Install (Homebrew)
 
 ```
-brew install --cask fusedio/tap/fused-render-lite
+brew install --cask fusedio/tap/fused-render-app
 ```
 
-Installs `RenderLite.app` (macOS 12+), signed + notarized. `brew update &&
-brew upgrade --cask fused-render-lite` upgrades.
+Installs `RenderApp.app` (macOS 12+), signed + notarized. `brew update &&
+brew upgrade --cask fused-render-app` upgrades.
 
 ## Build the macOS app
 
 ```
 pip install ".[app]"            # rumps + pyobjc, for the menu-bar shell
-bash scripts/build_dmg.sh       # dist/RenderLite-<version>.dmg
+bash scripts/build_dmg.sh       # dist/RenderApp-<version>.dmg
 ```
 
 The DMG is ad-hoc signed by default (runs on the building machine; other
@@ -180,9 +180,9 @@ Windows/Linux builds): `prepare-release` creates the GitHub Release, then on
 `macos-26` an ephemeral keychain gets the Developer ID cert and an App Store
 Connect API key, `build_dmg.sh` builds + signs + notarizes + staples, the
 ticket is verified, and the DMG lands on the Release. `bump-homebrew` then
-rewrites `version`/`sha256` in `Casks/fused-render-lite.rb` of
+rewrites `version`/`sha256` in `Casks/fused-render-app.rb` of
 [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap) and pushes,
-so `brew upgrade --cask fused-render-lite` picks the release up. To rebuild an existing tag:
+so `brew upgrade --cask fused-render-app` picks the release up. To rebuild an existing tag:
 `gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
 tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
 packaging files change. Signing needs these repository secrets (values are
@@ -198,17 +198,17 @@ write-only on GitHub; re-enter them from the originals):
 | `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID` | its key id and issuer id |
 | `TAP_PUSH_TOKEN` | PAT with push to fusedio/homebrew-tap (same one fused-render uses); only the `bump-homebrew` job fails without it |
 
-Without them the workflow still runs and publishes an ad-hoc-signed DMG (lite-only fallback).
+Without them the workflow still runs and publishes an ad-hoc-signed DMG (Render App-only fallback).
 
 ## Layout
 
 ```
-fused_render_lite/
-  appfile.py      open a .fused (v2 container or legacy v1 zip) into ~/.fused-render-lite/apps
+fused_render_app/
+  appfile.py      open a .fused (v2 container or legacy v1 zip) into ~/.fused-render-app/apps
   container.py    the FUSEDAPP v2 format (stdlib)
   env.py          uv lookup/download, per-app `uv sync`, running a .py in its venv
   server.py       the HTTP surface (http.server; binds 127.0.0.1)
-  cli.py          `fused-render-lite [file] [--port] [--no-browser]`
+  cli.py          `fused-render-app [file] [--port] [--no-browser]`
   macapp.py       macOS shell: server thread, menu-bar item, Finder open events -> windows
   mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
   window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts (tested)
@@ -218,4 +218,4 @@ fused_render_lite/
   showcase/       showcase .fused apps + showcase.json (title, description)
 ```
 
-State lives in `~/.fused-render-lite/` (override with `FUSED_RENDER_LITE_HOME`).
+State lives in `~/.fused-render-app/` (override with `FUSED_RENDER_APP_HOME`).
