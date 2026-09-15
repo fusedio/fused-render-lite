@@ -348,24 +348,32 @@ def test_list_apps_opens_the_fused_once_per_mtime(v2_fused_icon, monkeypatch):
 
 # ---- icon_color (theme recolouring of a picked glyph) ----------------------
 
-# What fused-render's IconPicker writes (IconPicker.glyphIconSvg): the colour's
-# NAME on the root, a prefers-color-scheme fallback, currentColor strokes.
+# What fused-render's IconPicker writes (IconPicker.glyphIconSvg, #1159): the
+# colour's NAME on the root, a prefers-color-scheme fallback, a rounded plate
+# on var(--fused-bg), currentColor strokes.
 GLYPH_SVG = (
     b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" data-fused-color="red">'
-    b"<style>svg{color:#d44c47}@media(prefers-color-scheme:dark){svg{color:#df5452}}</style>"
-    b'<g fill="none" stroke="currentColor" stroke-width="2.5">'
+    b"<style>svg{color:#d44c47;--fused-bg:#ffffff}"
+    b"@media(prefers-color-scheme:dark){svg{color:#df5452;--fused-bg:#000000}}</style>"
+    b'<rect width="24" height="24" rx="5.28" style="fill:var(--fused-bg)"/>'
+    b'<g transform="translate(3 3) scale(0.75)" fill="none" stroke="currentColor" stroke-width="3">'
     b'<path d="M4 4h16"/><circle cx="12" cy="12" r="3" fill="currentColor"/></g></svg>'
 )
 
 
-def test_theme_icon_svg_swaps_every_current_color_for_the_theme_hex():
+def test_theme_icon_svg_swaps_current_color_and_plate_for_the_theme_hex():
     dark = icon_color.theme_icon_svg(GLYPH_SVG, "dark")
     light = icon_color.theme_icon_svg(GLYPH_SVG, "light")
     assert b"currentColor" not in dark and b"currentColor" not in light
+    assert b"var(--fused-bg)" not in dark and b"var(--fused-bg)" not in light
     assert dark.count(b'stroke="#df5452"') == 1 and dark.count(b'fill="#df5452"') == 1
     assert light.count(b'stroke="#d44c47"') == 1 and light.count(b'fill="#d44c47"') == 1
+    assert b'style="fill:#000000"' in dark and b'style="fill:#ffffff"' in light
     # everything else — the marker, the fallback <style> — is left as it was
     assert b'data-fused-color="red"' in dark and b"<style>" in dark
+    # a pre-plate file (no var) still gets its strokes swapped
+    old = GLYPH_SVG.replace(b'<rect width="24" height="24" rx="5.28" style="fill:var(--fused-bg)"/>', b"")
+    assert b'stroke="#df5452"' in icon_color.theme_icon_svg(old, "dark")
 
 
 def test_theme_icon_svg_passes_through_when_it_should_not_touch_the_file():

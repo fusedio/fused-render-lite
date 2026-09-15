@@ -37,6 +37,11 @@ ICON_COLOR_HEX: dict[str, tuple[str, str]] = {
     "red": ("#d44c47", "#df5452"),
 }
 
+# The rounded plate behind a picker-written glyph (fused-render #1159):
+# written into the file as ``var(--fused-bg)`` and swapped for the literal hex
+# alongside currentColor. White on light, black on dark.
+ICON_BG_HEX: tuple[str, str] = ("#ffffff", "#000000")
+
 _ROOT = re.compile(r"<svg\b[^>]*>")
 _MARKER = re.compile(r'\sdata-fused-color="([a-z]+)"')
 
@@ -56,8 +61,9 @@ def read_icon_color(svg: str) -> str | None:
 
 def theme_icon_svg(data: bytes, theme: str) -> bytes:
     """``data`` with every ``currentColor`` resolved to the marked colour's hex
-    for ``theme``. Unchanged when there is no marker, the theme is not
-    ``light``/``dark``, or the bytes are not UTF-8."""
+    and every ``var(--fused-bg)`` plate to the theme's plate hex. Unchanged
+    when there is no marker, the theme is not ``light``/``dark``, or the bytes
+    are not UTF-8."""
     if theme not in THEMES:
         return data
     try:
@@ -67,5 +73,7 @@ def theme_icon_svg(data: bytes, theme: str) -> bytes:
     color = read_icon_color(svg)
     if color is None:
         return data
-    hexes = ICON_COLOR_HEX[color]
-    return svg.replace("currentColor", hexes[THEMES.index(theme)]).encode("utf-8")
+    i = THEMES.index(theme)
+    svg = svg.replace("currentColor", ICON_COLOR_HEX[color][i])
+    svg = svg.replace("var(--fused-bg)", ICON_BG_HEX[i])
+    return svg.encode("utf-8")
