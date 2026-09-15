@@ -113,6 +113,37 @@ def test_corrupt_or_missing_json_is_empty(lite_home):
     assert dock_store.list_apps() == []
 
 
+def test_tilesize_default_clamp_and_survives_app_writes(lite_home):
+    assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
+    assert dock_store.set_tilesize(64) == 64
+    assert dock_store.get_tilesize() == 64
+    dock_store.record_open("/x/a.fused", "A")  # app writes keep the size
+    assert dock_store.get_tilesize() == 64
+    assert dock_store.set_tilesize(3) == dock_store.MIN_TILESIZE
+    assert dock_store.set_tilesize(9999) == dock_store.MAX_TILESIZE
+    assert dock_store.set_tilesize(71.6) == 72
+    assert dock_store.set_tilesize("big") == dock_store.DEFAULT_TILESIZE
+    assert dock_store.set_tilesize(True) == dock_store.DEFAULT_TILESIZE
+    assert len(dock_store.list_apps()) == 1  # the apps list is intact
+    path = lite_home / "dock.json"
+    path.write_text(json.dumps({"apps": [], "tilesize": "nope"}))
+    assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
+    path.write_text("{not json")
+    assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
+
+
+def test_dock_size_route(client):
+    body = json.loads(client.get("/api/dock")[2])
+    assert body["tilesize"] == dock_store.DEFAULT_TILESIZE
+    status, _, body = client.post("/api/dock/size", {"tilesize": 96})
+    assert status == 200 and json.loads(body) == {"tilesize": 96}
+    assert json.loads(client.get("/api/dock")[2])["tilesize"] == 96
+    status, _, body = client.post("/api/dock/size", {"tilesize": 1})
+    assert json.loads(body) == {"tilesize": dock_store.MIN_TILESIZE}
+    status, _, body = client.post("/api/dock/size", {})
+    assert json.loads(body) == {"tilesize": dock_store.DEFAULT_TILESIZE}
+
+
 def test_list_apps_shape(v2_fused_icon, v2_fused, tmp_path):
     ghost = str(tmp_path / "ghost.fused")
     dock_store.record_open(v2_fused, "demo")
@@ -196,7 +227,7 @@ def test_icon_bytes_oversized_is_none(tmp_path):
 
 def test_dock_api_flow(client, v2_fused_icon, v2_fused):
     status, _, body = client.get("/api/dock")
-    assert status == 200 and json.loads(body) == {"apps": []}
+    assert status == 200 and json.loads(body) == {"apps": [], "tilesize": dock_store.DEFAULT_TILESIZE}
 
     status, _, body = client.post("/api/open", {"file": v2_fused_icon})
     assert status == 200, body
@@ -233,7 +264,8 @@ def test_dock_api_flow(client, v2_fused_icon, v2_fused):
 def test_dock_post_requires_guard(client, v2_fused):
     for action, body in (("open", {"file": v2_fused}), ("pin", {"file": v2_fused, "pinned": True}),
                          ("remove", {"file": v2_fused}), ("order", {"files": []}),
-                         ("reveal", {"file": v2_fused}), ("choose", {}), ("home", {})):
+                         ("reveal", {"file": v2_fused}), ("choose", {}), ("home", {}),
+                         ("size", {"tilesize": 64})):
         status, _, _ = client.post(f"/api/dock/{action}", body, headers={"X-Fused": ""})
         assert status == 403, action
     status, _, _ = client.post("/api/dock/bogus", {})
