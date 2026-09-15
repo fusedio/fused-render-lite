@@ -181,6 +181,8 @@ class _ScriptHandler(NSObject):
             self._c.resize_to(data.get("width"), data.get("height"), tray)
         elif kind == "tray":  # per-frame while the fisheye is live: glass only
             self._c.set_tray(tray)
+        elif kind == "resize":  # separator drag started / ended
+            self._c.set_resizing(bool(data.get("active")))
         elif kind == "menu":
             self._c.show_item_menu(data)
 
@@ -279,6 +281,7 @@ class DockController:
         self._monitor = None
         self._size = INITIAL_SIZE
         self._tray = None  # (x, y, w, h) in page coordinates, top-left origin
+        self._resizing = False  # separator drag in progress (resize cursor held)
         self._build_panel()
         self._take_over_status_item()
 
@@ -337,6 +340,22 @@ class DockController:
         except (KeyError, TypeError, ValueError):
             return
         self._layout_glass()
+        if self._resizing:
+            # A view frame change makes AppKit re-resolve the cursor (to the
+            # arrow): keep the resize cursor up for the whole drag.
+            AppKit.NSCursor.resizeUpDownCursor().set()
+
+    def set_resizing(self, active: bool) -> None:
+        """The page is dragging the separator (Dock-style resize): hold the
+        up/down resize cursor natively, since the web view's CSS cursor does
+        not survive the panel and glass frame changes made during the drag."""
+        if active == self._resizing:
+            return
+        self._resizing = active
+        if active:
+            AppKit.NSCursor.resizeUpDownCursor().push()
+        else:
+            AppKit.NSCursor.pop()
 
     def _layout_glass(self) -> None:
         if self._tray is None:
@@ -366,6 +385,8 @@ class DockController:
         self._layout()
         if self.is_shown():
             self._place()
+        if self._resizing:  # frame changes reset the cursor: see set_resizing
+            AppKit.NSCursor.resizeUpDownCursor().set()
 
     # ---- status item -------------------------------------------------------------
 

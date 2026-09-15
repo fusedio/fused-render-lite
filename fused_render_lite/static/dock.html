@@ -22,9 +22,13 @@
     --focus: rgba(47,111,237,.85);
     --tile-shadow: 0 1px 2px rgba(0,0,0,.18), 0 3px 8px rgba(0,0,0,.14);
     --headroom: 6px;
-    --footroom: 66px; /* hangs from the menu bar: magnified tile (+26px) + name bubble grow DOWN */
+    /* --tile is the Dock's "tilesize": set by the script from the stored
+       value (drag the separator to change it); every other metric derives
+       from it so the tray scales as one piece, like the Dock. */
     --tile: 52px;
-    --item-w: 52px;
+    --item-w: var(--tile);
+    /* hangs from the menu bar: magnified tile (+tile/2) + name bubble grow DOWN */
+    --footroom: calc(var(--tile) * 0.5 + 40px);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -71,7 +75,7 @@
   #wrap {
     display: inline-block;
     /* --slack: room for the widest wave, so the native panel never resizes mid-hover */
-    --slack: 56px;
+    --slack: calc(var(--tile) * 1.1);
     padding: var(--headroom) var(--slack) var(--footroom);
     text-align: center;
     box-sizing: border-box;
@@ -101,10 +105,17 @@
   body.inapp .tile, body.inapp .item.util .tile { box-shadow: none; }
   body.inapp .item:focus-visible .tile { box-shadow: 0 0 0 2px var(--focus); }
 
+  /* The separator is also the resize handle (drag it, like the Dock's): a
+     9px hit zone with the 1px line painted down its middle, so the rest
+     layout (SEP_W in the script) is unchanged. Dragging down (away from the
+     menu bar) grows the tiles, up shrinks them; ⌥ snaps to 16/32/64/128. */
   .sep {
-    width: 1px; height: var(--tile); margin: 0 4px;
-    background: var(--sep); align-self: flex-start; flex: none;
+    width: 9px; height: var(--tile); margin: 0;
+    background: linear-gradient(var(--sep), var(--sep)) 4px 0 / 1px 100% no-repeat;
+    align-self: flex-start; flex: none;
+    cursor: ns-resize; touch-action: none;
   }
+  body.resizing, body.resizing * { cursor: ns-resize !important; }
 
   .item {
     position: relative;
@@ -122,8 +133,8 @@
      tray widens like the real Dock; no transforms. */
   .item { --s: 1; width: calc(var(--tile) * var(--s)); }
   .item .tile { width: calc(var(--tile) * var(--s)); height: calc(var(--tile) * var(--s)); }
-  .item .tile .mono { font-size: calc(20px * var(--s)); }
-  .item.util svg { width: calc(26px * var(--s)); height: calc(26px * var(--s)); }
+  .item .tile .mono { font-size: calc(var(--tile) * 0.385 * var(--s)); }
+  .item.util svg { width: calc(var(--tile) * 0.5 * var(--s)); height: calc(var(--tile) * 0.5 * var(--s)); }
   .item:focus-visible .tile { box-shadow: var(--tile-shadow), 0 0 0 2px var(--focus); }
   .item.dragging { opacity: .6; }
   .item.missing .tile { opacity: .5; filter: saturate(.4); }
@@ -138,7 +149,7 @@
     60% { translate: -3px 0; } 80% { translate: 3px 0; }
   }
   .tile {
-    width: var(--tile); height: var(--tile); border-radius: 12px; overflow: hidden;
+    width: var(--tile); height: var(--tile); border-radius: calc(var(--tile) * 0.23); overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     box-shadow: var(--tile-shadow);
     transition: opacity 200ms ease;
@@ -146,10 +157,10 @@
     position: relative;
   }
   .tile img { width: 100%; height: 100%; display: block; object-fit: cover; }
-  .tile.fallback .mono { color: #fff; font-size: 24px; }
-  .item .tile.fallback .mono { font-size: calc(24px * var(--s)); }
+  .tile.fallback .mono { color: #fff; font-size: calc(var(--tile) * 0.46); }
+  .item .tile.fallback .mono { font-size: calc(var(--tile) * 0.46 * var(--s)); }
   .tile .mono {
-    color: var(--util-fg); font-weight: 600; font-size: 20px; letter-spacing: -.02em;
+    color: var(--util-fg); font-weight: 600; font-size: calc(var(--tile) * 0.385); letter-spacing: -.02em;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
   }
   .tile::after { /* glass edge like real Dock icons */
@@ -164,8 +175,9 @@
   .item.util.home svg { width: 100%; height: 100%; display: block; }
 
   .dot { /* running badge: green dot overlaid on the tile's upper-left corner */
-    /* inset from the corner so it sits inside the 12px radius, like a status badge */
-    position: absolute; left: 6px; top: 6px; width: 9px; height: 9px; z-index: 2;
+    /* inset from the corner so it sits inside the tile radius, like a status badge */
+    position: absolute; left: calc(var(--tile) * 0.115); top: calc(var(--tile) * 0.115);
+    width: clamp(6px, calc(var(--tile) * 0.17), 14px); height: clamp(6px, calc(var(--tile) * 0.17), 14px); z-index: 2;
     border-radius: 50%;
     background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55) 0, rgba(255,255,255,0) 45%), var(--dot);
     box-shadow: 0 0 0 2px rgba(255,255,255,.95), 0 1px 3px rgba(0,0,0,.4);
@@ -233,7 +245,7 @@
   const menu = document.getElementById("menu");
   const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
 
-  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false, saving: 0, gen: 0, pollSeq: 0 };
+  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false, saving: 0, gen: 0, pollSeq: 0, resizing: false };
 
   // ---------- net ----------
   async function post(path, body) {
@@ -254,18 +266,22 @@
   // dockShown() refresh (after the native menu's Keep in Dock / Forget)
   // fires mid-interval; the earlier one may still carry the pre-change list.
   async function refresh() {
-    if (state.dragging || state.menuFor || state.saving) return;
+    if (state.dragging || state.menuFor || state.saving || state.resizing) return;
     const gen = state.gen, seq = ++state.pollSeq;
     try {
       const r = await fetch("/api/dock", { cache: "no-store" });
       if (!r.ok) return;
       const d = await r.json();
       if (gen !== state.gen || seq !== state.pollSeq) return; // superseded while in flight
-      apply(d.apps || []);
+      apply(d.apps || [], d.tilesize);
     } catch (_) { if (!state.loaded) render(); /* server down: show empty tray rather than nothing */ }
   }
-  function apply(apps) {
-    if (state.dragging || state.menuFor) return;
+  // ``tilesize`` rides along on GET /api/dock only (mutation replies carry
+  // just the list): it is applied before the render so the tray never paints
+  // at the default size first and then jumps.
+  function apply(apps, tilesize) {
+    if (state.dragging || state.menuFor || state.resizing) return;
+    if (typeof tilesize === "number" && tilesize !== TILE) setTile(tilesize);
     state.apps = apps; state.loaded = true;
     render();
   }
@@ -352,7 +368,9 @@
   const hint = document.createElement("span"); hint.className = "hint"; hint.textContent = "Apps you open appear here";
   homeBtn.classList.add("home");
   const sepA = document.createElement("div"); sepA.className = "sep"; sepA.dataset.role = "pin-sep";
-  for (const el of [homeBtn, hint, sepA]) el.addEventListener("pointerdown", onPointerDown);
+  sepA.setAttribute("role", "separator"); sepA.setAttribute("aria-label", "Resize Dock");
+  for (const el of [homeBtn, hint]) el.addEventListener("pointerdown", onPointerDown);
+  sepA.addEventListener("pointerdown", onSepDown);
 
   // ---------- render (keyed, in place) ----------
   function render() {
@@ -366,9 +384,10 @@
       updateItem(n, a); seen.add(a.file); order.push(n);
     };
     // Home leads the pinned zone; the separator divides pinned from recent.
+    // It is always there (the Dock's is too): it is the resize handle.
     order.push(homeBtn);
     pinned.forEach(place);
-    if (recent.length) order.push(sepA);
+    order.push(sepA);
     recent.forEach(place);
     if (!apps.length) order.push(hint);
     for (const [file, n] of state.nodes) if (!seen.has(file)) { n.remove(); state.nodes.delete(file); }
@@ -395,8 +414,12 @@
   function report() {
     // Pin #wrap to the rest width (+ slack both sides) so a live wave widens
     // the centred tray symmetrically inside a panel that does not move.
-    wrap.style.width = "";
-    wrap.style.width = Math.ceil(wrap.getBoundingClientRect().width) + "px";
+    // (While the separator is being dragged #wrap is pinned to the LARGEST
+    // size the drag can reach, once, so the panel stays put: see onSepDown.)
+    if (!state.resizing) {
+      wrap.style.width = "";
+      wrap.style.width = Math.ceil(wrap.getBoundingClientRect().width) + "px";
+    }
     const r = wrap.getBoundingClientRect();
     let w = Math.ceil(r.width), h = Math.ceil(r.height);
     if (menu.classList.contains("on")) {
@@ -438,7 +461,16 @@
   //    transforms — a transformed, shadowed layer in a transparent web view
   //    leaves ghost slabs behind. The panel is NOT resized while the wave is
   //    live: #wrap reserves horizontal slack for the widest wave up front.
-  const MAG_MAX = 1.5, MAG_RANGE = 130, TILE = 52, EASE = 0.28;
+  const MAG_MAX = 1.5, EASE = 0.28;
+  // TILE is the Dock's tilesize (CSS --tile). The wave's reach scales with
+  // it (2.5 tiles either side: 130px at the 52px default).
+  let TILE = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tile")) || 52;
+  const magRange = () => TILE * 2.5;
+  function setTile(px) {
+    TILE = px;
+    document.documentElement.style.setProperty("--tile", px + "px");
+    mag.rest = null;  // rest geometry is a function of TILE
+  }
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const mag = { rest: null, cur: new Map(), target: new Map(), raf: 0, px: null, active: false, frozen: false };
 
@@ -479,7 +511,7 @@
     }
     return rest.right - rest.left;
   }
-  function bell(d) { return d >= MAG_RANGE ? 0 : 0.5 * (1 + Math.cos(Math.PI * d / MAG_RANGE)); }
+  function bell(d) { const R = magRange(); return d >= R ? 0 : 0.5 * (1 + Math.cos(Math.PI * d / R)); }
   function retarget() {
     const list = items();
     if (mag.px === null || REDUCED || !mag.rest) { for (const n of list) mag.target.set(n, 1); return; }
@@ -506,7 +538,10 @@
     placeBubble();
     reportTray();  // the native glass follows the widening tray every frame
     if (moving) mag.raf = requestAnimationFrame(tick);
-    else if (!mag.active) { mag.rest = null; report(); }  // back at rest: settle the panel size
+    // Back at rest: settle the panel size — unless the separator is being
+    // dragged (the panel was sized once for the whole drag; onSepDown's
+    // release settles it).
+    else if (!mag.active && !state.resizing) { mag.rest = null; report(); }
   }
   function kick() { if (!mag.raf) mag.raf = requestAnimationFrame(tick); }
   function pointerAt(px) {
@@ -538,7 +573,7 @@
     if (b) bubble.textContent = b.dataset.name + (b.classList.contains("app") && !b.dataset.exists ? " (missing)" : "");
   }
   tray.addEventListener("pointermove", (e) => {
-    if (state.dragging || state.menuFor) return;
+    if (state.dragging || state.menuFor || state.resizing) return;
     pointerAt(e.clientX);
   });
   tray.addEventListener("pointerleave", () => { if (!state.dragging) pointerGone(); });
@@ -652,14 +687,8 @@
   }
   function pinnedNodes() { return items().filter(n => n.classList.contains("app") && n.dataset.pinned && n !== state.dragging); }
   function pinBoundary() {
-    // Right edge of the pinned zone. With pins it is the separator. With
-    // none there is no zone yet: dragging a recent a full tile's width past
-    // the leftmost tile opens one (a 6 px jiggle must not pin anything).
-    if (sepA.isConnected) return sepA.getBoundingClientRect().right;
-    const apps = items().filter(n => n.classList.contains("app"));
-    if (!apps.length) return -Infinity;
-    const r = apps[0].getBoundingClientRect();
-    return r.left - r.width;
+    // Right edge of the pinned zone: the separator (always rendered).
+    return sepA.getBoundingClientRect().right;
   }
   function dragMove(x) {
     const b = state.dragging, dragIsPinned = !!b.dataset.pinned;
@@ -687,6 +716,91 @@
         });
       } catch (_) { refresh(); }
     } else render();
+  }
+
+  // ---------- drag the separator to resize (the Dock's own gesture) ----------
+  // Spec, from the Dock: hover the separator → up/down resize cursor; drag
+  // away from the screen edge to grow, toward it to shrink, the far edge
+  // tracking the pointer 1:1 (hanging from the menu bar, down = bigger);
+  // tilesize range 16–128 (the Size slider's), live while dragging, held ⌥
+  // snaps to the sizes icons are crispest at (16/32/64/128); the size
+  // persists (the Dock's `defaults write com.apple.dock tilesize`); the
+  // tray shrinks to fit the screen rather than run off it.
+  const TILE_MIN = 16, TILE_MAX = 128, TILE_SNAPS = [16, 32, 64, 128];
+  const PANEL_MAX_W = 1400;  // menubar_dock.MAX_SIZE: the native panel clips beyond it
+  function maxTileForScreen() {
+    // Rest width at tile t: 2·PAD_X + n·t + (n−1)·GAP + SEP_W + hint, plus
+    // the wave slack (1.1·t each side) and the 4px margins _place keeps.
+    const n = items().length;
+    let fixed = 2 * PAD_X + Math.max(0, n - 1) * GAP + SEP_W + 8;
+    if (hint.isConnected) fixed += hint.getBoundingClientRect().width + GAP;
+    const avail = Math.min(screen.availWidth || Infinity, PANEL_MAX_W);
+    return Math.max(TILE_MIN, Math.min(TILE_MAX, Math.floor((avail - fixed) / (n + 2.2))));
+  }
+  // Smoothness: the native panel is resized and re-centred ONCE, at drag
+  // start, to the largest size the drag can reach; after that only the tray
+  // changes (the glass follows per frame, as in the fisheye). Resizing the
+  // panel on every pointer event moved the whole page under the tiles.
+  // Pointer events are coalesced to one layout per animation frame, and the
+  // centred tray is snapped to a whole pixel (its width changes parity with
+  // every 1px step, which otherwise puts the icons on half pixels: shimmer).
+  function snapTray() {
+    const inner = wrap.clientWidth - 2 * parseFloat(getComputedStyle(wrap).paddingLeft);
+    const pos = (inner - restLayout().right) / 2;
+    tray.style.left = (Math.floor(pos) - pos) + "px";
+  }
+  function onSepDown(e) {
+    if (e.button !== 0 || state.dragging) return;
+    e.preventDefault();
+    const start = { y: e.clientY, tile: TILE, id: e.pointerId, max: maxTileForScreen(), want: TILE, raf: 0 };
+    try { sepA.setPointerCapture(e.pointerId); } catch (_) {}
+    state.resizing = true; pointerGone(); hideMenu();
+    document.body.classList.add("resizing");
+    // In the app the cursor is held natively for the drag (CSS cursors do
+    // not survive the panel/glass frame changes).
+    window.webkit?.messageHandlers?.dock?.postMessage({ type: "resize", active: true });
+    // Pin #wrap to the size of the largest reachable tray, then size the
+    // panel to it once. The tray stays centred inside as it grows.
+    setTile(start.max);
+    wrap.style.width = ""; wrap.style.height = "";
+    const big = wrap.getBoundingClientRect();
+    wrap.style.width = Math.ceil(big.width) + "px"; wrap.style.height = Math.ceil(big.height) + "px";
+    setTile(start.tile); snapTray();
+    report();
+    const frame = () => {
+      start.raf = 0;
+      if (start.want !== TILE) { setTile(start.want); snapTray(); reportTray(); }
+    };
+    const move = (ev) => {
+      if (ev.pointerId !== start.id) return;
+      // Anchored to the menu bar: the tray's bottom edge moves 1:1 with the tile.
+      let t = Math.round(start.tile + (ev.clientY - start.y));
+      if (ev.altKey) t = TILE_SNAPS.reduce((a, b) => Math.abs(b - t) < Math.abs(a - t) ? b : a);
+      // Clamp AFTER the snap: the nearest snap can sit above the screen-fit
+      // cap the panel was reserved for at drag start.
+      t = Math.min(Math.max(t, TILE_MIN), start.max);
+      start.want = t;
+      if (!start.raf) start.raf = requestAnimationFrame(frame);
+    };
+    const up = async (ev) => {
+      if (ev.pointerId !== start.id) return;
+      sepA.removeEventListener("pointermove", move); sepA.removeEventListener("pointerup", up); sepA.removeEventListener("pointercancel", up);
+      try { sepA.releasePointerCapture(start.id); } catch (_) {}
+      if (start.raf) { cancelAnimationFrame(start.raf); start.raf = 0; }
+      if (start.want !== TILE) setTile(start.want);
+      state.resizing = false; document.body.classList.remove("resizing");
+      window.webkit?.messageHandlers?.dock?.postMessage({ type: "resize", active: false });
+      wrap.style.height = ""; tray.style.left = "";
+      report();
+      if (TILE !== start.tile) {
+        try {
+          const r = await post("/api/dock/size", { tilesize: TILE });
+          if (typeof r.tilesize === "number" && r.tilesize !== TILE) { setTile(r.tilesize); report(); }
+        } catch (_) {}
+      }
+      refresh();
+    };
+    sepA.addEventListener("pointermove", move); sepA.addEventListener("pointerup", up); sepA.addEventListener("pointercancel", up);
   }
 
   // ---------- lifecycle ----------

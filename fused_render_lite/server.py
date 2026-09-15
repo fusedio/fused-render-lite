@@ -19,9 +19,9 @@ API (the six supported fused.* calls, plus what the shell needs)
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
-  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}]}
+  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}], tilesize}
   GET  /api/dock/icon?file=<abs>               the app's icon.svg, or 404
-  POST /api/dock/open|pin|remove|order|reveal|choose|home
+  POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
   fused.daemon (background_routes.py, copied from fused-render):
@@ -173,7 +173,8 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/dock":
                 return self._static("dock.html")
             if route == "/api/dock":
-                return self._json({"apps": dock_store.list_apps(self._dock_running())})
+                return self._json({"apps": dock_store.list_apps(self._dock_running()),
+                                   "tilesize": dock_store.get_tilesize()})
             if route == "/api/dock/icon":
                 return self._dock_icon(q)
             if route == "/favicon.ico":
@@ -365,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, "image/svg+xml", {"Cache-Control": "no-cache"})
 
     def _dock(self, action: str) -> None:
-        if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home"):
+        if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home", "size"):
             return self._error("not found", 404)
         if not self._guarded():
             return
@@ -376,6 +377,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error("'files' must be a list of paths")
             dock_store.reorder([f for f in files if isinstance(f, str)])
             return self._json({"apps": dock_store.list_apps(self._dock_running())})
+        if action == "size":
+            # Separator drag: the page sends the size it is showing; the reply
+            # is what was stored (clamped), so the page can settle on it.
+            return self._json({"tilesize": dock_store.set_tilesize(body.get("tilesize"))})
         if action == "choose":
             hook = native_hooks.get("choose_file")
             if hook is None:

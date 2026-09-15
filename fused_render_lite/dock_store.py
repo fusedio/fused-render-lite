@@ -3,7 +3,13 @@
 Persisted as ``<home>/dock.json``::
 
     {"apps": [{"file": "/abs/x.fused", "name": "X",
-               "openedAt": "2026-09-15T09:00:00.000000Z", "pinned": false}]}
+               "openedAt": "2026-09-15T09:00:00.000000Z", "pinned": false}],
+     "tilesize": 52}
+
+``tilesize`` is the tray's icon size in CSS px (drag the separator, like the
+Dock's; ``defaults write com.apple.dock tilesize`` is the same knob), clamped
+to the Dock's own range and defaulting to ``DEFAULT_TILESIZE`` when absent
+or unreadable.
 
 The stored order of PINNED entries is the user's order (drag to reorder);
 unpinned entries are ordered by ``openedAt`` on read, and only the most
@@ -26,6 +32,8 @@ from datetime import datetime, timezone
 from fused_render_lite import appfile, paths
 
 MAX_RECENT = 10
+DEFAULT_TILESIZE = 52
+MIN_TILESIZE, MAX_TILESIZE = 16, 128  # the Dock's Size slider range
 
 _lock = threading.Lock()
 
@@ -40,24 +48,43 @@ def _path() -> str:
     return os.path.join(paths.home(), "dock.json")
 
 
-def _load() -> list[dict]:
+def _load_doc() -> dict:
     try:
         with open(_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return []
-    apps = data.get("apps") if isinstance(data, dict) else None
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load() -> list[dict]:
+    apps = _load_doc().get("apps")
     if not isinstance(apps, list):
         return []
     return [a for a in apps if isinstance(a, dict) and isinstance(a.get("file"), str)]
 
 
-def _save(apps: list[dict]) -> None:
+def _clamp_tilesize(value) -> int | None:
+    """``value`` as a tile size inside the Dock's range, or None if it is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return int(min(max(round(value), MIN_TILESIZE), MAX_TILESIZE))
+
+
+def _save(apps: list[dict], tilesize: int | None = None) -> None:
+    """Write ``apps`` (and ``tilesize`` when given; otherwise the stored one is kept)."""
+    if tilesize is None:
+        tilesize = _clamp_tilesize(_load_doc().get("tilesize"))
+    doc: dict = {"apps": apps}
+    if tilesize is not None:
+        doc["tilesize"] = tilesize
     path = _path()
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".dock-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"apps": apps}, f, indent=2)
+            json.dump(doc, f, indent=2)
         os.replace(tmp, path)
     except OSError:
         try:
@@ -204,6 +231,24 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
             "iconVersion": icon_version,
         })
     return out
+
+
+def get_tilesize() -> int:
+    """The stored tile size, or ``DEFAULT_TILESIZE``."""
+    with _lock:
+        size = _clamp_tilesize(_load_doc().get("tilesize"))
+    return DEFAULT_TILESIZE if size is None else size
+
+
+def set_tilesize(value) -> int:
+    """Store ``value`` clamped to the Dock's range; a non-number resets to
+    the default. Returns what was stored."""
+    with _lock:
+        size = _clamp_tilesize(value)
+        if size is None:
+            size = DEFAULT_TILESIZE
+        _save(_load(), size)
+    return size
 
 
 def _stem(file: str) -> str:
