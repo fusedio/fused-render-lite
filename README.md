@@ -150,6 +150,15 @@ Or `scripts/dev.sh`: bootstraps a Python 3.12 `.venv` with `[dev,app]`, runs the
 server with auto-reload on `.py` edits, on a per-branch port and state dir so it
 never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
 
+## Install (Homebrew)
+
+```
+brew install --cask fusedio/tap/fused-render-lite
+```
+
+Installs `RenderLite.app` (macOS 12+), signed + notarized. `brew update &&
+brew upgrade --cask fused-render-lite` upgrades.
+
 ## Build the macOS app
 
 ```
@@ -166,11 +175,14 @@ keychain profile) additionally notarizes and staples.
 ### Release pipeline (GitHub Actions)
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
-macOS release job step for step (no S3/CloudFront, update manifest or Homebrew
-bump): `prepare-release` creates the GitHub Release, then on `macos-26` an
-ephemeral keychain gets the Developer ID cert and an App Store Connect API key,
-`build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified,
-and the DMG lands on the Release. To rebuild an existing tag:
+macOS release job step for step (no S3/CloudFront, update manifest or
+Windows/Linux builds): `prepare-release` creates the GitHub Release, then on
+`macos-26` an ephemeral keychain gets the Developer ID cert and an App Store
+Connect API key, `build_dmg.sh` builds + signs + notarizes + staples, the
+ticket is verified, and the DMG lands on the Release. `bump-homebrew` then
+rewrites `version`/`sha256` in `Casks/fused-render-lite.rb` of
+[fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap) and pushes,
+so `brew upgrade --cask fused-render-lite` picks the release up. To rebuild an existing tag:
 `gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
 tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
 packaging files change. Signing needs these repository secrets (values are
@@ -184,6 +196,7 @@ write-only on GitHub; re-enter them from the originals):
 | `KEYCHAIN_PASSWORD` | any string; unlocks the ephemeral keychain |
 | `NOTARY_API_KEY_P8` | App Store Connect API key (`.p8` contents) |
 | `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID` | its key id and issuer id |
+| `TAP_PUSH_TOKEN` | PAT with push to fusedio/homebrew-tap (same one fused-render uses); only the `bump-homebrew` job fails without it |
 
 Without them the workflow still runs and publishes an ad-hoc-signed DMG (lite-only fallback).
 

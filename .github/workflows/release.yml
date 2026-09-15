@@ -1,9 +1,10 @@
 name: release
 
 # Mirrors fusedio/fused-render's release.yml, macOS job only (no S3/CloudFront,
-# update manifest, Windows/Linux builds or Homebrew bump). Same shape:
-# prepare-release creates the GitHub Release, the macOS job builds, signs,
-# notarizes and staples the DMG on an ephemeral keychain, then attaches it.
+# update manifest or Windows/Linux builds). Same shape: prepare-release creates
+# the GitHub Release, the macOS job builds, signs, notarizes and staples the DMG
+# on an ephemeral keychain, then attaches it; bump-homebrew then points the
+# fusedio/homebrew-tap cask at the new DMG.
 
 on:
   push:
@@ -60,6 +61,9 @@ jobs:
     # SDK, and setup-python installs the python.org-style framework 3.12 that
     # py2app bundles (an old deployment target, so the DMG runs on older macOS).
     runs-on: macos-26
+    outputs:
+      version: ${{ steps.artifacts.outputs.version }}
+      dmg_sha256: ${{ steps.artifacts.outputs.dmg_sha256 }}
     permissions:
       contents: write # needed to attach the DMG to the GitHub Release
     env:
@@ -147,6 +151,43 @@ jobs:
           fi
 
       - name: Upload DMG + wheel to GitHub Release
+        id: artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.whl --clobber
+        run: |
+          set -euo pipefail
+          DMG_PATH="$(ls dist/*.dmg)"
+          gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.whl --clobber
+          # Exposed as job outputs for the split-out bump-homebrew job. Written
+          # only after the upload succeeds, so the cask never points at a DMG
+          # that never made it onto the Release. Version + hash come from the
+          # DMG that was actually built, not from the git tag.
+          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderLite-//')" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+  bump-homebrew:
+    # Separate job so a tap-push failure can't fail the DMG job after the
+    # Release already published.
+    needs: build-sign-notarize-release
+    runs-on: ubuntu-latest
+    permissions: {} # uses the tap PAT only; no GITHUB_TOKEN scopes needed
+    steps:
+      - name: Bump homebrew-tap cask
+        env:
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+          # From the DMG that was actually built+hashed, not the git tag.
+          VERSION: ${{ needs.build-sign-notarize-release.outputs.version }}
+          DMG_SHA256: ${{ needs.build-sign-notarize-release.outputs.dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/fusedio/homebrew-tap.git" /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+          sed -i \
+            -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
+            -e "s/^  sha256 \".*\"/  sha256 \"${DMG_SHA256}\"/" \
+            Casks/fused-render-lite.rb
+          git config user.name "fused-render-lite-ci"
+          git config user.email "ci@fused.io"
+          git add Casks/fused-render-lite.rb
+          git commit -m "fused-render-lite ${VERSION}"
+          git push origin main
