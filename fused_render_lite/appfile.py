@@ -242,3 +242,43 @@ def open_app_file(fused_path: str) -> dict:
         shutil.rmtree(staging, ignore_errors=True)
     ensure_dot_fused(dest)
     return {"dir": dest, "entry": entry_abs, "name": name, "reused": False}
+
+
+# ---- icon --------------------------------------------------------------------
+
+ICON_NAME = "icon.svg"
+ICON_MAX_BYTES = 64 * 1024
+
+
+def icon_bytes(fused_path: str) -> bytes | None:
+    """The app's ``icon.svg`` for the menu-bar dock, or None. Never raises.
+
+    Looked up in this order, cheapest-first for the common case and so an
+    app that WRITES its own icon into its extract wins over the shipped one:
+    the extracted dir (if any), then the v2 container member, then the v1
+    zip's ``files/icon.svg``. Anything over ``ICON_MAX_BYTES`` counts as
+    absent — the dock polls this for every card and an SVG that size is not
+    an icon.
+    """
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return None
+        manifest = read_manifest(fused_path)
+        name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
+        extracted = os.path.join(paths.apps_dir(), _file_key(fused_path, name), ICON_NAME)
+        if os.path.isfile(extracted) and os.path.getsize(extracted) <= ICON_MAX_BYTES:
+            with open(extracted, "rb") as f:
+                return f.read(ICON_MAX_BYTES)
+        # (an over-cap override is ignored and the shipped icon still shows)
+        if manifest.get("fused_app_file") == container.VERSION:
+            data = container.read_member(fused_path, manifest, ICON_NAME, ICON_MAX_BYTES)
+        else:
+            with zipfile.ZipFile(fused_path) as zf:
+                with zf.open(f"{PAYLOAD_DIR}/{ICON_NAME}") as f:
+                    data = f.read(ICON_MAX_BYTES + 1)
+        if data is None or len(data) > ICON_MAX_BYTES:
+            return None
+        return data
+    except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
+        return None
