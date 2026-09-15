@@ -366,31 +366,42 @@ class _Window:
         self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
 
     def _add_titlebar_button(self) -> None:
-        """An "Open in Browser" button at the right end of the title bar.
+        """"Open in Browser" and "Home" buttons at the right end of the title
+        bar — Home rightmost, Browser to its left.
 
         A titlebar accessory keeps the standard titled window (title stays
         centred, traffic lights untouched) — no toolbar row, no
-        full-size-content-view mask. Same action as the ⌘⇧L menu item.
+        full-size-content-view mask. Same actions as the ⌘⇧L / ⌘⇧H menu items.
         """
-        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-            "safari", "Open in Browser")
-        button = NSButton.buttonWithImage_target_action_(
-            image, self.manager._menu_target, b"openInBrowser:")
-        button.setBezelStyle_(NSBezelStyleRecessed)
-        button.setBordered_(False)
-        button.setToolTip_("Open in Browser (⌘⇧L)")
-        button.setControlSize_(NSControlSizeLarge)
-        button.sizeToFit()
-        bw = button.frame().size.width
-        bh = button.frame().size.height
+        specs = (  # left to right
+            ("safari", "Open in Browser", "Open in Browser (⌘⇧L)", b"openInBrowser:"),
+            ("house", "Home", "Home (⌘⇧H)", b"goHome:"),
+        )
+        buttons = []
+        for symbol, desc, tip, action in specs:
+            image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol, desc)
+            button = NSButton.buttonWithImage_target_action_(
+                image, self.manager._menu_target, action)
+            button.setBezelStyle_(NSBezelStyleRecessed)
+            button.setBordered_(False)
+            button.setToolTip_(tip)
+            button.setControlSize_(NSControlSizeLarge)
+            button.sizeToFit()
+            buttons.append(button)
+        gap = 6   # between buttons
         pad = 10  # breathing room from the window's right edge
+        bh = max(b.frame().size.height for b in buttons)
         # Title-bar height; the accessory is bottom-aligned, so a holder this
-        # tall with the button centred lines it up with the title text.
+        # tall with the buttons centred lines them up with the title text.
         bar = self.ns.frame().size.height - self.ns.contentLayoutRect().size.height
         hh = max(bh, bar)
-        holder = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, bw + pad, hh))
-        button.setFrameOrigin_(NSMakePoint(0, round((hh - bh) / 2)))
-        holder.addSubview_(button)
+        total = sum(b.frame().size.width for b in buttons) + gap * (len(buttons) - 1)
+        holder = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, total + pad, hh))
+        x = 0.0
+        for b in buttons:
+            b.setFrameOrigin_(NSMakePoint(x, round((hh - b.frame().size.height) / 2)))
+            holder.addSubview_(b)
+            x += b.frame().size.width + gap
 
         vc = NSTitlebarAccessoryViewController.alloc().init()
         vc.setView_(holder)

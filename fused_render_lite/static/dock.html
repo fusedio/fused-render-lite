@@ -11,7 +11,7 @@
     --tray-line: rgba(0,0,0,.14);
     --tray-line-inner: rgba(255,255,255,.55);
     --sep: rgba(0,0,0,.22);
-    --dot: rgba(0,0,0,.72);
+    --dot: #34c759;
     --util-bg: rgba(60,60,66,.55);
     --util-fg: rgba(255,255,255,.9);
     --hint: rgba(40,40,44,.55);
@@ -32,7 +32,7 @@
       --tray-line: rgba(255,255,255,.18);
       --tray-line-inner: rgba(255,255,255,.06);
       --sep: rgba(255,255,255,.25);
-      --dot: rgba(255,255,255,.85);
+      --dot: #30d158;
       --util-bg: rgba(70,70,76,.6);
       --util-fg: rgba(240,240,245,.82);
       --hint: rgba(240,240,245,.5);
@@ -80,7 +80,7 @@
   #tray {
     display: inline-flex; align-items: flex-start; gap: 8px;
     padding: 8px 10px;
-    height: calc(var(--tile) + 8px + 8px + 8px); box-sizing: border-box; /* fixed: magnified tiles overflow below the glass */
+    height: calc(var(--tile) + 8px + 8px); box-sizing: border-box; /* fixed: magnified tiles overflow below the glass */
     border-radius: 18px;
     background: var(--tray-bg);
     -webkit-backdrop-filter: blur(24px) saturate(160%);
@@ -102,7 +102,7 @@
   body.inapp .item:focus-visible .tile { box-shadow: 0 0 0 2px var(--focus); }
 
   .sep {
-    width: 1px; height: var(--tile); margin: 8px 4px 0;
+    width: 1px; height: var(--tile); margin: 0 4px;
     background: var(--sep); align-self: flex-start; flex: none;
   }
 
@@ -110,7 +110,7 @@
     position: relative;
     width: var(--item-w); flex: none;
     display: flex; flex-direction: column; align-items: center;
-    padding: 8px 0 0; border: 0; margin: 0;  /* room for the running dot ABOVE the tile */
+    padding: 0; border: 0; margin: 0;
     background: transparent; cursor: default;
     -webkit-appearance: none; appearance: none;
     transition: opacity 200ms ease;
@@ -146,7 +146,8 @@
     position: relative;
   }
   .tile img { width: 100%; height: 100%; display: block; object-fit: cover; }
-  .tile.fallback { background: var(--util-bg); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); }
+  .tile.fallback .mono { color: #fff; font-size: 24px; }
+  .item .tile.fallback .mono { font-size: calc(24px * var(--s)); }
   .tile .mono {
     color: var(--util-fg); font-weight: 600; font-size: 20px; letter-spacing: -.02em;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
@@ -158,10 +159,17 @@
   .item.util .tile { background: var(--util-bg); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
   .item.util .tile::after { box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), inset 0 1px 0 rgba(255,255,255,.22); }
   .item.util svg { color: var(--util-fg); }
+  /* Home wears the app's own icon: the black rounded tile + hollow star. */
+  .item.util.home .tile { background: #1b1d21; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .item.util.home svg { width: 100%; height: 100%; display: block; }
 
-  .dot { /* mirrored Dock: the running dot sits above the tile */
-    position: absolute; left: 50%; top: 1px; width: 4px; height: 4px; margin-left: -2px;
-    border-radius: 50%; background: var(--dot); opacity: 0; transition: opacity 150ms ease;
+  .dot { /* running badge: green dot overlaid on the tile's upper-left corner */
+    /* inset from the corner so it sits inside the 12px radius, like a status badge */
+    position: absolute; left: 6px; top: 6px; width: 9px; height: 9px; z-index: 2;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55) 0, rgba(255,255,255,0) 45%), var(--dot);
+    box-shadow: 0 0 0 2px rgba(255,255,255,.95), 0 1px 3px rgba(0,0,0,.4);
+    opacity: 0; transition: opacity 150ms ease; pointer-events: none;
   }
   .item.running .dot { opacity: 1; }
 
@@ -264,13 +272,18 @@
 
   // ---------- fallback tile ----------
   function hash(s) { let h = 2166136261; for (const c of s) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+  // 16 muted, mid-dark tones that hold white type and sit quietly next to real icons.
+  const PALETTE = [
+    "#5b6b8c", "#6b5b8c", "#8c5b7a", "#8c5f5b", "#8c7a5b", "#6f8c5b", "#5b8c7a", "#5b7f8c",
+    "#4f5d75", "#705a7c", "#7c5a66", "#7c6a5a", "#6a7c5a", "#5a7c70", "#5a6e7c", "#666b7c",
+  ];
   function paintFallback(tile, name) {
-    // Plain grey tile with initials — quiet next to real icons.
+    // Solid palette tile (colour hashed from the name) with the name's first character.
     tile.classList.add("fallback");
-    const parts = (name || "?").trim().split(/[\s\-_.]+/).filter(Boolean);
-    let txt = parts.length > 1 ? (parts[0][0] + parts[1][0]) : (parts[0] || "?").slice(0, 2);
-    if (txt.length === 2 && parts.length === 1) txt = txt[0].toUpperCase() + txt[1].toLowerCase(); else txt = txt.toUpperCase();
-    const span = document.createElement("span"); span.className = "mono"; span.textContent = txt;
+    const clean = (name || "").trim();
+    const first = clean ? String.fromCodePoint(clean.codePointAt(0)) : "?";
+    tile.style.background = PALETTE[hash(clean || "?") % PALETTE.length];
+    const span = document.createElement("span"); span.className = "mono"; span.textContent = first.toUpperCase();
     tile.replaceChildren(span);
   }
 
@@ -303,7 +316,7 @@
       // existing <img> retargets instead of showing the first icon forever.
       const src = "/api/dock/icon?file=" + encodeURIComponent(app.file) + "&v=" + encodeURIComponent(app.iconVersion ?? "");
       if (!img || img.dataset.src !== src) {
-        tile.classList.remove("fallback");
+        tile.classList.remove("fallback"); tile.style.background = "";
         const im = document.createElement("img"); im.alt = ""; im.draggable = false; im.dataset.src = src; im.src = src;
         im.addEventListener("error", () => paintFallback(tile, name), { once: true });
         tile.replaceChildren(im);
@@ -324,7 +337,12 @@
     b.addEventListener("click", onClick);
     return b;
   }
-  const HOME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 10v9.5a1 1 0 0 0 1 1H10v-5.5h4v5.5h3.5a1 1 0 0 0 1-1V10"/></svg>';
+  // The app icon (see scripts/build_dmg.sh): four-tip star, quadratic waists,
+  // hollow centre, on the black tile. Coordinates scaled to the tile (0.88 of
+  // the icon canvas) as a 100-unit box.
+  const HOME_SVG = '<svg viewBox="0 0 100 100" aria-hidden="true">'
+    + '<path fill="#e5ff44" d="M50 11.36 Q57.23 42.77 88.64 50 Q57.23 57.23 50 88.64 Q42.77 57.23 11.36 50 Q42.77 42.77 50 11.36 Z"/>'
+    + '<circle cx="50" cy="50" r="8.52" fill="#1b1d21"/></svg>';
 
   const homeBtn = utilItem("Launcher", HOME_SVG, async () => {
     bump(homeBtn);
@@ -332,9 +350,9 @@
     catch (_) { location.href = "/"; }
   });
   const hint = document.createElement("span"); hint.className = "hint"; hint.textContent = "Apps you open appear here";
+  homeBtn.classList.add("home");
   const sepA = document.createElement("div"); sepA.className = "sep"; sepA.dataset.role = "pin-sep";
-  const sepB = document.createElement("div"); sepB.className = "sep";
-  for (const el of [homeBtn, hint, sepA, sepB]) el.addEventListener("pointerdown", onPointerDown);
+  for (const el of [homeBtn, hint, sepA]) el.addEventListener("pointerdown", onPointerDown);
 
   // ---------- render (keyed, in place) ----------
   function render() {
@@ -347,11 +365,12 @@
       if (!n) { n = makeItem(a); state.nodes.set(a.file, n); }
       updateItem(n, a); seen.add(a.file); order.push(n);
     };
-    pinned.forEach(place);
-    if (pinned.length && recent.length) order.push(sepA);
-    recent.forEach(place);
-    if (apps.length) order.push(sepB); else order.push(hint);
+    // Home leads the pinned zone; the separator divides pinned from recent.
     order.push(homeBtn);
+    pinned.forEach(place);
+    if (recent.length) order.push(sepA);
+    recent.forEach(place);
+    if (!apps.length) order.push(hint);
     for (const [file, n] of state.nodes) if (!seen.has(file)) { n.remove(); state.nodes.delete(file); }
     // reconcile children order with minimal moves
     let i = 0;
@@ -651,7 +670,7 @@
     b.dataset.pinDrop = "1";
     let ref = null;
     for (const n of pinnedNodes()) { const r = n.getBoundingClientRect(); if (x < r.left + r.width / 2) { ref = n; break; } }
-    if (!ref) ref = [...tray.children].find(c => c !== b && !(c.classList.contains("app") && c.dataset.pinned)) || null;
+    if (!ref) ref = sepA.isConnected ? sepA : null;  // end of the pinned zone (never left of Home)
     if (b.nextSibling !== ref) tray.insertBefore(b, ref);
   }
   async function endDrag() {
