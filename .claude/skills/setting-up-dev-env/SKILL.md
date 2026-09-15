@@ -68,5 +68,5 @@ raise the floor in the script or the workflow.
 | uv | the server shells out to uv for app venvs; `env.uv_bin()` accepts the bundled copy, a uv ≥ 0.8 on PATH, or downloads a pinned one into `~/.fused-render-app/bin` (dev: under `FUSED_RENDER_APP_HOME`) |
 | No frontend | nothing to `npm install`; `runtime.js` is hand-written |
 
-Remote layout: `origin` is fusedio/fused-render-app; `main` is the release branch.
+Remote layout: `origin` is fusedio/fused-render-lite; `main` is the release branch.
 The `origin` remote is fusedio/fused-render — never push there.

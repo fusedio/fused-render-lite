@@ -8,7 +8,7 @@ description: Use when cutting a new fused-render-app (Render App) release, bumpi
 ## Overview
 
 A release is: bump `__version__`, land it on `main` of `origin`
-(fusedio/fused-render-app), tag that commit `vX.Y.Z`, push the tag. The tag
+(fusedio/fused-render-lite), tag that commit `vX.Y.Z`, push the tag. The tag
 push triggers `.github/workflows/release.yml`: `prepare-release` creates the
 GitHub Release, then the macos-26 job builds, signs, (notarizes) and uploads
 `RenderApp-X.Y.Z.dmg` + the wheel, and `bump-homebrew` pushes the new
@@ -16,7 +16,7 @@ version + sha256 into `Casks/render-app.rb` of fusedio/homebrew-tap
 (needs the `TAP_PUSH_TOKEN` repo secret). Afterwards, add the shipped DMG
 size to the table in `STATUS.md` — every version has a row.
 
-**Remotes.** `origin` is fusedio/fused-render-app. `main` is not protected:
+**Remotes.** `origin` is fusedio/fused-render-lite. `main` is not protected:
 direct pushes are fine, no bump PR needed.
 
 **Single source of truth:** the version lives ONLY in
@@ -50,9 +50,9 @@ direct pushes are fine, no bump PR needed.
    ```
 6. **Watch the release.**
    ```bash
-   RUN=$(gh run list -R fusedio/fused-render-app --workflow release --limit 1 --json databaseId -q '.[0].databaseId')
-   gh run watch -R fusedio/fused-render-app "$RUN" --exit-status
-   gh release view vX.Y.Z -R fusedio/fused-render-app --json assets -q '.assets[] | "\(.name) \(.size)"'
+   RUN=$(gh run list -R fusedio/fused-render-lite --workflow release --limit 1 --json databaseId -q '.[0].databaseId')
+   gh run watch -R fusedio/fused-render-lite "$RUN" --exit-status
+   gh release view vX.Y.Z -R fusedio/fused-render-lite --json assets -q '.assets[] | "\(.name) \(.size)"'
    ```
    Build log lines worth checking: `checked 245, missing 0` (stdlib probes),
    `highest minos in the bundle: 11.0 (floor 14.0)`, `uv 0.12.x` (bundled uv smoke).
@@ -66,7 +66,7 @@ Tags are immutable but a release can be rebuilt (e.g. after adding signing
 secrets) without a new version:
 
 ```bash
-gh workflow run release -R fusedio/fused-render-app --ref vX.Y.Z -f tag=vX.Y.Z
+gh workflow run release -R fusedio/fused-render-lite --ref vX.Y.Z -f tag=vX.Y.Z
 ```
 
 `--ref` must be the tag: the workflow checks out the ref it runs on.
@@ -79,7 +79,7 @@ The DMG is **ad-hoc signed** unless the repo has the 7 secrets
 `KEYCHAIN_PASSWORD`, `NOTARY_API_KEY_P8`, `NOTARY_API_KEY_ID`,
 `NOTARY_API_ISSUER_ID`). GitHub secrets are write-only: copy them from the
 originals, never from fused-render's repo via API. Check with
-`gh secret list -R fusedio/fused-render-app`. With secrets present the job
+`gh secret list -R fusedio/fused-render-lite`. With secrets present the job
 also verifies the stapled ticket (`stapler validate` + `spctl`).
 
 ## Quick Reference
@@ -88,7 +88,7 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 |-------|-------|
 | Version source | `fused_render_app/__init__.py` → `__version__` |
 | Tag format | `vX.Y.Z` (== `__version__`, commit on main) |
-| Remote | `origin` = fusedio/fused-render-app |
+| Remote | `origin` = fusedio/fused-render-lite |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
 | Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` |
 | Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb`; check `brew update && brew info --cask fusedio/tap/render-app` |
