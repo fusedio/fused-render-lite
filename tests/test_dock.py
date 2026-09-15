@@ -7,7 +7,7 @@ import urllib.parse
 
 import pytest
 
-from fused_render_app import appfile, container, dock_store, env, server
+from fused_render_app import appfile, container, dock_store, env, icon_color, server
 from tests.conftest import ENTRY_HTML, ICON_SVG
 
 
@@ -344,3 +344,66 @@ def test_list_apps_opens_the_fused_once_per_mtime(v2_fused_icon, monkeypatch):
     for _ in range(3):
         assert dock_store.list_apps()[0]["hasIcon"] is True
     assert calls == {"shipped": 1, "override": 1}
+
+
+# ---- icon_color (theme recolouring of a picked glyph) ----------------------
+
+# What fused-render's IconPicker writes (IconPicker.glyphIconSvg): the colour's
+# NAME on the root, a prefers-color-scheme fallback, currentColor strokes.
+GLYPH_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" data-fused-color="red">'
+    b"<style>svg{color:#d44c47}@media(prefers-color-scheme:dark){svg{color:#df5452}}</style>"
+    b'<g fill="none" stroke="currentColor" stroke-width="2.5">'
+    b'<path d="M4 4h16"/><circle cx="12" cy="12" r="3" fill="currentColor"/></g></svg>'
+)
+
+
+def test_theme_icon_svg_swaps_every_current_color_for_the_theme_hex():
+    dark = icon_color.theme_icon_svg(GLYPH_SVG, "dark")
+    light = icon_color.theme_icon_svg(GLYPH_SVG, "light")
+    assert b"currentColor" not in dark and b"currentColor" not in light
+    assert dark.count(b'stroke="#df5452"') == 1 and dark.count(b'fill="#df5452"') == 1
+    assert light.count(b'stroke="#d44c47"') == 1 and light.count(b'fill="#d44c47"') == 1
+    # everything else — the marker, the fallback <style> — is left as it was
+    assert b'data-fused-color="red"' in dark and b"<style>" in dark
+
+
+def test_theme_icon_svg_passes_through_when_it_should_not_touch_the_file():
+    # no marker (an emoji glyph, a hand-authored icon): drawn as is
+    assert icon_color.theme_icon_svg(ICON_SVG, "dark") == ICON_SVG
+    plain = b'<svg xmlns="http://www.w3.org/2000/svg"><path stroke="currentColor" d="M0 0"/></svg>'
+    assert icon_color.theme_icon_svg(plain, "dark") == plain
+    # unknown name: "no marker", not an error
+    unknown = GLYPH_SVG.replace(b'data-fused-color="red"', b'data-fused-color="teal"')
+    assert icon_color.theme_icon_svg(unknown, "dark") == unknown
+    # marker on a nested element does not count — only the root's
+    nested = b'<svg xmlns="http://www.w3.org/2000/svg"><g data-fused-color="red" stroke="currentColor"/></svg>'
+    assert icon_color.theme_icon_svg(nested, "dark") == nested
+    # no / bogus theme: raw bytes (the pre-theme URL keeps working)
+    assert icon_color.theme_icon_svg(GLYPH_SVG, "") == GLYPH_SVG
+    assert icon_color.theme_icon_svg(GLYPH_SVG, "sepia") == GLYPH_SVG
+    # not UTF-8: never raises
+    assert icon_color.theme_icon_svg(b"\xff\xfe<svg>", "dark") == b"\xff\xfe<svg>"
+
+
+def test_read_icon_color_legacy_names_still_follow_the_theme():
+    for name in ("gray", "brown", "orange", "purple", "pink", "default", "yellow", "blue", "green"):
+        svg = GLYPH_SVG.replace(b'data-fused-color="red"', b'data-fused-color="%s"' % name.encode()).decode()
+        assert icon_color.read_icon_color(svg) == name
+    assert icon_color.read_icon_color("<p>not svg</p>") is None
+
+
+def test_dock_icon_route_recolours_for_theme(client, v2_fused_icon):
+    # a picked glyph written into the extract: that override wins over the shipped icon
+    result = appfile.open_app_file(v2_fused_icon)
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(GLYPH_SVG)
+    base = "/api/dock/icon?" + urllib.parse.urlencode({"file": v2_fused_icon})
+    status, headers, body = client.get(base + "&theme=dark")
+    assert status == 200 and headers["Content-Type"] == "image/svg+xml"
+    assert body == icon_color.theme_icon_svg(GLYPH_SVG, "dark") and b'stroke="#df5452"' in body
+    status, _, body = client.get(base + "&theme=light")
+    assert status == 200 and b'stroke="#d44c47"' in body
+    # no theme: the raw file, as before
+    status, _, body = client.get(base)
+    assert status == 200 and body == GLYPH_SVG

@@ -20,7 +20,8 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/health                             {ok, version, pid}
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
   GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}], tilesize}
-  GET  /api/dock/icon?file=<abs>               the app's icon.svg, or 404
+  GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg, currentColor
+                                               resolved for the theme (icon_color.py), or 404
   POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
@@ -54,7 +55,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, icon_color, showcase, jobs, paths
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
 
@@ -363,6 +364,9 @@ class Handler(BaseHTTPRequestHandler):
         data = appfile.icon_bytes(file) if os.path.isabs(file) else None
         if data is None:
             return self._error("not found", 404)
+        # A picked glyph names its colour and strokes in currentColor; the
+        # dock's <img> cannot see the page's theme, so resolve it here.
+        data = icon_color.theme_icon_svg(data, q.get("theme") or "")
         self._send(200, data, "image/svg+xml", {"Cache-Control": "no-cache"})
 
     def _dock(self, action: str) -> None:
