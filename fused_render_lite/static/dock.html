@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dock</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --tray-bg: rgba(255,255,255,.35);
+    --tray-line: rgba(0,0,0,.14);
+    --tray-line-inner: rgba(255,255,255,.55);
+    --sep: rgba(0,0,0,.22);
+    --dot: rgba(0,0,0,.72);
+    --util-bg: rgba(60,60,66,.55);
+    --util-fg: rgba(255,255,255,.9);
+    --hint: rgba(40,40,44,.55);
+    --menu-bg: rgba(246,246,248,.82);
+    --menu-fg: #1c1c1e;
+    --menu-line: rgba(0,0,0,.12);
+    --menu-hover: #2f6fed;
+    --focus: rgba(47,111,237,.85);
+    --tile-shadow: 0 1px 2px rgba(0,0,0,.18), 0 3px 8px rgba(0,0,0,.14);
+    --headroom: 6px;
+    --footroom: 66px; /* hangs from the menu bar: magnified tile (+26px) + name bubble grow DOWN */
+    --tile: 52px;
+    --item-w: 52px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --tray-bg: rgba(30,30,32,.45);
+      --tray-line: rgba(255,255,255,.18);
+      --tray-line-inner: rgba(255,255,255,.06);
+      --sep: rgba(255,255,255,.25);
+      --dot: rgba(255,255,255,.85);
+      --util-bg: rgba(70,70,76,.6);
+      --util-fg: rgba(240,240,245,.82);
+      --hint: rgba(240,240,245,.5);
+      --menu-bg: rgba(44,44,48,.86);
+      --menu-fg: #f2f2f5;
+      --menu-line: rgba(255,255,255,.14);
+      --tile-shadow: 0 1px 2px rgba(0,0,0,.4), 0 3px 8px rgba(0,0,0,.3);
+    }
+  }
+
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none; -webkit-user-select: none;
+    overflow: hidden;
+    display: inline-block;
+  }
+  /* Dev-only soft backdrop so the vibrancy tray is visible in a plain tab. */
+  body.dev {
+    display: block; min-height: 100vh; box-sizing: border-box; padding: 40px;
+    background:
+      radial-gradient(1200px 500px at 20% 0%, #cfe7d7 0%, transparent 60%),
+      radial-gradient(900px 500px at 90% 100%, #b7c9dd 0%, transparent 60%),
+      linear-gradient(160deg, #e8efe6, #d5dde8);
+  }
+  @media (prefers-color-scheme: dark) {
+    body.dev {
+      background:
+        radial-gradient(1200px 500px at 20% 0%, #23402f 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 100%, #1f2c40 0%, transparent 60%),
+        linear-gradient(160deg, #1a1f1c, #12161d);
+    }
+  }
+
+  #wrap {
+    display: inline-block;
+    /* --slack: room for the widest wave, so the native panel never resizes mid-hover */
+    --slack: 56px;
+    padding: var(--headroom) var(--slack) var(--footroom);
+    text-align: center;
+    box-sizing: border-box;
+    vertical-align: top;
+  }
+  #tray {
+    display: inline-flex; align-items: flex-start; gap: 8px;
+    padding: 8px 10px;
+    height: calc(var(--tile) + 8px + 8px + 8px); box-sizing: border-box; /* fixed: magnified tiles overflow below the glass */
+    border-radius: 18px;
+    background: var(--tray-bg);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    backdrop-filter: blur(24px) saturate(160%);
+    box-shadow: 0 0 0 1px var(--tray-line), inset 0 0 0 1px var(--tray-line-inner), 0 8px 24px rgba(0,0,0,.14);
+    position: relative;
+  }
+  /* In the app the glass is native (an NSVisualEffectView sized to the tray
+     rect the page reports): the page draws no box of its own — the tray
+     floats, like the Dock. */
+  body.inapp #tray {
+    background: transparent;
+    -webkit-backdrop-filter: none; backdrop-filter: none;
+    box-shadow: inset 0 0 0 1px var(--tray-line-inner);
+  }
+  /* Drop shadows on a transparent WKWebView composite as dark slabs — and
+     Dock icons have none anyway. */
+  body.inapp .tile, body.inapp .item.util .tile { box-shadow: none; }
+  body.inapp .item:focus-visible .tile { box-shadow: 0 0 0 2px var(--focus); }
+
+  .sep {
+    width: 1px; height: var(--tile); margin: 8px 4px 0;
+    background: var(--sep); align-self: flex-start; flex: none;
+  }
+
+  .item {
+    position: relative;
+    width: var(--item-w); flex: none;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 8px 0 0; border: 0; margin: 0;  /* room for the running dot ABOVE the tile */
+    background: transparent; cursor: default;
+    -webkit-appearance: none; appearance: none;
+    transition: opacity 200ms ease;
+    outline: none;
+    color: inherit; font: inherit;
+  }
+  /* Fisheye: --s is eased per item toward a pointer-distance target every
+     frame (see the "fisheye" block in the script). Sized in flow, so the
+     tray widens like the real Dock; no transforms. */
+  .item { --s: 1; width: calc(var(--tile) * var(--s)); }
+  .item .tile { width: calc(var(--tile) * var(--s)); height: calc(var(--tile) * var(--s)); }
+  .item .tile .mono { font-size: calc(20px * var(--s)); }
+  .item.util svg { width: calc(26px * var(--s)); height: calc(26px * var(--s)); }
+  .item:focus-visible .tile { box-shadow: var(--tile-shadow), 0 0 0 2px var(--focus); }
+  .item.dragging { opacity: .6; }
+  .item.missing .tile { opacity: .5; filter: saturate(.4); }
+  .item.bounce { animation: bounce 600ms ease-in-out; }
+  .item.shake  { animation: shake 320ms ease-in-out; }
+  @keyframes bounce {
+    0%,50%,100% { translate: 0 0; }
+    25%,75% { translate: 0 10px; } /* hangs from the menu bar: bounce DOWN */
+  }
+  @keyframes shake {
+    0%,100% { translate: 0 0; } 20% { translate: -4px 0; } 40% { translate: 4px 0; }
+    60% { translate: -3px 0; } 80% { translate: 3px 0; }
+  }
+  .tile {
+    width: var(--tile); height: var(--tile); border-radius: 12px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--tile-shadow);
+    transition: opacity 200ms ease;
+    pointer-events: none;
+    position: relative;
+  }
+  .tile img { width: 100%; height: 100%; display: block; object-fit: cover; }
+  .tile.fallback { background: var(--util-bg); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); }
+  .tile .mono {
+    color: var(--util-fg); font-weight: 600; font-size: 20px; letter-spacing: -.02em;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+  }
+  .tile::after { /* glass edge like real Dock icons */
+    content: ""; position: absolute; inset: 0; border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), inset 0 1px 0 rgba(255,255,255,.25);
+  }
+  .item.util .tile { background: var(--util-bg); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .item.util .tile::after { box-shadow: inset 0 0 0 1px rgba(255,255,255,.18), inset 0 1px 0 rgba(255,255,255,.22); }
+  .item.util svg { color: var(--util-fg); }
+
+  .dot { /* mirrored Dock: the running dot sits above the tile */
+    position: absolute; left: 50%; top: 1px; width: 4px; height: 4px; margin-left: -2px;
+    border-radius: 50%; background: var(--dot); opacity: 0; transition: opacity 150ms ease;
+  }
+  .item.running .dot { opacity: 1; }
+
+  .hint { color: var(--hint); font-size: 12px; align-self: center; padding: 0 6px 0 4px; white-space: nowrap; }
+
+
+  /* name bubble */
+  #bubble {
+    position: fixed; left: 0; top: 0; z-index: 20;
+    transform: translate(-50%, 0);
+    padding: 4px 11px; border-radius: 10px;
+    background: rgba(56,56,60,.92); color: #fff;
+    font-size: 13px; font-weight: 500; white-space: nowrap;
+    box-shadow: 0 1px 3px rgba(0,0,0,.25);
+    opacity: 0; pointer-events: none; transition: opacity 90ms ease;
+  }
+  #bubble::after { /* arrow on top: the bubble sits under the tile */
+    content: ""; position: absolute; left: 50%; top: -5px; margin-left: -6px;
+    border: 6px solid transparent; border-bottom-color: rgba(56,56,60,.92); border-top: 0;
+  }
+  #bubble.on { opacity: 1; }
+
+  /* context menu */
+  #menu {
+    position: fixed; z-index: 30; min-width: 176px;
+    padding: 5px; border-radius: 6px;
+    background: var(--menu-bg); color: var(--menu-fg);
+    -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+    box-shadow: 0 0 0 1px var(--menu-line), 0 6px 20px rgba(0,0,0,.25);
+    font-size: 13px; display: none; margin: 0; list-style: none;
+  }
+  #menu.on { display: block; }
+  #menu li { padding: 3px 9px; border-radius: 4px; cursor: default; white-space: nowrap; }
+  #menu li:hover, #menu li.focus { background: var(--menu-hover); color: #fff; }
+  #menu li.hr { height: 1px; padding: 0; margin: 4px 8px; background: var(--menu-line); }
+  #menu li.hr:hover { background: var(--menu-line); }
+  #menu a { color: inherit; text-decoration: none; display: block; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .item, .tile, #bubble { transition: none; }
+    .item.bounce, .item.shake { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="tray" role="toolbar" aria-label="Dock"></div>
+</div>
+<div id="bubble" role="tooltip"></div>
+<ul id="menu" role="menu"></ul>
+
+<script>
+(() => {
+  "use strict";
+  const INAPP = navigator.userAgent.includes("RenderLite/");
+  document.body.classList.add(INAPP ? "inapp" : "dev");
+
+  const tray = document.getElementById("tray");
+  const wrap = document.getElementById("wrap");
+  const bubble = document.getElementById("bubble");
+  const menu = document.getElementById("menu");
+  const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
+
+  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false };
+
+  // ---------- net ----------
+  async function post(path, body) {
+    const r = await fetch(path, { method: "POST", headers: HDRS, body: JSON.stringify(body || {}) });
+    if (!r.ok) throw new Error(path + " " + r.status);
+    return r.json();
+  }
+  async function refresh() {
+    if (state.dragging || state.menuFor) return;
+    try {
+      const r = await fetch("/api/dock", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      apply(d.apps || []);
+    } catch (_) { if (!state.loaded) render(); /* server down: show empty tray rather than nothing */ }
+  }
+  function apply(apps) {
+    if (state.dragging || state.menuFor) return;
+    state.apps = apps; state.loaded = true;
+    render();
+  }
+
+  // ---------- fallback tile ----------
+  function hash(s) { let h = 2166136261; for (const c of s) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+  function paintFallback(tile, name) {
+    // Plain grey tile with initials — quiet next to real icons.
+    tile.classList.add("fallback");
+    const parts = (name || "?").trim().split(/[\s\-_.]+/).filter(Boolean);
+    let txt = parts.length > 1 ? (parts[0][0] + parts[1][0]) : (parts[0] || "?").slice(0, 2);
+    if (txt.length === 2 && parts.length === 1) txt = txt[0].toUpperCase() + txt[1].toLowerCase(); else txt = txt.toUpperCase();
+    const span = document.createElement("span"); span.className = "mono"; span.textContent = txt;
+    tile.replaceChildren(span);
+  }
+
+  // ---------- item nodes ----------
+  function makeItem(app) {
+    const b = document.createElement("button");
+    b.className = "item app"; b.type = "button";
+    b.dataset.file = app.file;
+    const tile = document.createElement("div"); tile.className = "tile";
+    const dot = document.createElement("div"); dot.className = "dot";
+    b.append(tile, dot);
+    b.addEventListener("click", () => openApp(app.file));
+    b.addEventListener("contextmenu", (e) => { e.preventDefault(); showMenu(b); });
+    b.addEventListener("pointerdown", onPointerDown);
+    return b;
+  }
+  function updateItem(b, app) {
+    const tile = b.firstElementChild;
+    const name = app.name || app.file.split("/").pop();
+    b.dataset.name = name;
+    b.dataset.pinned = app.pinned ? "1" : "";
+    b.dataset.exists = app.exists ? "1" : "";
+    b.setAttribute("aria-label", name + (app.exists ? "" : " (missing)"));
+    b.classList.toggle("running", !!app.running);
+    b.classList.toggle("missing", !app.exists);
+    const wantImg = !!app.hasIcon;
+    const img = tile.querySelector("img");
+    if (wantImg) {
+      const src = "/api/dock/icon?file=" + encodeURIComponent(app.file);
+      if (!img) {
+        tile.classList.remove("fallback");
+        const im = document.createElement("img"); im.alt = ""; im.draggable = false; im.src = src;
+        im.addEventListener("error", () => paintFallback(tile, name), { once: true });
+        tile.replaceChildren(im);
+      }
+    } else if (img || tile.dataset.name !== name) {
+      paintFallback(tile, name);
+    }
+    tile.dataset.name = name;
+  }
+
+  function utilItem(label, svg, onClick) {
+    const b = document.createElement("button");
+    b.className = "item util"; b.type = "button"; b.dataset.name = label;
+    b.setAttribute("aria-label", label);
+    const tile = document.createElement("div"); tile.className = "tile";
+    tile.innerHTML = svg; // static, author-controlled markup only
+    b.append(tile);
+    b.addEventListener("click", onClick);
+    return b;
+  }
+  const HOME_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 10v9.5a1 1 0 0 0 1 1H10v-5.5h4v5.5h3.5a1 1 0 0 0 1-1V10"/></svg>';
+
+  const homeBtn = utilItem("Launcher", HOME_SVG, async () => {
+    bump(homeBtn);
+    try { const r = await post("/api/dock/home"); if (!r.ok) location.href = r.view || "/"; }
+    catch (_) { location.href = "/"; }
+  });
+  const hint = document.createElement("span"); hint.className = "hint"; hint.textContent = "Apps you open appear here";
+  const sepA = document.createElement("div"); sepA.className = "sep"; sepA.dataset.role = "pin-sep";
+  const sepB = document.createElement("div"); sepB.className = "sep";
+  for (const el of [homeBtn, hint, sepA, sepB]) el.addEventListener("pointerdown", onPointerDown);
+
+  // ---------- render (keyed, in place) ----------
+  function render() {
+    const apps = state.apps;
+    const pinned = apps.filter(a => a.pinned), recent = apps.filter(a => !a.pinned);
+    const seen = new Set();
+    const order = [];
+    const place = (a) => {
+      let n = state.nodes.get(a.file);
+      if (!n) { n = makeItem(a); state.nodes.set(a.file, n); }
+      updateItem(n, a); seen.add(a.file); order.push(n);
+    };
+    pinned.forEach(place);
+    if (pinned.length && recent.length) order.push(sepA);
+    recent.forEach(place);
+    if (apps.length) order.push(sepB); else order.push(hint);
+    order.push(homeBtn);
+    for (const [file, n] of state.nodes) if (!seen.has(file)) { n.remove(); state.nodes.delete(file); }
+    // reconcile children order with minimal moves
+    let i = 0;
+    for (const n of order) {
+      const cur = tray.children[i];
+      if (cur !== n) tray.insertBefore(n, cur || null);
+      i++;
+    }
+    while (tray.children.length > order.length) tray.lastElementChild.remove();
+    mag.rest = null;
+    if (!mag.active) report();
+  }
+
+  function trayRect() {
+    const t = tray.getBoundingClientRect();
+    return { x: Math.round(t.left), y: Math.round(t.top), w: Math.round(t.width), h: Math.round(t.height) };
+  }
+  // Glass only (cheap: one view frame, the panel itself is untouched).
+  function reportTray() {
+    window.webkit?.messageHandlers?.dock?.postMessage({ type: "tray", tray: trayRect() });
+  }
+  function report() {
+    // Pin #wrap to the rest width (+ slack both sides) so a live wave widens
+    // the centred tray symmetrically inside a panel that does not move.
+    wrap.style.width = "";
+    wrap.style.width = Math.ceil(wrap.getBoundingClientRect().width) + "px";
+    const r = wrap.getBoundingClientRect();
+    let w = Math.ceil(r.width), h = Math.ceil(r.height);
+    if (menu.classList.contains("on")) {
+      const m = menu.getBoundingClientRect();
+      w = Math.max(w, Math.ceil(m.right + 6)); h = Math.max(h, Math.ceil(m.bottom + 6));
+    }
+    // The tray rect (page coordinates, top-left origin) is where the native
+    // glass goes; everything outside it stays fully transparent.
+    window.webkit?.messageHandlers?.dock?.postMessage({ type: "size", width: w, height: h, tray: trayRect() });
+  }
+
+  // ---------- open ----------
+  function bump(b) { b.classList.remove("bounce"); void b.offsetWidth; b.classList.add("bounce"); }
+  function shake(b) { b.classList.remove("shake"); void b.offsetWidth; b.classList.add("shake"); }
+  async function openApp(file) {
+    const b = state.nodes.get(file);
+    if (!b || Date.now() - state.dragEndedAt < 300) return; // swallow the click that ends a drag
+    if (!b.dataset.exists) { shake(b); return; }
+    bump(b);
+    try {
+      const r = await post("/api/dock/open", { file });
+      if (r && r.native === false && r.view) location.href = r.view;
+    } catch (_) { shake(b); }
+  }
+
+  // ---------- hover magnification (downward; names live under the tiles, no bubble) ----------
+  function items() { return [...tray.querySelectorAll(".item")]; }
+  // ---- The Dock's fisheye, done the way the Dock does it -------------------
+  // 1. Each tile's TARGET size is a cosine bell of the pointer's distance to
+  //    the tile's REST centre (the layout with every tile at 1×). Measuring
+  //    against rest positions — not the live, already-magnified ones — is
+  //    what keeps the wave stable; measuring live feeds the output back into
+  //    the input and jitters.
+  // 2. The pointer is tracked over the WHOLE tray, gaps and separators
+  //    included, so the wave never collapses until the pointer leaves.
+  // 3. Sizes ease toward their targets every animation frame (exponential
+  //    smoothing), so pointer-event cadence never shows.
+  // 4. Tiles are sized in flow (the tray widens, neighbours slide) with no
+  //    transforms — a transformed, shadowed layer in a transparent web view
+  //    leaves ghost slabs behind. The panel is NOT resized while the wave is
+  //    live: #wrap reserves horizontal slack for the widest wave up front.
+  const MAG_MAX = 1.6, MAG_RANGE = 130, TILE = 52, EASE = 0.28;
+  const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const mag = { rest: null, cur: new Map(), target: new Map(), raf: 0, px: null, active: false, frozen: false };
+
+  // Rest geometry: item centres and tray extent with every tile at 1×.
+  // Computed from the item order and the fixed metrics (tile, gap, separator),
+  // never measured — so it is valid at any moment of the wave. A DOM
+  // measurement was only right at rest, and a poll re-render mid-hover
+  // could leave the wave with no geometry at all (it froze).
+  const GAP = 8, PAD_X = 10, SEP_W = 1 + 4 + 4;
+  function restLayout() {
+    if (mag.rest) return mag.rest;
+    const centers = [];
+    let x = PAD_X, first = true;
+    for (const el of tray.children) {
+      if (!first) x += GAP;
+      first = false;
+      if (el.classList.contains("item")) { centers.push({ n: el, l: x, w: TILE, cx: x + TILE / 2 }); x += TILE; }
+      else if (el.classList.contains("sep")) x += SEP_W;
+      else x += el.getBoundingClientRect().width;  // the hint text: constant width
+    }
+    mag.rest = { left: 0, right: x + PAD_X, centers };
+    return mag.rest;
+  }
+  // Map a live pointer x (the tray is wider while magnified) back to rest
+  // coordinates: same item / same gap, same fraction across it.
+  function toRestX(px) {
+    const rest = mag.rest, live = items().map(n => n.getBoundingClientRect());
+    const t = tray.getBoundingClientRect();
+    const x = px - t.left;
+    for (let i = 0; i < live.length; i++) {
+      const l = live[i].left - t.left, r = live[i].right - t.left;
+      if (x <= r) {
+        if (x >= l) return rest.centers[i].l + (x - l) / (r - l) * rest.centers[i].w;
+        const prevR = i ? live[i - 1].right - t.left : 0;
+        const prevRestR = i ? rest.centers[i - 1].l + rest.centers[i - 1].w : 0;
+        return prevRestR + (x - prevR) / Math.max(1, l - prevR) * (rest.centers[i].l - prevRestR);
+      }
+    }
+    return rest.right - rest.left;
+  }
+  function bell(d) { return d >= MAG_RANGE ? 0 : 0.5 * (1 + Math.cos(Math.PI * d / MAG_RANGE)); }
+  function retarget() {
+    const list = items();
+    if (mag.px === null || REDUCED || !mag.rest) { for (const n of list) mag.target.set(n, 1); return; }
+    const rx = toRestX(mag.px);
+    let best = null, bestD = Infinity;
+    for (const c of mag.rest.centers) {
+      const d = Math.abs(rx - c.cx);
+      mag.target.set(c.n, 1 + (MAG_MAX - 1) * bell(d));
+      if (d < bestD) { bestD = d; best = c.n; }
+    }
+    // The bubble names the tile the pointer is nearest to, gaps included.
+    setHover(best);
+  }
+  function tick() {
+    mag.raf = 0;
+    const list = items();
+    let moving = false;
+    for (const n of list) {
+      const cur = mag.cur.get(n) ?? 1, tgt = mag.target.get(n) ?? 1;
+      let next = cur + (tgt - cur) * EASE;
+      if (Math.abs(next - tgt) < 0.002) next = tgt; else moving = true;
+      if (next !== cur) { mag.cur.set(n, next); n.style.setProperty("--s", next.toFixed(4)); }
+    }
+    placeBubble();
+    reportTray();  // the native glass follows the widening tray every frame
+    if (moving) mag.raf = requestAnimationFrame(tick);
+    else if (!mag.active) { mag.rest = null; report(); }  // back at rest: settle the panel size
+  }
+  function kick() { if (!mag.raf) mag.raf = requestAnimationFrame(tick); }
+  function pointerAt(px) {
+    if (mag.frozen) return;  // a tile's menu is up: the wave holds on it
+    if (!mag.rest && !restLayout()) return;  // still animating out; ignore until settled
+    mag.px = px; mag.active = true;
+    retarget(); kick();
+  }
+  function pointerGone() {
+    if (mag.frozen) return;
+    mag.px = null; mag.active = false;
+    for (const n of items()) mag.target.set(n, 1);
+    state.hover = null; bubble.classList.remove("on");
+    kick();
+  }
+  function placeBubble() {
+    const b = state.hover;
+    if (!b || !mag.active || mag.frozen) { bubble.classList.remove("on"); return; }
+    const r = b.querySelector(".tile").getBoundingClientRect();
+    // Mirrored Dock: the bubble hangs BELOW the tile, arrow up.
+    bubble.style.top = (r.bottom + 9) + "px";
+    const bw = bubble.offsetWidth, cx = r.left + r.width / 2;
+    bubble.style.left = Math.min(Math.max(cx, bw / 2 + 4), window.innerWidth - bw / 2 - 4) + "px";
+    bubble.classList.add("on");
+  }
+  function setHover(b) {
+    if (state.hover === b) return;
+    state.hover = b;
+    if (b) bubble.textContent = b.dataset.name + (b.classList.contains("app") && !b.dataset.exists ? " (missing)" : "");
+  }
+  tray.addEventListener("pointermove", (e) => {
+    if (state.dragging || state.menuFor) return;
+    pointerAt(e.clientX);
+  });
+  tray.addEventListener("pointerleave", () => { if (!state.dragging) pointerGone(); });
+  wrap.addEventListener("pointerleave", () => { if (!state.dragging) pointerGone(); });
+  tray.addEventListener("focusin", (e) => { const b = e.target.closest(".item"); if (b) { const r = b.getBoundingClientRect(); pointerAt(r.left + r.width / 2); } });
+  tray.addEventListener("focusout", () => { if (!tray.matches(":hover")) pointerGone(); });
+
+  // ---------- keyboard ----------
+  document.addEventListener("keydown", (e) => {
+    if (menu.classList.contains("on")) { menuKey(e); return; }
+    const list = items();
+    const cur = document.activeElement?.closest?.(".item");
+    let i = list.indexOf(cur);
+    if (e.key === "ArrowRight") { e.preventDefault(); list[i < 0 ? 0 : Math.min(i + 1, list.length - 1)]?.focus(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); list[i < 0 ? list.length - 1 : Math.max(i - 1, 0)]?.focus(); }
+    else if (e.key === "Escape") pointerGone();
+  });
+
+  // ---------- context menu ----------
+  function mi(label, fn, opts) {
+    const li = document.createElement("li"); li.setAttribute("role", "menuitem"); li.tabIndex = -1;
+    if (opts && opts.href) {
+      const a = document.createElement("a"); a.href = opts.href; a.target = "_blank"; a.rel = "noopener"; a.textContent = label;
+      li.append(a); li.addEventListener("click", () => { hideMenu(); });
+    } else {
+      li.textContent = label;
+      li.addEventListener("click", async () => { hideMenu(); try { await fn(); } catch (_) {} refresh(); });
+    }
+    return li;
+  }
+  function hr() { const li = document.createElement("li"); li.className = "hr"; li.setAttribute("role", "separator"); return li; }
+  function showMenu(b) {
+    const file = b.dataset.file, pinned = !!b.dataset.pinned;
+    if (INAPP && window.webkit?.messageHandlers?.dock) {
+      // In the app the menu is a real NSMenu popped from the tile (native
+      // look, arrow keys, ⎋); the HTML menu below is the browser fallback.
+      // Freeze the wave on this tile while the menu is up (dockMenuClosed
+      // thaws it); the bubble goes, the menu names the app itself.
+      mag.frozen = true;
+      bubble.classList.remove("on");
+      const r = b.querySelector(".tile").getBoundingClientRect();
+      window.webkit.messageHandlers.dock.postMessage({
+        type: "menu", file, name: b.dataset.name, pinned, exists: !!b.dataset.exists,
+        running: b.classList.contains("running"),
+        x: Math.round(r.left), y: Math.round(r.bottom + 6),
+      });
+      return;
+    }
+    state.menuFor = b;
+    menu.replaceChildren(
+      mi("Open", () => openApp(file)),
+      mi(pinned ? "Remove from Dock" : "Keep in Dock", async () => apply((await post("/api/dock/pin", { file, pinned: !pinned })).apps)),
+      mi("Show in Finder", () => post("/api/dock/reveal", { file })),
+      mi("Open in Browser", null, { href: location.origin + "/open?_file=" + encodeURIComponent(file) }),
+      ...(pinned ? [] : [hr(), mi("Forget", async () => apply((await post("/api/dock/remove", { file })).apps))])
+    );
+    pointerGone();
+    menu.classList.add("on");
+    const m = menu.getBoundingClientRect();
+    // The Dock hangs from the menu bar, so the menu drops BELOW the tray
+    // (the real Dock's menus rise above it). Make room underneath; the
+    // native panel grows to the reported size.
+    const need = m.height + 14;
+    wrap.style.paddingBottom = need + "px";
+    const r = b.getBoundingClientRect(), t = tray.getBoundingClientRect();
+    let left = r.left + r.width / 2 - m.width / 2;
+    left = Math.min(Math.max(4, left), Math.max(4, window.innerWidth - m.width - 4));
+    const top = t.bottom + 8;
+    menu.style.left = left + "px"; menu.style.top = top + "px";
+    report();
+  }
+  function hideMenu() {
+    if (!menu.classList.contains("on")) return;
+    menu.classList.remove("on"); state.menuFor = null; wrap.style.paddingBottom = "";
+    report(); refresh();
+  }
+  function menuKey(e) {
+    const lis = [...menu.querySelectorAll("li[role=menuitem]")];
+    let i = lis.findIndex(l => l.classList.contains("focus"));
+    if (e.key === "Escape") { e.preventDefault(); hideMenu(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); lis[i]?.classList.remove("focus"); lis[(i + 1) % lis.length].classList.add("focus"); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); lis[i]?.classList.remove("focus"); lis[i < 0 ? lis.length - 1 : (i - 1 + lis.length) % lis.length].classList.add("focus"); }
+    else if (e.key === "Enter") { e.preventDefault(); (lis[i]?.querySelector("a") || lis[i])?.click(); }
+  }
+  document.addEventListener("pointerdown", (e) => { if (!menu.contains(e.target)) hideMenu(); }, true);
+  window.addEventListener("blur", hideMenu);
+  document.addEventListener("contextmenu", (e) => { if (!e.target.closest?.(".app")) e.preventDefault(); });
+
+  // ---------- drag to reorder (pointer based) ----------
+  function onPointerDown(e) {
+    const b = e.target.closest?.(".app");
+    if (!b || e.button !== 0) return;
+    const start = { x: e.clientX, y: e.clientY, b, id: e.pointerId, moved: false };
+    const move = (ev) => {
+      if (ev.pointerId !== start.id) return;
+      if (!start.moved) {
+        if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 6) return;
+        start.moved = true; beginDrag(b);
+      }
+      dragMove(ev.clientX);
+    };
+    const up = (ev) => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
+      if (start.moved) { ev.preventDefault(); endDrag(); }
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+  }
+  function beginDrag(b) {
+    state.dragging = b; pointerGone(); hideMenu();
+    b.classList.add("dragging");
+  }
+  function pinnedNodes() { return items().filter(n => n.classList.contains("app") && n.dataset.pinned && n !== state.dragging); }
+  function dragMove(x) {
+    const b = state.dragging, dragIsPinned = !!b.dataset.pinned;
+    // Unpinned item still right of the pin separator: stays in the recent zone (no pin).
+    if (!dragIsPinned && sepA.isConnected && x > sepA.getBoundingClientRect().right) {
+      b.dataset.pinDrop = ""; return;
+    }
+    b.dataset.pinDrop = "1";
+    let ref = null;
+    for (const n of pinnedNodes()) { const r = n.getBoundingClientRect(); if (x < r.left + r.width / 2) { ref = n; break; } }
+    if (!ref) ref = [...tray.children].find(c => c !== b && !(c.classList.contains("app") && c.dataset.pinned)) || null;
+    if (b.nextSibling !== ref) tray.insertBefore(b, ref);
+  }
+  async function endDrag() {
+    const b = state.dragging; if (!b) return;
+    const file = b.dataset.file, wasPinned = !!b.dataset.pinned, pinDrop = b.dataset.pinDrop === "1";
+    delete b.dataset.pinDrop; b.classList.remove("dragging");
+    state.dragging = null; state.dragEndedAt = Date.now();
+    if (pinDrop) {
+      const files = items().filter(n => n.classList.contains("app") && (n.dataset.pinned || n === b)).map(n => n.dataset.file);
+      try {
+        if (!wasPinned) await post("/api/dock/pin", { file, pinned: true });
+        const r = await post("/api/dock/order", { files });
+        apply(r.apps);
+      } catch (_) { refresh(); }
+    } else render();
+  }
+
+  // ---------- lifecycle ----------
+  let timer = null;
+  function schedule() {
+    clearInterval(timer); timer = null;
+    if (document.visibilityState === "visible") timer = setInterval(refresh, 1500);
+  }
+  document.addEventListener("visibilitychange", () => { schedule(); if (document.visibilityState === "visible") refresh(); });
+  window.dockShown = () => { hideMenu(); pointerGone(); refresh(); };
+  window.dockMenuClosed = () => {
+    mag.frozen = false;
+    if (!tray.matches(":hover")) pointerGone();
+  };
+  window.addEventListener("resize", report);
+  refresh(); schedule();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+"""The menu-bar dock: dock_store.py, appfile.icon_bytes, the /api/dock routes."""
+import itertools
+import json
+import os
+import sys
+import urllib.parse
+
+import pytest
+
+from fused_render_lite import appfile, container, dock_store, env, server
+from tests.conftest import ENTRY_HTML, ICON_SVG
+
+
+@pytest.fixture(autouse=True)
+def stdlib_python(monkeypatch):
+    # Same as test_server: POST /api/open would otherwise build a venv with uv.
+    monkeypatch.setattr(env, "base_python", lambda: sys.executable)
+    monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
+    monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
+
+
+@pytest.fixture(autouse=True)
+def ticking_clock(monkeypatch):
+    # Deterministic, strictly increasing openedAt so ordering/eviction are testable.
+    counter = itertools.count(1)
+    monkeypatch.setattr(dock_store, "_now", lambda: f"2026-09-15T00:00:{next(counter):02d}.000000Z")
+    dock_store._icon_cache.clear()
+
+
+def files_of(apps):
+    return [a["file"] for a in apps]
+
+
+# ---- store -----------------------------------------------------------------
+
+
+def test_record_open_upserts_and_orders_recent_first(tmp_path):
+    a, b = str(tmp_path / "a.fused"), str(tmp_path / "b.fused")
+    dock_store.record_open(a, "A")
+    dock_store.record_open(b, "B")
+    assert files_of(dock_store.list_apps()) == [b, a]
+    # re-open a: same entry (no duplicate), moves to front, name updates
+    dock_store.record_open(str(tmp_path / "." / "a.fused"), "A2")
+    apps = dock_store.list_apps()
+    assert files_of(apps) == [a, b]
+    assert apps[0]["name"] == "A2"
+    # canonical key on disk
+    stored = json.load(open(os.path.join(os.environ["FUSED_RENDER_LITE_HOME"], "dock.json")))
+    assert [e["file"] for e in stored["apps"]] == [a, b]
+
+
+def test_eviction_keeps_pinned(tmp_path):
+    pinned = str(tmp_path / "pinned.fused")
+    dock_store.record_open(pinned, "P")
+    dock_store.set_pinned(pinned, True)
+    names = [str(tmp_path / f"r{i}.fused") for i in range(dock_store.MAX_RECENT + 3)]
+    for f in names:
+        dock_store.record_open(f, os.path.basename(f))
+    apps = dock_store.list_apps()
+    assert apps[0]["file"] == pinned and apps[0]["pinned"] is True
+    recent = files_of(apps[1:])
+    assert len(recent) == dock_store.MAX_RECENT
+    assert recent == list(reversed(names))[: dock_store.MAX_RECENT]  # oldest evicted
+
+
+def test_set_pinned_order_unknown_and_unpin(tmp_path):
+    a, b, c = (str(tmp_path / f"{n}.fused") for n in "abc")
+    dock_store.record_open(a, "A")
+    dock_store.record_open(b, "B")
+    dock_store.set_pinned(b, True)
+    dock_store.set_pinned(a, True)
+    assert files_of(dock_store.list_apps()) == [b, a]  # pinning appends to the pinned group
+    # unknown + pinned -> new entry named after the file stem
+    dock_store.set_pinned(c, True)
+    apps = dock_store.list_apps()
+    assert files_of(apps) == [b, a, c]
+    assert apps[2]["name"] == "c" and apps[2]["openedAt"] is None
+    # unknown + unpinned -> no-op
+    dock_store.set_pinned(str(tmp_path / "zzz.fused"), False)
+    assert len(dock_store.list_apps()) == 3
+    # unpin b: falls into the recent group, ordered by openedAt (c has none -> last)
+    dock_store.set_pinned(b, False)
+    apps = dock_store.list_apps()
+    assert files_of(apps) == [a, c, b]
+    assert [x["pinned"] for x in apps] == [True, True, False]
+
+
+def test_remove_and_reorder(tmp_path):
+    a, b, c, d = (str(tmp_path / f"{n}.fused") for n in "abcd")
+    for f in (a, b, c, d):
+        dock_store.record_open(f, f)
+    for f in (a, b, c):
+        dock_store.set_pinned(f, True)
+    assert files_of(dock_store.list_apps()) == [a, b, c, d]
+    # listed pinned first in given order; unlisted pinned (a) after; unpinned/unknown ignored
+    dock_store.reorder([c, d, "/nope.fused", b])
+    assert files_of(dock_store.list_apps()) == [c, b, a, d]
+    dock_store.remove(b)
+    dock_store.remove(d)
+    assert files_of(dock_store.list_apps()) == [c, a]
+    dock_store.remove("/never/there.fused")
+    assert files_of(dock_store.list_apps()) == [c, a]
+
+
+def test_corrupt_or_missing_json_is_empty(lite_home):
+    assert dock_store.list_apps() == []
+    path = lite_home / "dock.json"
+    path.write_text("{not json")
+    assert dock_store.list_apps() == []
+    dock_store.record_open("/x/a.fused", "A")  # recovers by overwriting
+    assert len(dock_store.list_apps()) == 1
+    path.write_text(json.dumps({"apps": "nope"}))
+    assert dock_store.list_apps() == []
+
+
+def test_list_apps_shape(v2_fused_icon, v2_fused, tmp_path):
+    ghost = str(tmp_path / "ghost.fused")
+    dock_store.record_open(v2_fused, "demo")
+    dock_store.record_open(v2_fused_icon, "iconic")
+    dock_store.record_open(ghost, "ghost")
+    by_file = {a["file"]: a for a in dock_store.list_apps(running={v2_fused})}
+    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt", "hasIcon"}
+    assert by_file[v2_fused]["running"] is True and by_file[v2_fused]["hasIcon"] is False
+    assert by_file[v2_fused_icon]["running"] is False and by_file[v2_fused_icon]["hasIcon"] is True
+    assert by_file[ghost]["exists"] is False and by_file[ghost]["hasIcon"] is False
+    assert by_file[v2_fused]["exists"] is True
+
+
+# ---- icon_bytes ------------------------------------------------------------
+
+
+def test_icon_bytes_v2_and_v1(v2_fused_icon, v1_fused_icon, v2_fused, v1_fused):
+    assert appfile.icon_bytes(v2_fused_icon) == ICON_SVG
+    assert appfile.icon_bytes(v1_fused_icon) == ICON_SVG
+    assert appfile.icon_bytes(v2_fused) is None
+    assert appfile.icon_bytes(v1_fused) is None
+    assert appfile.icon_bytes("/nope/missing.fused") is None
+
+
+def test_icon_bytes_extracted_dir_overrides(v2_fused_icon):
+    result = appfile.open_app_file(v2_fused_icon)
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(b"<svg>mine</svg>")
+    assert appfile.icon_bytes(v2_fused_icon) == b"<svg>mine</svg>"
+    # an over-cap override is ignored; the shipped icon still shows
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(b"x" * (appfile.ICON_MAX_BYTES + 1))
+    assert appfile.icon_bytes(v2_fused_icon) == ICON_SVG
+
+
+def test_icon_bytes_oversized_is_none(tmp_path):
+    big = b"<svg>" + b"x" * appfile.ICON_MAX_BYTES + b"</svg>"
+    out = tmp_path / "big.fused"
+    container.write(str(out), {"name": "big", "entry": "index.html"},
+                    [("index.html", ENTRY_HTML.encode()), ("icon.svg", big)])
+    assert appfile.icon_bytes(str(out)) is None
+    # garbage file: never raises
+    junk = tmp_path / "junk.fused"
+    junk.write_bytes(b"not a fused file at all")
+    assert appfile.icon_bytes(str(junk)) is None
+
+
+# ---- routes ----------------------------------------------------------------
+
+
+def test_dock_api_flow(client, v2_fused_icon, v2_fused):
+    status, _, body = client.get("/api/dock")
+    assert status == 200 and json.loads(body) == {"apps": []}
+
+    status, _, body = client.post("/api/open", {"file": v2_fused_icon})
+    assert status == 200, body
+    status, _, body = client.post("/api/open", {"file": v2_fused})
+    assert status == 200, body
+    apps = json.loads(client.get("/api/dock")[2])["apps"]
+    assert files_of(apps) == [v2_fused, v2_fused_icon]
+    assert apps[1]["name"] == "iconic" and apps[1]["hasIcon"] is True and apps[1]["exists"] is True
+    assert apps[0]["running"] is False
+
+    status, _, body = client.post("/api/dock/pin", {"file": v2_fused_icon, "pinned": True})
+    apps = json.loads(body)["apps"]
+    assert status == 200 and files_of(apps) == [v2_fused_icon, v2_fused] and apps[0]["pinned"] is True
+    status, _, body = client.post("/api/dock/pin", {"file": v2_fused, "pinned": True})
+    assert files_of(json.loads(body)["apps"]) == [v2_fused_icon, v2_fused]
+    status, _, body = client.post("/api/dock/order", {"files": [v2_fused, v2_fused_icon]})
+    assert status == 200 and files_of(json.loads(body)["apps"]) == [v2_fused, v2_fused_icon]
+    status, _, body = client.post("/api/dock/order", {"files": "nope"})
+    assert status == 400
+    status, _, body = client.post("/api/dock/remove", {"file": v2_fused})
+    assert status == 200 and files_of(json.loads(body)["apps"]) == [v2_fused_icon]
+
+    # icon
+    status, headers, body = client.get("/api/dock/icon?" + urllib.parse.urlencode({"file": v2_fused_icon}))
+    assert status == 200 and body == ICON_SVG
+    assert headers["Content-Type"] == "image/svg+xml"
+    assert headers["Cache-Control"] == "no-cache"
+    status, _, _ = client.get("/api/dock/icon?" + urllib.parse.urlencode({"file": v2_fused}))
+    assert status == 404
+    status, _, _ = client.get("/api/dock/icon?file=relative.fused")
+    assert status == 404
+
+
+def test_dock_post_requires_guard(client, v2_fused):
+    for action, body in (("open", {"file": v2_fused}), ("pin", {"file": v2_fused, "pinned": True}),
+                         ("remove", {"file": v2_fused}), ("order", {"files": []}),
+                         ("reveal", {"file": v2_fused}), ("choose", {}), ("home", {})):
+        status, _, _ = client.post(f"/api/dock/{action}", body, headers={"X-Fused": ""})
+        assert status == 403, action
+    status, _, _ = client.post("/api/dock/bogus", {})
+    assert status == 404
+
+
+def test_dock_open_without_and_with_hook(client, v2_fused, monkeypatch, tmp_path):
+    status, _, body = client.post("/api/dock/open", {"file": v2_fused})
+    reply = json.loads(body)
+    assert status == 200 and reply == {
+        "ok": True, "native": False,
+        "view": "/open?_file=" + urllib.parse.quote(v2_fused, safe="/")}
+    status, _, _ = client.post("/api/dock/open", {"file": str(tmp_path / "missing.fused")})
+    assert status == 400
+    status, _, _ = client.post("/api/dock/open", {"file": "relative.fused"})
+    assert status == 400
+
+    called = []
+    monkeypatch.setitem(server.native_hooks, "focus_or_open", called.append)
+    unnormalised = os.path.join(os.path.dirname(v2_fused), ".", os.path.basename(v2_fused))
+    status, _, body = client.post("/api/dock/open", {"file": unnormalised})
+    assert status == 200 and json.loads(body) == {"ok": True, "native": True}
+    assert called == [v2_fused]
+
+
+def test_dock_hooks_running_choose_home(client, v2_fused, monkeypatch):
+    dock_store.record_open(v2_fused, "demo")
+    assert json.loads(client.get("/api/dock")[2])["apps"][0]["running"] is False
+    monkeypatch.setitem(server.native_hooks, "open_files", lambda: {v2_fused})
+    assert json.loads(client.get("/api/dock")[2])["apps"][0]["running"] is True
+
+    assert json.loads(client.post("/api/dock/choose", {})[2]) == {"ok": False}
+    assert json.loads(client.post("/api/dock/home", {})[2]) == {"ok": False, "view": "/"}
+    calls = []
+    monkeypatch.setitem(server.native_hooks, "choose_file", lambda: calls.append("choose"))
+    monkeypatch.setitem(server.native_hooks, "show_home", lambda: calls.append("home"))
+    assert json.loads(client.post("/api/dock/choose", {})[2]) == {"ok": True}
+    assert json.loads(client.post("/api/dock/home", {})[2]) == {"ok": True}
+    assert calls == ["choose", "home"]
+
+
+def test_dock_reveal(client, v2_fused, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(server.subprocess, "Popen", lambda argv, **kw: spawned.append(argv))
+    status, _, body = client.post("/api/dock/reveal", {"file": v2_fused})
+    if sys.platform == "darwin":
+        assert json.loads(body) == {"ok": True} and spawned == [["open", "-R", v2_fused]]
+    else:
+        assert json.loads(body) == {"ok": False} and spawned == []
+
+
+def test_dock_page_route(client):
+    if not os.path.isfile(os.path.join(server.STATIC_DIR, "dock.html")):
+        pytest.skip("static/dock.html not present yet")
+    status, headers, _ = client.get("/dock")
+    assert status == 200 and headers["Content-Type"].startswith("text/html")

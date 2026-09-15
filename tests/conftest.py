@@ -86,3 +86,32 @@ def client():
     srv.shutdown()
     srv.server_close()
     thread.join(timeout=5)
+
+
+ICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle r="8" cx="8" cy="8"/></svg>'
+
+
+@pytest.fixture
+def v2_fused_icon(tmp_path):
+    """Like ``v2_fused`` plus a shipped ``icon.svg`` (the menu-bar dock's card icon)."""
+    from fused_render_lite import container
+
+    out = tmp_path / "iconic.fused"
+    container.write(
+        str(out),
+        {"name": "iconic", "entry": "index.html"},
+        [("index.html", ENTRY_HTML.encode()), ("calc.py", CALC_PY.encode()),
+         ("icon.svg", ICON_SVG)],
+    )
+    return str(out)
+
+
+@pytest.fixture
+def v1_fused_icon(tmp_path):
+    out = tmp_path / "legacy-icon.fused"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(
+            {"fused_app_file": 1, "name": "legacy-icon", "entry": "index.html"}))
+        zf.writestr("files/index.html", ENTRY_HTML)
+        zf.writestr("files/icon.svg", ICON_SVG)
+    return str(out)

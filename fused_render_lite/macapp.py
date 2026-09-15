@@ -83,6 +83,44 @@ def pick_port(start: int = DEFAULT_PORT, tries: int = 20) -> int:
     return 0  # let the OS pick
 
 
+def _install_dock_hooks(state: dict) -> None:
+    """What the server's /api/dock/* routes call, from the HTTP thread: every
+    hook hops to the main thread itself and returns at once, except
+    ``open_files`` which only reads plain attributes (WindowManager keeps it
+    thread-safe on purpose)."""
+    from PyObjCTools import AppHelper
+
+    manager = state["windows"]
+    dock = state["dock"]
+
+    def focus_or_open(fs_path: str) -> None:
+        def run():
+            dock.close_popover()
+            manager.focus_or_open(fs_path)
+        AppHelper.callAfter(run)
+
+    def choose_file() -> None:
+        def run():
+            dock.close_popover()
+            manager.choose_file()
+        # One extra tick: started from inside the popover's event handling
+        # the modal panel gets its clicks eaten; a clean run-loop pass fixes it.
+        AppHelper.callAfter(lambda: AppHelper.callAfter(run))
+
+    def show_home() -> None:
+        def run():
+            dock.close_popover()
+            manager.show_home()
+        AppHelper.callAfter(run)
+
+    server.native_hooks.update({
+        "open_files": manager.open_files,
+        "focus_or_open": focus_or_open,
+        "choose_file": choose_file,
+        "show_home": show_home,
+    })
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -118,7 +156,8 @@ def main() -> None:
     import rumps  # macOS only
 
     port = pick_port()
-    state = {"ready": False, "docs": False, "pending": [], "server": None, "windows": None}
+    state = {"ready": False, "docs": False, "pending": [], "server": None, "windows": None,
+             "dock": None}
 
     def show(target: str) -> None:
         """Open ``target`` in a new window of this app. Callable from any
@@ -202,12 +241,20 @@ def main() -> None:
         _write_pidfile(actual)
         if state["windows"] is not None:
             state["windows"].set_port(actual)
+        if state["dock"] is not None:
+            state["dock"].set_port(actual)
         # argv files join the queue BEFORE the ready flip so they dedupe
         # against the openFiles event AppKit already delivered for them.
         for f in argv_files:
             open_file(f)
         state["ready"] = True
         logger.info("server ready on port %s", actual)
+        if state["dock"] is not None:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(state["dock"].server_ready)
+            if os.environ.get("FUSED_RENDER_LITE_DOCK_SHOW"):  # dev: screenshot the tray
+                AppHelper.callAfter(state["dock"].show_popover)
         pending, state["pending"] = state["pending"], []
         for target in pending:
             show(target)
@@ -264,6 +311,40 @@ def main() -> None:
             state["windows"] = WindowManager(port, quit=lambda: quit_app(None))
         except Exception:  # noqa: BLE001 — logged; browser fallback is the design
             logger.exception("windows unavailable; falling back to browser tabs")
+        # The menu-bar Dock (menubar_dock.py) replaces rumps' menu with a
+        # popover tray of pinned + recent apps; right-click keeps the old
+        # entries. Needs the window manager (focus-or-open is its point).
+        # Guarded: without it the rumps menu above stays as it was.
+        if state["windows"] is not None:
+            try:
+                from fused_render_lite.menubar_dock import DockController
+
+                state["dock"] = DockController(
+                    app._nsapp.nsstatusitem, port,
+                    actions={"show_home": show_home,
+                             "open_browser": lambda: webbrowser.open(open_url(port, None)),
+                             "open_logs": lambda: subprocess.run(
+                                 ["open", "-R", paths.log_path()], check=False),
+                             "quit": lambda: quit_app(None)})
+                _install_dock_hooks(state)
+                if os.environ.get("FUSED_RENDER_LITE_DOCK_SHOW"):
+                    # Dev only: SIGUSR1 shows the tray, so a script can
+                    # screenshot it without Accessibility access to click.
+                    # Main thread here — signal.signal insists on it.
+                    import signal
+
+                    from PyObjCTools import AppHelper
+
+                    signal.signal(signal.SIGUSR1, lambda *_: AppHelper.callAfter(
+                        state["dock"].show_popover))
+                    # Python signal handlers run only between bytecodes; an
+                    # idle AppKit run loop executes none. A no-op tick keeps
+                    # the interpreter breathing so the signal lands.
+                    app.dock_dev_tick = rumps.Timer(lambda _t: None, 0.5)
+                    app.dock_dev_tick.start()
+            except Exception:  # noqa: BLE001
+                logger.exception("menu-bar Dock unavailable; keeping the status-item menu")
+                state["dock"] = None
         threading.Thread(target=bootstrap, daemon=True).start()
 
     # Held on `app`: an unreferenced rumps.Timer is collected before it fires.

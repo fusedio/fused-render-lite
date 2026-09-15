@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import urllib.parse
 import webbrowser
 
 import objc
@@ -102,6 +103,25 @@ def _nsurl(url: str):
     return NSURL.URLWithString_(url)
 
 
+def app_file_of(url: str | None) -> str | None:
+    """The absolute .fused path a window URL is showing (``/open?_file=…``),
+    or None for the launcher and everything else. `/open` keeps `_file` in
+    the address for the life of the app page (the app itself runs in an
+    iframe below it), so this is a stable identity for the window — the menu
+    bar Dock's running dot and focus-or-open key on it."""
+    if not url:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+    if parts.path != "/open":
+        return None
+    q = urllib.parse.parse_qs(parts.query)
+    val = (q.get("_file") or q.get("file") or [None])[0]
+    return os.path.abspath(val) if val else None
+
+
 def _open_external(url: str) -> None:
     """Hand a URL to the default browser via LaunchServices."""
     if not NSWorkspace.sharedWorkspace().openURL_(_nsurl(url)):
@@ -156,6 +176,10 @@ class _WebDelegate(NSObject):
         )
         logger.debug("navigation %s -> %s", url, verdict)
         if verdict == "allow":
+            if is_main:
+                # Plain Python attribute, main thread: the server thread reads
+                # it (WindowManager.open_files) without touching WebKit.
+                self._window.app_file = app_file_of(url)
             decision(WKNavigationActionPolicyAllow)
         elif verdict == "download":
             decision(WKNavigationActionPolicyDownload)
@@ -302,6 +326,7 @@ class _Window:
 
     def __init__(self, manager: "WindowManager", url: str, configuration):
         self.manager = manager
+        self.app_file: str | None = app_file_of(url)
         style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                  | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
         w, h = DEFAULT_SIZE
@@ -347,6 +372,8 @@ class _Window:
         self.ns.setTitle_(title or APP_NAME)
 
     def show(self) -> None:
+        if self.ns.isMiniaturized():  # a Dock click restores a minimized window
+            self.ns.deminiaturize_(None)
         self.ns.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
 
@@ -504,6 +531,40 @@ class WindowManager:
 
     def has_windows(self) -> bool:
         return bool(self._windows)
+
+    # ---- what the menu-bar Dock asks (see menubar_dock.py, server.native_hooks)
+
+    def open_files(self) -> set[str]:
+        """The .fused files currently showing in a window. Safe from ANY
+        thread: reads Python attributes only, never WebKit."""
+        return {w.app_file for w in list(self._windows) if w.app_file}
+
+    def window_for(self, fs_path: str) -> _Window | None:
+        fs_path = os.path.abspath(fs_path)
+        for w in self._windows:
+            if w.app_file == fs_path:
+                return w
+        return None
+
+    def focus_or_open(self, fs_path: str) -> _Window:
+        """Dock semantics: an app already open comes to the front (its most
+        recently used window if several), otherwise it opens fresh."""
+        win = self.window_for(fs_path)
+        if win is not None:
+            for w in reversed(self._windows):  # prefer the key/front one
+                if w.app_file == win.app_file and (w is self.key() or w is self.front()):
+                    win = w
+                    break
+            win.show()
+            return win
+        return self.open_file(fs_path)
+
+    def choose_file(self) -> None:
+        """The Dock's "Open…" slot: pick .fused files. The tray is a
+        non-activating panel, so this app may not be active when the click
+        lands — activate first or the modal panel opens behind other apps."""
+        NSApp.activateIgnoringOtherApps_(True)
+        self._menu_target.openDocument_(None)
 
     def front(self) -> _Window | None:
         return self.key() or (self._windows[-1] if self._windows else None)

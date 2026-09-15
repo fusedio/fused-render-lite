@@ -18,6 +18,10 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
+  Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
+  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}]}
+  GET  /api/dock/icon?file=<abs>               the app's icon.svg, or 404
+  POST /api/dock/open|pin|remove|order|reveal|choose|home
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
   fused.daemon (background_routes.py, copied from fused-render):
@@ -41,6 +45,8 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -48,7 +54,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_lite import __version__, appfile, background_apps, background_routes, engine_host, env, showcase, jobs, paths
+from fused_render_lite import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, showcase, jobs, paths
 from fused_render_lite._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_lite.routes import ai_relay, ai_routes
 
@@ -61,6 +67,15 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_DROP_BYTES = 1024 * 1024 * 1024
 _HEAD_RE = re.compile(r"<head[^>]*>", re.I)
+
+#: What the native shell (macapp.py) plugs in so the dock page can drive it:
+#:   "open_files":    () -> set[str]   .fused files with a window open right now
+#:   "focus_or_open": (file) -> None   raise that window or open a new one (non-blocking)
+#:   "choose_file":   () -> None       the native open-file panel
+#:   "show_home":     () -> None       the placeholder window
+#: Absent (CLI run, tests) the routes answer `native: false` and the page
+#: navigates itself instead.
+native_hooks: dict = {}
 
 mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
@@ -92,7 +107,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if "Cache-Control" not in (extra or {}):
+            self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -154,6 +170,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"showcase": showcase.list_showcase()})
             if route == "/api/showcase/preview":
                 return self._showcase_preview(q)
+            if route == "/dock":
+                return self._static("dock.html")
+            if route == "/api/dock":
+                return self._json({"apps": dock_store.list_apps(self._dock_running())})
+            if route == "/api/dock/icon":
+                return self._dock_icon(q)
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             if route == "/api/apps/background/status":
@@ -191,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_mkdir()
             if route == "/api/jobs":
                 return self._jobs_report()
+            if route.startswith("/api/dock/"):
+                return self._dock(route[len("/api/dock/"):])
             if route == "/api/jobs/clear":
                 return self._guarded() and self._json({"cleared": jobs.clear_finished()})
             m = re.match(r"^/api/jobs/([^/]+)/(cancel|dismiss)$", route)
@@ -267,6 +291,10 @@ class Handler(BaseHTTPRequestHandler):
             result = appfile.open_app_file(file)
         except appfile.AppFileError as exc:
             return self._error(str(exc))
+        try:
+            dock_store.record_open(file, result["name"])
+        except OSError:  # the dock is a convenience; opening the app is not
+            logger.warning("could not record %s in dock.json", file, exc_info=True)
         env.ensure(result["dir"])
         result["view"] = "/render?path=" + urllib.parse.quote(result["entry"], safe="/")
         result["install"] = env.status(result["dir"])
@@ -315,6 +343,74 @@ class Handler(BaseHTTPRequestHandler):
             os.remove(dest)
             return self._error(str(exc))
         self._json({"file": dest})
+
+    # ---- menu-bar dock (dock_store.py) --------------------------------------
+
+    @staticmethod
+    def _dock_running() -> set[str]:
+        hook = native_hooks.get("open_files")
+        if hook is None:
+            return set()
+        try:
+            return set(hook())
+        except Exception:  # noqa: BLE001 — a broken hook must not 500 the dock
+            logger.exception("open_files hook failed")
+            return set()
+
+    def _dock_icon(self, q: dict) -> None:
+        file = q.get("file") or ""
+        data = appfile.icon_bytes(file) if os.path.isabs(file) else None
+        if data is None:
+            return self._error("not found", 404)
+        self._send(200, data, "image/svg+xml", {"Cache-Control": "no-cache"})
+
+    def _dock(self, action: str) -> None:
+        if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home"):
+            return self._error("not found", 404)
+        if not self._guarded():
+            return
+        body = self._json_body() or {}
+        if action == "order":
+            files = body.get("files")
+            if not isinstance(files, list):
+                return self._error("'files' must be a list of paths")
+            dock_store.reorder([f for f in files if isinstance(f, str)])
+            return self._json({"apps": dock_store.list_apps(self._dock_running())})
+        if action == "choose":
+            hook = native_hooks.get("choose_file")
+            if hook is None:
+                return self._json({"ok": False})
+            hook()
+            return self._json({"ok": True})
+        if action == "home":
+            hook = native_hooks.get("show_home")
+            if hook is None:
+                return self._json({"ok": False, "view": "/"})
+            hook()
+            return self._json({"ok": True})
+        file = body.get("file")
+        if not isinstance(file, str) or not file or not os.path.isabs(file):
+            return self._error("'file' must be an absolute .fused file path")
+        file = os.path.abspath(file)
+        if action == "pin":
+            dock_store.set_pinned(file, bool(body.get("pinned")))
+        elif action == "remove":
+            dock_store.remove(file)
+        elif action == "open":
+            if not os.path.isfile(file):
+                return self._error(f"no such file: {file}")
+            hook = native_hooks.get("focus_or_open")
+            if hook is None:
+                return self._json({"ok": True, "native": False,
+                                   "view": "/open?_file=" + urllib.parse.quote(file, safe="/")})
+            hook(file)
+            return self._json({"ok": True, "native": True})
+        elif action == "reveal":
+            if sys.platform != "darwin":
+                return self._json({"ok": False})
+            subprocess.Popen(["open", "-R", file])
+            return self._json({"ok": True})
+        self._json({"apps": dock_store.list_apps(self._dock_running())})
 
     # ---- runPython --------------------------------------------------------
 
