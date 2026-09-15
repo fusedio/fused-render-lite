@@ -11,8 +11,10 @@ A release is: bump `__version__`, land it on `main` of the **`lite` remote**
 (`vasu2001/fused-render-lite`), tag that commit `vX.Y.Z`, push the tag. The tag
 push triggers `.github/workflows/release.yml`: `prepare-release` creates the
 GitHub Release, then the macos-26 job builds, signs, (notarizes) and uploads
-`RenderLite-X.Y.Z.dmg` + the wheel. Afterwards, add the shipped DMG size to
-the table in `STATUS.md` — every version has a row.
+`RenderLite-X.Y.Z.dmg` + the wheel, and `bump-homebrew` pushes the new
+version + sha256 into `Casks/fused-render-lite.rb` of fusedio/homebrew-tap
+(needs the `TAP_PUSH_TOKEN` repo secret). Afterwards, add the shipped DMG
+size to the table in `STATUS.md` — every version has a row.
 
 **Remotes.** The local checkout `lite-main` tracks `lite/main`. `origin` is
 fusedio/fused-render (the full app) — **never push there**. `main` on `lite`
@@ -90,6 +92,7 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 | Remote | `lite` = vasu2001/fused-render-lite; `origin` is off limits |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
 | Artifacts | `RenderLite-X.Y.Z.dmg`, `fused_render_lite-X.Y.Z-py3-none-any.whl` |
+| Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/fused-render-lite.rb`; check `brew update && brew info --cask fusedio/tap/fused-render-lite` |
 | After release | size row in `STATUS.md` |
 | Do NOT edit | `pyproject.toml` version |
 
