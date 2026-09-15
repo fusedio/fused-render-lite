@@ -54,6 +54,15 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.6
+
+Dock: running indicator is a green dot inset in the tile's upper-left corner
+(headroom above tiles removed); Home tile leads the pinned zone wearing the
+app icon; placeholder tiles show the first letter on a palette-hashed
+background until a real icon arrives. Window title bar gains a Home button
+next to Open in Browser. GitHub links added to the dev and lite UIs. No
+packaging change.
+
 ## 0.8.5
 
 Fix (dock): the tray Home tile and "Open in app" focus an open Home window
