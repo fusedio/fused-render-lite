@@ -7,7 +7,9 @@ import pytest
 
 from fused_render_lite import appfile, container, env, showcase
 
-# Every member a showcase app must NOT call: lite throws on these.
+# Every member a showcase app must NOT call: lite throws on these. An app that
+# probes one inside try/catch and falls back (OpenWhisper: fused.capture ->
+# getUserMedia) lists it under "guarded" in showcase.json.
 UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.snapshot", "autoReload(true")
 
 
@@ -40,7 +42,11 @@ def test_sidecar_matches_files():
 
 
 def test_showcase_call_nothing_lite_rejects():
+    with open(showcase.SIDECAR, encoding="utf-8") as f:
+        meta = json.load(f)
     for path in showcase.showcase_files():
+        guarded = set(meta.get(os.path.basename(path), {}).get("guarded", ()))
+        assert guarded <= set(UNSUPPORTED), path
         index = appfile.read_manifest(path)
         assert index.get("fused_app_file") == container.VERSION, path
         for entry in index["files"]:
@@ -48,6 +54,8 @@ def test_showcase_call_nothing_lite_rejects():
                 text = container.read_member(path, index, entry["path"], appfile.MAX_ENTRY_BYTES)
                 text = text.decode("utf-8", "replace")
                 for name in UNSUPPORTED:
+                    if name in guarded:
+                        continue
                     assert name not in text, f"{os.path.basename(path)}:{entry['path']} uses {name}"
         # each declares its own environment: no legacy numpy/pandas install on first click
         assert container.find(index, "pyproject.toml") is not None, path

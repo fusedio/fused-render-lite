@@ -1,10 +1,64 @@
 {
-  "note-taker.fused": {
-    "title": "Note taker",
-    "description": "A single HTML page that saves notes next to itself with fused.readFile and fused.writeFile. No Python."
+  "01_OpenBot.fused": {
+    "title": "OpenBot",
+    "description": "Autonomous browsing bots on your own machine: each gets a headless Chrome, a chat thread for tasks, scheduled routines and reusable skills. Runs as a resident worker."
   },
-  "pipeline-intelligence.fused": {
-    "title": "Pipeline Intelligence",
-    "description": "A sales-pipeline dashboard: fused.runPython generates and scores deals with a transparent weighted model, with what-if sliders."
+  "02_DoodleShooter.fused": {
+    "title": "Doodle District",
+    "description": "A first-person survival shooter drawn in ballpoint on notebook paper. Grapple, slice bullets back, lob grenades. Everything is procedural three.js, no Python."
+  },
+  "03_OpenRelax.fused": {
+    "title": "Open Relax",
+    "description": "A break-time companion: mix generated ambient sounds, follow guided breathing, and track daily minutes with a goal ring, heatmap and badges. Reminders ring as macOS notifications."
+  },
+  "04_ClaudeUsage.fused": {
+    "title": "Claude Usage",
+    "description": "A dashboard of your Claude Code token usage and limits across accounts, read from the local Claude Code state with fused.runPython."
+  },
+  "05_OpenWhisper.fused": {
+    "title": "OpenWhisper",
+    "description": "Local, offline speech-to-text for macOS. Press the mic, talk, and Whisper types the transcript into whatever app has focus. Audio never leaves the machine.",
+    "guarded": [
+      "fused.capture"
+    ]
+  },
+  "06_OpenColor.fused": {
+    "title": "OpenColor",
+    "description": "A color palette explorer: pick a base color and build complementary, triadic, analogous or monochrome harmonies with WCAG contrast checks and CSS export."
+  },
+  "07_OpenDesign.fused": {
+    "title": "OpenDesign",
+    "description": "Turn an app idea into a near-final UI mock plus a build brief for an AI coding agent, rendered with fused.ai.image or a remote endpoint."
+  },
+  "08_OpenSVG.fused": {
+    "title": "OpenSVG",
+    "description": "Trace raster images into SVG. Drop a PNG or JPG, tune colour count, simplification and curve smoothing, and export. A numpy and Pillow tracer via fused.runPython."
+  },
+  "09_OpenCPU.fused": {
+    "title": "OpenCPU",
+    "description": "Find and kill running processes on macOS and Linux, modelled on Raycast's Kill Process: filter live, kill one or a whole tree, killall, or restart."
+  },
+  "10_OpenScreen.fused": {
+    "title": "OpenScreen",
+    "description": "A screen recorder: record your screen from the page, keep the recordings in a searchable library with metadata, and export clips.",
+    "guarded": [
+      "fused.capture"
+    ]
+  },
+  "11_ShatteredGlass.fused": {
+    "title": "Shattered Glass",
+    "description": "An interactive broken-mirror effect: an image fractures into Voronoi shards that act as tilted mirrors and shift with parallax. Drop your own picture or use the camera."
+  },
+  "12_Focusly.fused": {
+    "title": "Focusly",
+    "description": "A single-page focus timer. Name the task, start a session, and log finished and abandoned sessions with a daily summary. No server or Python."
+  },
+  "13_FusedWeb.fused": {
+    "title": "Fused Web",
+    "description": "Build HTTP APIs as Fused UDFs from plain-language prompts. Each project is a canvas pushed with the fused CLI and served through its share token."
+  },
+  "14_Transcripto.fused": {
+    "title": "Transcripto",
+    "description": "Turn YouTube videos and local recordings into searchable transcripts, with one-click summaries via fused.ai.text and export to text or SRT."
   }
 }

@@ -57,6 +57,29 @@
   input[type=file] { display: none; }
   .status { margin-top: 16px; min-height: 1.5em; font-size: 13px; color: var(--muted); }
   .status.err { color: var(--err); }
+  /* Hovering a showcase card swaps the drop-zone copy for a mini preview card. */
+  .zone .drop-copy { transition: opacity .15s; }
+  .zone.peeking .drop-copy { opacity: 0; pointer-events: none; }
+  .zone.peeking { border-color: transparent; background: transparent; box-shadow: none; }
+  .peek {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px;
+    opacity: 0; pointer-events: none; transition: opacity .15s;
+  }
+  .zone.peeking .peek { opacity: 1; }
+  .peek .mini {
+    width: min(336px, 100%); display: flex; flex-direction: column; gap: 8px; text-align: left;
+    padding: 10px; border-radius: 12px; background: var(--card); border: 1px solid var(--line);
+    box-shadow: 0 8px 28px rgba(0,0,0,.14);
+  }
+  .peek .mini .shot { aspect-ratio: 16 / 9; width: 100%; display: block; border-radius: 8px; border: 1px solid var(--line); object-fit: cover; object-position: top; background: var(--bg); }
+  .peek .mini .shot.blank { display: grid; place-items: center; font-size: 28px; color: var(--muted); }
+  .peek .mini .shot[hidden] { display: none; }
+  .peek .mini .title { font-weight: 600; font-size: 14px; line-height: 1.3; }
+  .peek .mini .desc {
+    font-size: 12px; line-height: 1.45; color: var(--muted);
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .peek .mini .desc:empty { display: none; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .brand { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 4px; }
   .brand .logo { width: 64px; height: 64px; flex: 0 0 auto; border-radius: 16px; background: #1b1d21; display: block; }
@@ -76,7 +99,7 @@
   /* Showcase: a horizontal rail of thumbnails pinned at the bottom. */
   .rail-wrap { position: relative; width: 100%; min-width: 0; }
   .rail {
-    display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain;
+    display: flex; gap: 9px; overflow-x: auto; overscroll-behavior-x: contain;
     scroll-snap-type: x proximity; scroll-behavior: smooth;
     padding: 4px 2px 10px; scrollbar-width: thin;
   }
@@ -85,7 +108,7 @@
   .rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
   .rail::-webkit-scrollbar-track { background: transparent; }
   .card {
-    flex: 0 0 200px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
+    flex: 0 0 150px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
     padding: 0; background: transparent; border: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left;
   }
   .card .shot {
@@ -96,7 +119,7 @@
   .card:hover .shot, .card:focus-visible .shot { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
   .card:focus-visible { outline: none; }
   .card .shot.blank { display: grid; place-items: center; font-size: 28px; color: var(--muted); }
-  .card .title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
+  .card .title { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
   .rail-nav {
     position: absolute; top: 40%; transform: translateY(-50%); z-index: 1;
     width: 30px; height: 30px; padding: 0; display: none; align-items: center; justify-content: center;
@@ -112,7 +135,7 @@
     .zone { padding: 32px 16px; }
     h1 { font-size: 18px; }
     .wrap { gap: 20px; }
-    .card { flex-basis: 160px; }
+    .card { flex-basis: 120px; }
     #rail-prev { left: -4px; }
     #rail-next { right: -4px; }
   }
@@ -129,15 +152,25 @@
   <div class="name">Render <span class="lite">Lite</span></div>
 </header>
 <div class="zone" id="zone">
-  <h1>Drop a <code>.fused</code> app here</h1>
-  <p>or double-click one in Finder, or paste its path.</p>
-  <div class="or">or</div>
-  <form id="form">
-    <input type="text" id="path" placeholder="/absolute/path/to/app.fused" autocomplete="off" spellcheck="false" />
-    <button type="submit">Open</button>
-    <label class="pick">Choose file…<input type="file" id="file" accept=".fused" /></label>
-  </form>
-  <div class="status" id="status"></div>
+  <div class="drop-copy">
+    <h1>Drop a <code>.fused</code> app here</h1>
+    <p>or double-click one in Finder, or paste its path.</p>
+    <div class="or">or</div>
+    <form id="form">
+      <input type="text" id="path" placeholder="/absolute/path/to/app.fused" autocomplete="off" spellcheck="false" />
+      <button type="submit">Open</button>
+      <label class="pick">Choose file…<input type="file" id="file" accept=".fused" /></label>
+    </form>
+    <div class="status" id="status"></div>
+  </div>
+  <div class="peek" id="peek" role="tooltip" aria-hidden="true">
+    <div class="mini">
+      <img class="shot" id="peek-shot" alt="" hidden />
+      <div class="shot blank" id="peek-blank" hidden>&#9635;</div>
+      <div class="title" id="peek-title"></div>
+      <div class="desc" id="peek-desc"></div>
+    </div>
+  </div>
 </div>
 <section class="showcase" id="showcase" hidden>
   <h2>Showcase</h2>
@@ -201,6 +234,35 @@
     if (f) upload(f);
   });
 
+  // Mini preview: while a showcase card is hovered/focused the drop zone shows
+  // the app's thumbnail, title and description instead of the drop copy.
+  let peekTimer = null;
+  function showPeek(ex) {
+    clearTimeout(peekTimer);
+    peekTimer = setTimeout(() => {
+      const shot = document.getElementById("peek-shot");
+      const blank = document.getElementById("peek-blank");
+      if (ex.has_preview) {
+        shot.src = "/api/showcase/preview?id=" + encodeURIComponent(ex.id);
+        shot.hidden = false; blank.hidden = true;
+      } else {
+        shot.removeAttribute("src");
+        shot.hidden = true; blank.hidden = false;
+      }
+      document.getElementById("peek-title").textContent = ex.title;
+      document.getElementById("peek-desc").textContent = ex.description || "";
+      document.getElementById("peek").setAttribute("aria-hidden", "false");
+      zone.classList.add("peeking");
+    }, 120);
+  }
+  function hidePeek() {
+    clearTimeout(peekTimer);
+    peekTimer = setTimeout(() => {
+      zone.classList.remove("peeking");
+      document.getElementById("peek").setAttribute("aria-hidden", "true");
+    }, 150);
+  }
+
   // Showcase apps packaged with the app (fused_render_lite/showcase/). The
   // section stays hidden unless the server lists at least one.
   async function loadShowcase() {
@@ -237,9 +299,15 @@
       title.textContent = ex.title;
       card.appendChild(title);
       card.addEventListener("click", () => openPath(ex.file));
+      card.addEventListener("pointerenter", (e) => { if (e.pointerType !== "touch") showPeek(ex); });
+      card.addEventListener("pointerleave", hidePeek);
+      card.addEventListener("focus", () => showPeek(ex));
+      card.addEventListener("blur", hidePeek);
       rail.appendChild(card);
     }
     document.getElementById("showcase").hidden = false;
+    rail.addEventListener("scroll", hidePeek, { passive: true });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") hidePeek(); });
 
     // Arrows only appear when the rail overflows; a rail that fits sits centred.
     const prev = document.getElementById("rail-prev");
