@@ -7,12 +7,13 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 ## Size by version
 
 Shipped size = the DMG attached to the GitHub release (built by CI on
-`macos-14`, python.org framework Python, ad-hoc signed). That is what end
+`macos-26`, python.org framework Python, Developer ID signed + notarized since 0.8.3). That is what end
 users download.
 
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.3 | 42.48 MB (42,479,175 B) | −0.19 MB | 98 MB | first Developer ID-signed + notarized + stapled DMG; DMG container codesigned (PR #6); no code change |
 | 0.8.2 | 42.67 MB (42,673,807 B) | +0.04 MB | 98 MB | menu-bar Dock popover; Open in Browser title-bar button; no packaging change |
 | 0.8.1 | 42.63 MB (42,631,560 B) | +1.66 MB | 98 MB | showcase refreshed to 14 .fused bundles (+~2 MB of app files); no packaging change |
 | 0.8.0 | 40.98 MB (40,975,944 B) | +0.00 MB | 96 MB | auto-fit card grid; no packaging change |
