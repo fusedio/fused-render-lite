@@ -49,6 +49,16 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.1
+
+Launcher: showcase cards redesigned as a horizontal scroll rail with a
+hover peek preview; showcase set refreshed to 14 apps (OpenBot,
+DoodleShooter, OpenRelax, ClaudeUsage, OpenWhisper, OpenColor, OpenDesign,
+OpenSVG, OpenCPU, OpenScreen, ShatteredGlass, Focusly, FusedWeb,
+Transcripto), file names numbered without spaces.
+
+Dev: `dev-iframe.html` gains a reload button and version display.
+
 ## 0.8.0
 
 Card grid: `auto-fill` → `auto-fit` with centered content, so the launcher
