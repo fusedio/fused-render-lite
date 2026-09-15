@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.1 | 42.63 MB (42,631,560 B) | +1.66 MB | 98 MB | showcase refreshed to 14 .fused bundles (+~2 MB of app files); no packaging change |
 | 0.8.0 | 40.98 MB (40,975,944 B) | +0.00 MB | 96 MB | auto-fit card grid; no packaging change |
 | 0.7.2 | 40.98 MB (40,975,692 B) | +0.03 MB | 96 MB | venv-symlink fix; server.json + shared/ (fused_ai, appenv, background_app) |
 | 0.7.1 | 40.95 MB (40,945,024 B) | +0.00 MB | 96 MB | rebuild from main head; no code change |
