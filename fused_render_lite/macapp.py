@@ -172,7 +172,7 @@ def main() -> None:
         AppHelper.callAfter(manager.open, target)
 
     def show_home() -> None:
-        """Focus the front window, or open a placeholder window if none."""
+        """Focus a Home window, or open a new one if none is open."""
         manager = state["windows"]
         if manager is None:
             webbrowser.open(open_url(port, None))
@@ -221,7 +221,13 @@ def main() -> None:
     def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
         target = open_url(port, None)
         if state["ready"]:
-            show_home()
+            manager = state["windows"]
+            if manager is None:
+                webbrowser.open(target)
+            else:
+                from PyObjCTools import AppHelper
+
+                AppHelper.callAfter(manager.reopen)
         elif target not in state["pending"]:
             state["pending"].append(target)
         return True
