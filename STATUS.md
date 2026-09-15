@@ -57,6 +57,14 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.9
+
+Dock icons follow the system theme (port of fused-render's icon-color swap,
+PR #15), including the `var(--fused-bg)` plate (fused-render #1159). Dock
+popover appear/dismiss animation: drops from the menu bar with a spring-like
+slide and a decoupled fast fade (PR #16). Dev iframe no longer links to
+GitHub releases. No packaging change.
+
 ## 0.8.8
 
 Renamed to **Render App** (PR #12): `RenderApp.app`, `RenderApp-<version>.dmg`,
