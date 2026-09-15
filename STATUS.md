@@ -55,6 +55,17 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.7
+
+Dock: drag the separator to resize the tray like the Dock (16–128 px, ⌥ snaps
+to 16/32/64/128, clamped to the screen-fit cap after snapping); size persists
+in dock.json as `tilesize` (GET /api/dock, POST /api/dock/size). Every metric
+in dock.html derives from `--tile` so the tray scales as one piece; the native
+panel is sized once per drag and the resize cursor is held natively. Window:
+closing destroys the WKWebView and unloads the page (pagehide/unload fire,
+media stops) instead of just ordering out, breaking the _Window ref cycle so
+it deallocs by refcount; quit closes all windows first. No packaging change.
+
 ## 0.8.6
 
 Dock: running indicator is a green dot inset in the tile's upper-left corner
