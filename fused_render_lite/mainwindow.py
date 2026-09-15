@@ -74,7 +74,7 @@ from AppKit import (
     NSWindowStyleMaskTitled,
     NSWorkspace,
 )
-from Foundation import NSKeyValueObservingOptionNew, NSURLRequest
+from Foundation import NSKeyValueObservingOptionNew, NSThread, NSURLRequest
 from WebKit import (
     WKNavigationActionPolicyAllow,
     WKNavigationActionPolicyCancel,
@@ -343,7 +343,8 @@ class _Window:
         self.ns = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, w, h), style, NSBackingStoreBuffered, False)
         # AppKit must not release the window on close while Python still
-        # holds it (⌘W on a second window would crash). We own the lifetime.
+        # holds it (⌘W on a second window would crash). We own the lifetime:
+        # `teardown` drops every reference so it deallocs right after close.
         self.ns.setReleasedWhenClosed_(False)
         self.ns.setMinSize_(NSMakeSize(*MIN_SIZE))
         self.ns.setTitle_(APP_NAME)
@@ -432,17 +433,77 @@ class _Window:
         NSApp.activateIgnoringOtherApps_(True)
 
     def current_url(self) -> str | None:
+        if self.webview is None:
+            return None
         u = self.webview.URL()
         return str(u.absoluteString()) if u is not None else None
 
     def teardown(self) -> None:
+        """Destroy the page, the web view and the window — for real.
+
+        Closing an NSWindow only orders it out: with ``releasedWhenClosed``
+        off it keeps retaining its content view, and a WKWebView that is
+        merely hidden keeps running its page (a playing `<audio>` carried on
+        after ⌘W). A browser tab close unloads the document; this does the
+        same, in two steps:
+
+        Now (synchronous, safe inside ``windowWillClose_``): drop the
+        delegates and the KVO observer, so WebKit never calls back into a
+        half-dead delegate, then stop any load and navigate to
+        ``about:blank`` so the document unloads (``pagehide``/``unload``
+        fire, media and timers stop).
+
+        Next runloop turn (``_destroy``, via ``AppHelper.callAfter``): pull
+        the web view and titlebar accessories out of the window, break the
+        Python cycle ``_Window → _WebDelegate → _Window`` and drop every
+        reference, so refcounting (not the cycle collector, whenever it next
+        runs) deallocs the WKWebView — which closes its WebKit page — and
+        the NSWindow. Deferred because we are called from inside
+        ``-[NSWindow close]``; releasing the window under AppKit's feet is
+        the crash the ``releasedWhenClosed`` comment records.
+
+        Idempotent: a second call is a no-op."""
+        webview, ns, delegate = self.webview, self.ns, self.delegate
+        if webview is None or getattr(self, "_torn", False):
+            return
+        self._torn = True
         try:
-            self.webview.removeObserver_forKeyPath_(self.delegate, "title")
+            webview.removeObserver_forKeyPath_(delegate, "title")
         except Exception:  # noqa: BLE001 — already removed; nothing to undo
             pass
-        self.webview.setNavigationDelegate_(None)
-        self.webview.setUIDelegate_(None)
-        self.ns.setDelegate_(None)
+        webview.setNavigationDelegate_(None)
+        webview.setUIDelegate_(None)
+        ns.setDelegate_(None)
+        try:
+            webview.stopLoading()
+            webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl("about:blank")))
+        except Exception:  # noqa: BLE001 — the page is going away regardless
+            logger.debug("about:blank unload failed", exc_info=True)
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(self._destroy)
+
+    def _destroy(self) -> None:
+        webview, ns, delegate = self.webview, self.ns, self.delegate
+        if webview is None:
+            return
+        self.webview = self.ns = self.delegate = None
+        try:
+            for vc in list(ns.titlebarAccessoryViewControllers() or ()):
+                vc.removeFromParentViewController()
+            ns.setContentView_(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 0, 0)))
+        except Exception:  # noqa: BLE001 — still break the cycle below
+            logger.debug("detaching web view failed", exc_info=True)
+        delegate._window = None
+        delegate._manager = None
+        delegate._downloads = []
+        logger.debug("window destroyed (%s)", self.app_file or "home")
+
+    def close(self) -> None:
+        """Close the window the way ⌘W does — through AppKit, so
+        ``windowWillClose_`` runs ``_forget`` → ``teardown``."""
+        if self.ns is not None:
+            self.ns.close()
 
 
 class _MenuTarget(NSObject):
@@ -657,6 +718,21 @@ class WindowManager:
         if win in self._windows:
             self._windows.remove(win)
         win.teardown()
+
+    def close_all(self) -> None:
+        """Close and destroy every window (quit path). Main thread only —
+        it drives AppKit. Each close runs the full ``teardown`` via the
+        window delegate; anything already gone is torn down directly."""
+        if not NSThread.isMainThread():
+            logger.warning("close_all called off the main thread; skipped")
+            return
+        for win in list(self._windows):
+            try:
+                win.close()
+            except Exception:  # noqa: BLE001 — still tear it down
+                logger.debug("close failed; tearing down directly", exc_info=True)
+            self._forget(win)
+        self._windows.clear()
 
 
 def _build_main_menu(target) -> NSMenu:
