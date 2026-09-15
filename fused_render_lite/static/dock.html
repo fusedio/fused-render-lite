@@ -225,7 +225,7 @@
   const menu = document.getElementById("menu");
   const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
 
-  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false, saving: 0, gen: 0 };
+  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false, saving: 0, gen: 0, pollSeq: 0 };
 
   // ---------- net ----------
   async function post(path, body) {
@@ -241,20 +241,23 @@
     try { const apps = await fn(); if (apps) apply(apps); return apps; }
     finally { state.saving--; }
   }
+  // Newest-started poll wins: a reply is applied only if no save landed and
+  // no later poll started while it was in flight. Two polls overlap when a
+  // dockShown() refresh (after the native menu's Keep in Dock / Forget)
+  // fires mid-interval; the earlier one may still carry the pre-change list.
   async function refresh() {
     if (state.dragging || state.menuFor || state.saving) return;
-    const gen = state.gen;
+    const gen = state.gen, seq = ++state.pollSeq;
     try {
       const r = await fetch("/api/dock", { cache: "no-store" });
       if (!r.ok) return;
       const d = await r.json();
-      if (gen !== state.gen) return; // a save landed while this poll was in flight: its reply is stale
+      if (gen !== state.gen || seq !== state.pollSeq) return; // superseded while in flight
       apply(d.apps || []);
     } catch (_) { if (!state.loaded) render(); /* server down: show empty tray rather than nothing */ }
   }
   function apply(apps) {
     if (state.dragging || state.menuFor) return;
-    state.gen++; // anything fetched before this point is older than what we now show
     state.apps = apps; state.loaded = true;
     render();
   }
