@@ -53,6 +53,13 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.5
+
+Fix (dock): the tray Home tile and "Open in app" focus an open Home window
+or open a new one, even while app windows are open; the macOS Dock-icon
+reopen keeps its front-window behaviour. Hover magnification capped at 1.5.
+Menu bar icon regenerated from the app glyph with the hollow centre.
+
 ## 0.8.4
 
 Homebrew: `brew install --cask fusedio/tap/fused-render-lite` (PR #7). The
