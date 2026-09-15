@@ -94,8 +94,12 @@
   .showcase { width: 100%; min-width: 0; }
   .showcase[hidden] { display: none; }
   .showcase h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); text-align: left; }
-  .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; }
-  .version:empty { display: none; }
+  .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; display: flex; justify-content: center; align-items: center; }
+  .version[hidden] { display: none; }
+  .version a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
+  .version a:hover { color: var(--fg); text-decoration: underline; }
+  .version a svg { width: 12px; height: 12px; fill: currentColor; }
+  .version .line { display: flex; align-items: center; gap: 6px; }
   /* Showcase: a horizontal rail of thumbnails pinned at the bottom. */
   .rail-wrap { position: relative; width: 100%; min-width: 0; }
   .rail {
@@ -180,7 +184,14 @@
     <button id="rail-next" class="rail-nav" type="button" title="Next" aria-label="Scroll showcase right">&#8250;</button>
   </div>
 </section>
-<div class="version" id="version"></div>
+<div class="version" id="version" hidden>
+  <span class="line">
+    <a href="https://github.com/fusedio/fused-render" target="_blank" rel="noopener" title="fused-render on GitHub" aria-label="fused-render on GitHub" class="gh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+    <a id="version-label" href="https://github.com/fusedio/fused-render-lite/releases" target="_blank" rel="noopener" title="Release notes"></a>
+    <span aria-hidden="true">&middot;</span>
+    <a href="https://render.fused.io/" target="_blank" rel="noopener" title="Fused Render"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill-rule="evenodd" d="M32 6 C34.5 23 41 29.5 58 32 C41 34.5 34.5 41 32 58 C29.5 41 23 34.5 6 32 C23 29.5 29.5 23 32 6 Z M32 27 a5 5 0 1 0 0 10 a5 5 0 1 0 0-10 Z"/></svg>Render</a>
+  </span>
+</div>
 </div>
 <script>
   const zone = document.getElementById("zone");
@@ -335,7 +346,10 @@
 
   // Version footer, from the server so it can never drift from __version__.
   fetch("/api/health").then(r => r.ok ? r.json() : null).then(h => {
-    if (h && h.version) document.getElementById("version").textContent = "Render Lite v" + h.version;
+    if (h && h.version) {
+      document.getElementById("version-label").textContent = "Render Lite v" + h.version;
+      document.getElementById("version").hidden = false;
+    }
   }).catch(() => {});
 </script>
 </body>
