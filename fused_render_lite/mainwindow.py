@@ -43,6 +43,13 @@ from AppKit import (
     NSApp,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
+    NSBezelStyleRecessed,
+    NSButton,
+    NSControlSizeLarge,
+    NSImage,
+    NSLayoutAttributeTrailing,
+    NSTitlebarAccessoryViewController,
+    NSView,
     NSDistributedNotificationCenter,
     NSDownloadsDirectory,
     NSEventModifierFlagCommand,
@@ -325,9 +332,42 @@ class _Window:
         self.webview.addObserver_forKeyPath_options_context_(
             self.delegate, "title", NSKeyValueObservingOptionNew, None)
         self.ns.setDelegate_(self.delegate)
+        self._add_titlebar_button()
 
         self._place()
         self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
+
+    def _add_titlebar_button(self) -> None:
+        """An "Open in Browser" button at the right end of the title bar.
+
+        A titlebar accessory keeps the standard titled window (title stays
+        centred, traffic lights untouched) — no toolbar row, no
+        full-size-content-view mask. Same action as the ⌘⇧L menu item.
+        """
+        image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            "safari", "Open in Browser")
+        button = NSButton.buttonWithImage_target_action_(
+            image, self.manager._menu_target, b"openInBrowser:")
+        button.setBezelStyle_(NSBezelStyleRecessed)
+        button.setBordered_(False)
+        button.setToolTip_("Open in Browser (⌘⇧L)")
+        button.setControlSize_(NSControlSizeLarge)
+        button.sizeToFit()
+        bw = button.frame().size.width
+        bh = button.frame().size.height
+        pad = 10  # breathing room from the window's right edge
+        # Title-bar height; the accessory is bottom-aligned, so a holder this
+        # tall with the button centred lines it up with the title text.
+        bar = self.ns.frame().size.height - self.ns.contentLayoutRect().size.height
+        hh = max(bh, bar)
+        holder = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, bw + pad, hh))
+        button.setFrameOrigin_(NSMakePoint(0, round((hh - bh) / 2)))
+        holder.addSubview_(button)
+
+        vc = NSTitlebarAccessoryViewController.alloc().init()
+        vc.setView_(holder)
+        vc.setLayoutAttribute_(NSLayoutAttributeTrailing)
+        self.ns.addTitlebarAccessoryViewController_(vc)
 
     def _place(self) -> None:
         # The first window restores where the user last left one; each
