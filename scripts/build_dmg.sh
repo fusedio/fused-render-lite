@@ -452,6 +452,15 @@ PYEOF
 rm -f "$DMG_PATH"
 "$BUILD_VENV/bin/dmgbuild" -s "$SETTINGS" -D app="$APP_DIR" "$APP_NAME" "$DMG_PATH"
 
+# Sign the DMG container itself (not just the .app inside): Gatekeeper's
+# `spctl -t open` assesses the container's signature, and notarytool ties the
+# ticket to it. Same identity/keychain as step 5.
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "==> signing dmg"
+  codesign --force --timestamp $KC_OPT -s "$SIGN_IDENTITY" "$DMG_PATH"
+  codesign --verify --verbose=2 "$DMG_PATH"
+fi
+
 if [[ -n "${FUSED_RENDER_NOTARY_PROFILE:-}" ]]; then
   if [[ "${FUSED_RENDER_SKIP_CODESIGN:-}" == "1" ]]; then
     echo "FATAL: FUSED_RENDER_NOTARY_PROFILE and FUSED_RENDER_SKIP_CODESIGN are both set —" >&2
