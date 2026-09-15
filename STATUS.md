@@ -52,6 +52,13 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.4
+
+Homebrew: `brew install --cask fusedio/tap/fused-render-lite` (PR #7). The
+release workflow gained a `bump-homebrew` job that rewrites the cask's
+`version`/`sha256` in fusedio/homebrew-tap after the DMG lands on the Release;
+this is the first release that exercises it. No runtime change.
+
 ## 0.8.3
 
 Release pipeline: first Developer ID-signed + notarized + stapled DMG. The 7
