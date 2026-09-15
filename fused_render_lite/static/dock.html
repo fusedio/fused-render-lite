@@ -225,7 +225,7 @@
   const menu = document.getElementById("menu");
   const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
 
-  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false };
+  const state = { apps: [], nodes: new Map(), dragging: null, menuFor: null, hover: null, dragEndedAt: 0, loaded: false, saving: 0, gen: 0, pollSeq: 0 };
 
   // ---------- net ----------
   async function post(path, body) {
@@ -233,12 +233,26 @@
     if (!r.ok) throw new Error(path + " " + r.status);
     return r.json();
   }
+  // A mutation whose reply is the new list: polls pause until it is applied,
+  // and any poll already in flight is discarded, so a 1.5 s refresh can never
+  // paint the pre-save list over what the user just did.
+  async function save(fn) {
+    state.saving++; state.gen++;
+    try { const apps = await fn(); if (apps) apply(apps); return apps; }
+    finally { state.saving--; }
+  }
+  // Newest-started poll wins: a reply is applied only if no save landed and
+  // no later poll started while it was in flight. Two polls overlap when a
+  // dockShown() refresh (after the native menu's Keep in Dock / Forget)
+  // fires mid-interval; the earlier one may still carry the pre-change list.
   async function refresh() {
-    if (state.dragging || state.menuFor) return;
+    if (state.dragging || state.menuFor || state.saving) return;
+    const gen = state.gen, seq = ++state.pollSeq;
     try {
       const r = await fetch("/api/dock", { cache: "no-store" });
       if (!r.ok) return;
       const d = await r.json();
+      if (gen !== state.gen || seq !== state.pollSeq) return; // superseded while in flight
       apply(d.apps || []);
     } catch (_) { if (!state.loaded) render(); /* server down: show empty tray rather than nothing */ }
   }
@@ -285,10 +299,12 @@
     const wantImg = !!app.hasIcon;
     const img = tile.querySelector("img");
     if (wantImg) {
-      const src = "/api/dock/icon?file=" + encodeURIComponent(app.file);
-      if (!img) {
+      // iconVersion changes when an extract-dir override lands, so an
+      // existing <img> retargets instead of showing the first icon forever.
+      const src = "/api/dock/icon?file=" + encodeURIComponent(app.file) + "&v=" + encodeURIComponent(app.iconVersion ?? "");
+      if (!img || img.dataset.src !== src) {
         tile.classList.remove("fallback");
-        const im = document.createElement("img"); im.alt = ""; im.draggable = false; im.src = src;
+        const im = document.createElement("img"); im.alt = ""; im.draggable = false; im.dataset.src = src; im.src = src;
         im.addEventListener("error", () => paintFallback(tile, name), { once: true });
         tile.replaceChildren(im);
       }
@@ -555,10 +571,10 @@
     state.menuFor = b;
     menu.replaceChildren(
       mi("Open", () => openApp(file)),
-      mi(pinned ? "Remove from Dock" : "Keep in Dock", async () => apply((await post("/api/dock/pin", { file, pinned: !pinned })).apps)),
+      mi(pinned ? "Remove from Dock" : "Keep in Dock", () => save(async () => (await post("/api/dock/pin", { file, pinned: !pinned })).apps)),
       mi("Show in Finder", () => post("/api/dock/reveal", { file })),
       mi("Open in Browser", null, { href: location.origin + "/open?_file=" + encodeURIComponent(file) }),
-      ...(pinned ? [] : [hr(), mi("Forget", async () => apply((await post("/api/dock/remove", { file })).apps))])
+      ...(pinned ? [] : [hr(), mi("Forget", () => save(async () => (await post("/api/dock/remove", { file })).apps))])
     );
     pointerGone();
     menu.classList.add("on");
@@ -616,10 +632,20 @@
     b.classList.add("dragging");
   }
   function pinnedNodes() { return items().filter(n => n.classList.contains("app") && n.dataset.pinned && n !== state.dragging); }
+  function pinBoundary() {
+    // Right edge of the pinned zone. With pins it is the separator. With
+    // none there is no zone yet: dragging a recent a full tile's width past
+    // the leftmost tile opens one (a 6 px jiggle must not pin anything).
+    if (sepA.isConnected) return sepA.getBoundingClientRect().right;
+    const apps = items().filter(n => n.classList.contains("app"));
+    if (!apps.length) return -Infinity;
+    const r = apps[0].getBoundingClientRect();
+    return r.left - r.width;
+  }
   function dragMove(x) {
     const b = state.dragging, dragIsPinned = !!b.dataset.pinned;
-    // Unpinned item still right of the pin separator: stays in the recent zone (no pin).
-    if (!dragIsPinned && sepA.isConnected && x > sepA.getBoundingClientRect().right) {
+    // Unpinned item still right of the pin boundary: stays in the recent zone (no pin).
+    if (!dragIsPinned && x > pinBoundary()) {
       b.dataset.pinDrop = ""; return;
     }
     b.dataset.pinDrop = "1";
@@ -636,9 +662,10 @@
     if (pinDrop) {
       const files = items().filter(n => n.classList.contains("app") && (n.dataset.pinned || n === b)).map(n => n.dataset.file);
       try {
-        if (!wasPinned) await post("/api/dock/pin", { file, pinned: true });
-        const r = await post("/api/dock/order", { files });
-        apply(r.apps);
+        await save(async () => {
+          if (!wasPinned) await post("/api/dock/pin", { file, pinned: true });
+          return (await post("/api/dock/order", { files })).apps;
+        });
       } catch (_) { refresh(); }
     } else render();
   }

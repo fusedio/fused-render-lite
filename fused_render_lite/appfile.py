@@ -250,6 +250,45 @@ ICON_NAME = "icon.svg"
 ICON_MAX_BYTES = 64 * 1024
 
 
+def icon_override_path(fused_path: str) -> str | None:
+    """Where an app's extract would hold a written ``icon.svg`` (whether or
+    not it exists yet), or None if the file is unreadable. Cheap after the
+    first call: ``_file_key`` is memoised on the file's (size, mtime)."""
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return None
+        manifest = read_manifest(fused_path)
+        name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
+        return os.path.join(paths.apps_dir(), _file_key(fused_path, name), ICON_NAME)
+    except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+def _shipped_icon_bytes(fused_path: str, manifest: dict) -> bytes | None:
+    """The ``icon.svg`` packed inside the .fused itself (no extract lookup)."""
+    if manifest.get("fused_app_file") == container.VERSION:
+        data = container.read_member(fused_path, manifest, ICON_NAME, ICON_MAX_BYTES)
+    else:
+        with zipfile.ZipFile(fused_path) as zf:
+            with zf.open(f"{PAYLOAD_DIR}/{ICON_NAME}") as f:
+                data = f.read(ICON_MAX_BYTES + 1)
+    if data is None or len(data) > ICON_MAX_BYTES:
+        return None
+    return data
+
+
+def has_shipped_icon(fused_path: str) -> bool:
+    """Whether the .fused packs an ``icon.svg`` (ignores any extract override)."""
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return False
+        return _shipped_icon_bytes(fused_path, read_manifest(fused_path)) is not None
+    except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
+        return False
+
+
 def icon_bytes(fused_path: str) -> bytes | None:
     """The app's ``icon.svg`` for the menu-bar dock, or None. Never raises.
 
@@ -271,14 +310,6 @@ def icon_bytes(fused_path: str) -> bytes | None:
             with open(extracted, "rb") as f:
                 return f.read(ICON_MAX_BYTES)
         # (an over-cap override is ignored and the shipped icon still shows)
-        if manifest.get("fused_app_file") == container.VERSION:
-            data = container.read_member(fused_path, manifest, ICON_NAME, ICON_MAX_BYTES)
-        else:
-            with zipfile.ZipFile(fused_path) as zf:
-                with zf.open(f"{PAYLOAD_DIR}/{ICON_NAME}") as f:
-                    data = f.read(ICON_MAX_BYTES + 1)
-        if data is None or len(data) > ICON_MAX_BYTES:
-            return None
-        return data
+        return _shipped_icon_bytes(fused_path, manifest)
     except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
         return None
