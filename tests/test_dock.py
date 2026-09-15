@@ -119,11 +119,42 @@ def test_list_apps_shape(v2_fused_icon, v2_fused, tmp_path):
     dock_store.record_open(v2_fused_icon, "iconic")
     dock_store.record_open(ghost, "ghost")
     by_file = {a["file"]: a for a in dock_store.list_apps(running={v2_fused})}
-    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt", "hasIcon"}
+    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt", "hasIcon", "iconVersion"}
     assert by_file[v2_fused]["running"] is True and by_file[v2_fused]["hasIcon"] is False
     assert by_file[v2_fused_icon]["running"] is False and by_file[v2_fused_icon]["hasIcon"] is True
     assert by_file[ghost]["exists"] is False and by_file[ghost]["hasIcon"] is False
     assert by_file[v2_fused]["exists"] is True
+
+
+def test_list_apps_sees_icon_written_to_extract_later(v2_fused):
+    """The .fused's own icon status is memoised on its (size, mtime); an
+    icon.svg written into the EXTRACT dir must still show up on the next
+    poll, with a changed iconVersion so tiles retarget their <img>."""
+    dock_store.record_open(v2_fused, "demo")
+    first = dock_store.list_apps()[0]
+    assert first["hasIcon"] is False and first["iconVersion"] is None
+    result = appfile.open_app_file(v2_fused)
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(b"<svg>late</svg>")
+    second = dock_store.list_apps()[0]
+    assert second["hasIcon"] is True and second["iconVersion"] is not None
+    # an over-cap override counts as absent again
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(b"x" * (appfile.ICON_MAX_BYTES + 1))
+    assert dock_store.list_apps()[0]["hasIcon"] is False
+
+
+def test_list_apps_icon_version_tracks_override(v2_fused_icon):
+    dock_store.record_open(v2_fused_icon, "iconic")
+    shipped = dock_store.list_apps()[0]
+    assert shipped["hasIcon"] is True and shipped["iconVersion"] is not None
+    result = appfile.open_app_file(v2_fused_icon)
+    override = os.path.join(result["dir"], appfile.ICON_NAME)
+    with open(override, "wb") as f:
+        f.write(b"<svg>mine</svg>")
+    later = shipped["iconVersion"] + 10**9
+    os.utime(override, ns=(later, later))
+    assert dock_store.list_apps()[0]["iconVersion"] == later
 
 
 # ---- icon_bytes ------------------------------------------------------------

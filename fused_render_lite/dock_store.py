@@ -148,21 +148,37 @@ def reorder(files: list[str]) -> None:
 _icon_cache: dict[tuple, bool] = {}
 
 
-def _has_icon(file: str) -> bool:
-    """Memoised on (file, size, mtime): the dock polls this list every
-    ~1.5 s and probing a container index per card per poll adds up."""
+def _icon_info(file: str) -> tuple[bool, int | None]:
+    """``(hasIcon, iconVersion)`` for a dock card.
+
+    Whether the .fused itself PACKS an icon is memoised on (file, size,
+    mtime): the dock polls this list every ~1.5 s and probing a container
+    index per card per poll adds up. The extract-dir override
+    (``appfile.icon_override_path``) is only a stat away, so it is checked
+    every call — an app that writes ``icon.svg`` after the first poll must
+    show up, and ``iconVersion`` changes with it so tiles retarget their
+    ``<img>``.
+    """
     try:
         st = os.stat(file)
     except OSError:
-        return False
+        return False, None
     key = (file, st.st_size, st.st_mtime_ns)
-    hit = _icon_cache.get(key)
-    if hit is None:
-        hit = appfile.icon_bytes(file) is not None
+    shipped = _icon_cache.get(key)
+    if shipped is None:
+        shipped = appfile.has_shipped_icon(file)
         if len(_icon_cache) > 256:
             _icon_cache.clear()
-        _icon_cache[key] = hit
-    return hit
+        _icon_cache[key] = shipped
+    override = appfile.icon_override_path(file)
+    if override is not None:
+        try:
+            ost = os.stat(override)
+            if ost.st_size <= appfile.ICON_MAX_BYTES:
+                return True, ost.st_mtime_ns
+        except OSError:
+            pass
+    return shipped, (st.st_mtime_ns if shipped else None)
 
 
 def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
@@ -176,6 +192,7 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
     out = []
     for a in pinned + recent:  # filesystem probes happen outside the lock
         file = a["file"]
+        has_icon, icon_version = _icon_info(file)
         out.append({
             "file": file,
             "name": a.get("name") or _stem(file),
@@ -183,7 +200,8 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
             "running": file in running,
             "exists": os.path.isfile(file),
             "openedAt": a.get("openedAt"),
-            "hasIcon": _has_icon(file),
+            "hasIcon": has_icon,
+            "iconVersion": icon_version,
         })
     return out
 

@@ -327,6 +327,9 @@ class _WebDelegate(NSObject):
     def windowWillClose_(self, notification):
         self._manager._forget(self._window)
 
+    def windowDidBecomeKey_(self, notification):
+        self._manager._touch(self._window)
+
 
 class _Window:
     """One open window: the NSWindow, its WKWebView, and the strong delegate."""
@@ -580,8 +583,10 @@ class WindowManager:
         return {w.app_file for w in list(self._windows) if w.app_file}
 
     def window_for(self, fs_path: str) -> _Window | None:
+        """The most recently used window showing ``fs_path``, or None.
+        ``_windows`` is kept in MRU order (see ``_touch``), newest last."""
         fs_path = os.path.abspath(fs_path)
-        for w in self._windows:
+        for w in reversed(self._windows):
             if w.app_file == fs_path:
                 return w
         return None
@@ -591,10 +596,6 @@ class WindowManager:
         recently used window if several), otherwise it opens fresh."""
         win = self.window_for(fs_path)
         if win is not None:
-            for w in reversed(self._windows):  # prefer the key/front one
-                if w.app_file == win.app_file and (w is self.key() or w is self.front()):
-                    win = w
-                    break
             win.show()
             return win
         return self.open_file(fs_path)
@@ -617,6 +618,13 @@ class WindowManager:
             if w.ns.isEqual_(kw):
                 return w
         return None
+
+    def _touch(self, win: _Window) -> None:
+        """A window became key: move it to the MRU end so ``window_for`` /
+        ``front`` prefer the one the user last used, not the first opened."""
+        if win in self._windows and self._windows[-1] is not win:
+            self._windows.remove(win)
+            self._windows.append(win)
 
     def _forget(self, win: _Window) -> None:
         if win in self._windows:
