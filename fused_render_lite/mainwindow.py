@@ -563,12 +563,28 @@ class WindowManager:
     def open_file(self, fs_path: str) -> _Window:
         return self.open(open_url(self.port, fs_path))
 
-    def show_home(self) -> None:
-        """A Dock click: the front window if there is one (whatever it shows
-        — the user put it there), else a fresh placeholder window."""
+    def reopen(self) -> None:
+        """A macOS Dock-icon click on the running app: the front window if
+        there is one (whatever it shows — the user put it there), else a
+        fresh Home window."""
         front = self.front()
         if front is not None:
             front.show()
+        else:
+            self.open(self.home_url)
+
+    def show_home(self) -> None:
+        """Dock semantics for the Home tile: a window already showing Home
+        (no .fused file) comes to the front — the key/front one if several —
+        otherwise a fresh Home window opens, even if app windows are open."""
+        homes = [w for w in self._windows if not w.app_file]
+        if homes:
+            win = homes[-1]
+            for w in reversed(homes):  # prefer the key/front one
+                if w is self.key() or w is self.front():
+                    win = w
+                    break
+            win.show()
         else:
             self.open(self.home_url)
 

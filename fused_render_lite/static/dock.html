@@ -419,7 +419,7 @@
   //    transforms — a transformed, shadowed layer in a transparent web view
   //    leaves ghost slabs behind. The panel is NOT resized while the wave is
   //    live: #wrap reserves horizontal slack for the widest wave up front.
-  const MAG_MAX = 1.6, MAG_RANGE = 130, TILE = 52, EASE = 0.28;
+  const MAG_MAX = 1.5, MAG_RANGE = 130, TILE = 52, EASE = 0.28;
   const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const mag = { rest: null, cur: new Map(), target: new Map(), raf: 0, px: null, active: false, frozen: false };
 
