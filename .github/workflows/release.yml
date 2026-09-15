@@ -185,10 +185,9 @@ jobs:
           # Write the whole cask instead of sed-ing version/sha256: the DMG and
           # .app names (RenderApp-*.dmg, RenderApp.app) live here too, so a
           # rename ships atomically with the first release built under the new
-          # name. The cask token stays fused-render-app so existing installs
-          # keep upgrading.
-          cat > Casks/fused-render-app.rb <<CASK
-          cask "fused-render-app" do
+          # name. The cask token is render-app.
+          cat > Casks/render-app.rb <<CASK
+          cask "render-app" do
             version "${VERSION}"
             sha256 "${DMG_SHA256}"
 
@@ -211,6 +210,6 @@ jobs:
           CASK
           git config user.name "fused-render-app-ci"
           git config user.email "ci@fused.io"
-          git add Casks/fused-render-app.rb
-          git commit -m "fused-render-app ${VERSION}"
+          git add Casks/render-app.rb
+          git commit -m "render-app ${VERSION}"
           git push origin main

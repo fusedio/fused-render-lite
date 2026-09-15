@@ -85,7 +85,7 @@ Menu bar icon regenerated from the app glyph with the hollow centre.
 
 ## 0.8.4
 
-Homebrew: `brew install --cask fusedio/tap/fused-render-app` (PR #7). The
+Homebrew: `brew install --cask fusedio/tap/render-app` (PR #7). The
 release workflow gained a `bump-homebrew` job that rewrites the cask's
 `version`/`sha256` in fusedio/homebrew-tap after the DMG lands on the Release;
 this is the first release that exercises it. No runtime change.
@@ -168,7 +168,7 @@ Server routes added: `GET/POST /api/apps/background/{status,start,stop,restart,a
 App renamed to **Render App**: `RenderApp.app`, `RenderApp-<version>.dmg`, menu-bar title,
 placeholder page, runtime error text, Python package (`fused_render_app`), state dir
 (`~/.fused-render-app`), `FUSED_RENDER_APP_*` env vars, bundle id `io.fused.render.app`
-and the Homebrew cask token (`fused-render-app`). Pre-release; no migration.
+and the Homebrew cask token (`render-app`). Pre-release; no migration.
 
 ## 0.5.0
 

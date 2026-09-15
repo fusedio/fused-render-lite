@@ -153,11 +153,11 @@ never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
 ## Install (Homebrew)
 
 ```
-brew install --cask fusedio/tap/fused-render-app
+brew install --cask fusedio/tap/render-app
 ```
 
 Installs `RenderApp.app` (macOS 12+), signed + notarized. `brew update &&
-brew upgrade --cask fused-render-app` upgrades.
+brew upgrade --cask render-app` upgrades.
 
 ## Build the macOS app
 
@@ -180,9 +180,9 @@ Windows/Linux builds): `prepare-release` creates the GitHub Release, then on
 `macos-26` an ephemeral keychain gets the Developer ID cert and an App Store
 Connect API key, `build_dmg.sh` builds + signs + notarizes + staples, the
 ticket is verified, and the DMG lands on the Release. `bump-homebrew` then
-rewrites `version`/`sha256` in `Casks/fused-render-app.rb` of
+rewrites `version`/`sha256` in `Casks/render-app.rb` of
 [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap) and pushes,
-so `brew upgrade --cask fused-render-app` picks the release up. To rebuild an existing tag:
+so `brew upgrade --cask render-app` picks the release up. To rebuild an existing tag:
 `gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
 tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
 packaging files change. Signing needs these repository secrets (values are

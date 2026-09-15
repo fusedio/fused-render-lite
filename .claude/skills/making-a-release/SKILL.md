@@ -12,7 +12,7 @@ A release is: bump `__version__`, land it on `main` of `origin`
 push triggers `.github/workflows/release.yml`: `prepare-release` creates the
 GitHub Release, then the macos-26 job builds, signs, (notarizes) and uploads
 `RenderApp-X.Y.Z.dmg` + the wheel, and `bump-homebrew` pushes the new
-version + sha256 into `Casks/fused-render-app.rb` of fusedio/homebrew-tap
+version + sha256 into `Casks/render-app.rb` of fusedio/homebrew-tap
 (needs the `TAP_PUSH_TOKEN` repo secret). Afterwards, add the shipped DMG
 size to the table in `STATUS.md` — every version has a row.
 
@@ -91,7 +91,7 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 | Remote | `origin` = fusedio/fused-render-app |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
 | Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` |
-| Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/fused-render-app.rb`; check `brew update && brew info --cask fusedio/tap/fused-render-app` |
+| Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb`; check `brew update && brew info --cask fusedio/tap/render-app` |
 | After release | size row in `STATUS.md` |
 | Do NOT edit | `pyproject.toml` version |
 
