@@ -191,10 +191,10 @@ jobs:
             version "${VERSION}"
             sha256 "${DMG_SHA256}"
 
-            url "https://github.com/fusedio/fused-render-app/releases/download/v#{version}/RenderApp-#{version}.dmg"
-            name "Fused Render App"
+            url "https://github.com/fusedio/fused-render-lite/releases/download/v#{version}/RenderApp-#{version}.dmg"
+            name "Render App"
             desc "Lightweight runtime for .fused apps: Python-powered interactive HTML views"
-            homepage "https://github.com/fusedio/fused-render-app"
+            homepage "https://github.com/fusedio/fused-render-lite"
 
             livecheck do
               url :url

@@ -56,6 +56,16 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.8
+
+Renamed to **Render App** (PR #12): `RenderApp.app`, `RenderApp-<version>.dmg`,
+menu-bar title, placeholder page, runtime error text, Python package
+`fused_render_app`, CLI `fused-render-app`, `FUSED_RENDER_APP_*` env vars,
+`~/.fused-render-app` state dir, bundle id `io.fused.render.app`, runtime flag
+`fused.renderApp`. Homebrew cask token is `render-app` (`Casks/render-app.rb`,
+tap PR #5); `bump-homebrew` now writes the whole cask file. First release
+under the new name. No packaging change.
+
 ## 0.8.7
 
 Dock: drag the separator to resize the tray like the Dock (16–128 px, ⌥ snaps
