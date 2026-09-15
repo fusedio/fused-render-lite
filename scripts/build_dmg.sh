@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build RenderLite.app + a DMG via py2app.
+# Build RenderApp.app + a DMG via py2app.
 #
 #   framework python -> wheel -> build venv (wheel[app] + py2app + dmgbuild)
 #   -> icon -> py2app -> prune -> Contents/lib symlink -> sanity probes
@@ -7,7 +7,7 @@
 #   -> codesign -> dmgbuild -> [notarize] -> hygiene
 #
 # Same pipeline as fused-render's scripts/build_dmg.sh, step for step, minus
-# what lite does not ship (rclone, the fused CLI, staged packages). The one
+# what Render App does not ship (rclone, the fused CLI, staged packages). The one
 # deliberate difference: signing defaults to ad-hoc unless an identity is given
 # or FUSED_RENDER_SIGN=1 asks for keychain auto-detection (main always
 # auto-detects; that prompts on a dev keychain). CI always passes the identity.
@@ -48,10 +48,10 @@ _build_failed() {
 trap _build_failed ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="RenderLite"
+APP_NAME="RenderApp"
 VERSION="$(python3 -c "
 import re
-print(re.search(r'(?m)^__version__\s*=\s*\"([^\"]+)\"', open('${REPO_ROOT}/fused_render_lite/__init__.py').read()).group(1))
+print(re.search(r'(?m)^__version__\s*=\s*\"([^\"]+)\"', open('${REPO_ROOT}/fused_render_app/__init__.py').read()).group(1))
 ")"
 BUILD_DIR="$REPO_ROOT/build"
 DIST_DIR="$REPO_ROOT/dist"
@@ -61,7 +61,7 @@ ICNS_PATH="$BUILD_DIR/${APP_NAME}.icns"
 APP_DIR="$PY2APP_DIST/${APP_NAME}.app"
 DMG_PATH="$DIST_DIR/${APP_NAME}-${VERSION}.dmg"
 
-echo "==> fused-render-lite ${VERSION} -> ${APP_NAME}.app -> ${DMG_PATH##*/}"
+echo "==> fused-render-app ${VERSION} -> ${APP_NAME}.app -> ${DMG_PATH##*/}"
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
 # --- 1. a framework-build python ------------------------------------------
@@ -141,7 +141,7 @@ for i in range(4):
         poly.append(((1-t)**2*t0[0] + 2*(1-t)*t*c[0] + t**2*t1[0],
                      (1-t)**2*t0[1] + 2*(1-t)*t*c[1] + t**2*t1[1]))
 d.polygon(poly, fill=(229, 255, 68, 255))
-# "lite": hollow the glyph's centre
+# hollow the glyph's centre
 d.ellipse([cx - C*0.075, cy - C*0.075, cx + C*0.075, cy + C*0.075], fill=(27, 29, 33, 255))
 for s in (16, 32, 128, 256, 512):
     bg.resize((s, s), Image.LANCZOS).save(f"{out}/icon_{s}x{s}.png")
@@ -182,7 +182,7 @@ rm -rf "$PRUNE_FRAMEWORK"/Versions/3.12/lib/tcl* "$PRUNE_FRAMEWORK"/Versions/3.1
 find "$PRUNE_FRAMEWORK" -type d -name __pycache__ -prune -exec rm -rf {} +
 # py2app copies lib-dynload wholesale — setup_py2app.STDLIB_EXCLUDED does not
 # reach these .so files — and then walks their dylib deps into Contents/Frameworks.
-# Lite-only trim (measured on the 0.5.6 DMG: Tcl/Tk 6 MB, ncurses 1.4 MB,
+# Render App-only trim (measured on the 0.5.6 DMG: Tcl/Tk 6 MB, ncurses 1.4 MB,
 # CPython test fixtures 1.3 MB): GUI, terminal UI and test modules nothing in a
 # .app or a venv built from it can use.
 DYNLOAD="$PRUNE_PYLIB/lib-dynload"
@@ -211,9 +211,9 @@ echo "==> bundle sanity: interpreter self-locates with PYTHONHOME stripped"
 SELFLOC_OUT="$(env -u PYTHONHOME -u PYTHONPATH -u VIRTUAL_ENV \
   "$APP_DIR/Contents/MacOS/python" -c '
 import sys
-import fused_render_lite
+import fused_render_app
 print("prefix", sys.prefix)
-print("selflocating OK", fused_render_lite.__version__)
+print("selflocating OK", fused_render_app.__version__)
 ' 2>&1 || true)"
 if ! echo "$SELFLOC_OUT" | grep -q "^selflocating OK"; then
   echo "FATAL: the bundled interpreter cannot run without PYTHONHOME:" >&2
@@ -321,7 +321,7 @@ if ! echo "$UV_SMOKE_OUT" | grep -q "^uv "; then
 fi
 echo "    $UV_SMOKE_OUT"
 
-# --- 4e. the apple tier's Swift helper (fused_render_lite/ai/apple/) ---------
+# --- 4e. the apple tier's Swift helper (fused_render_app/ai/apple/) ---------
 # Lands in Contents/MacOS beside the interpreter, where ai/apple/host.py looks.
 echo "==> bundling the apple tier helper"
 APPLE_HELPER_DEST="$APP_DIR/Contents/MacOS/fused-apple-ai"

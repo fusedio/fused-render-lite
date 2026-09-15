@@ -12,4 +12,4 @@ dist/
 .coverage
 *.log
 .claude/worktrees/
-fused_render_lite/ai/apple/bin/
+fused_render_app/ai/apple/bin/

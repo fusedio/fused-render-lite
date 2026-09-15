@@ -1,8 +1,8 @@
-"""py2app setup for RenderLite.app.
+"""py2app setup for RenderApp.app.
 
 Invoked by build_dmg.sh with FUSED_RENDER_ICNS set. Packaged the same way as
 fused-render's FusedRender.app: the bundle carries the shell's own imports
-(fused_render_lite, rumps, pyobjc Cocoa) plus the WHOLE standard library, not
+(fused_render_app, rumps, pyobjc Cocoa) plus the WHOLE standard library, not
 the subset modulegraph happens to trace. The bundled `Contents/MacOS/python`
 is the base interpreter every venv is built on (`uv sync --python <it>`), and
 a venv inherits its stdlib — a traced subset surfaces as a missing `venv`,
@@ -17,7 +17,7 @@ from setuptools import setup
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 
-with open(os.path.join(REPO_ROOT, "fused_render_lite", "__init__.py")) as f:
+with open(os.path.join(REPO_ROOT, "fused_render_app", "__init__.py")) as f:
     VERSION = re.search(r'(?m)^__version__\s*=\s*"([^"]+)"', f.read()).group(1)
 
 ICONFILE = os.environ.get("FUSED_RENDER_ICNS")
@@ -36,7 +36,7 @@ STDLIB_EXCLUDED = {
     "lib2to3": "2-to-3 dev tooling, removed upstream in 3.13",
     "antigravity": "opens a web browser at import time",
     "this": "an easter egg; the Zen of Python is not a dependency",
-    # Lite-only trims on top of fused-render's list (measured on the 0.5.6 DMG):
+    # Render App-only trims on top of fused-render's list (measured on the 0.5.6 DMG):
     "_tkinter": "the C half of tkinter; shipping it drags libtcl+libtk (6 MB) into Frameworks",
     "curses": "terminal UI; nothing in a .app has a terminal",
     "_curses": "C half of curses, pulls libncurses+libpanel (1.4 MB)",
@@ -88,9 +88,9 @@ OPTIONS = {
     # extension, half `_metadata.py`, and a traced import can leave the
     # metadata behind — which surfaces as delegate blocks arriving without a
     # signature inside the built app only.
-    "packages": ["fused_render_lite", "rumps", "WebKit"] + STDLIB_PACKAGES,
+    "packages": ["fused_render_app", "rumps", "WebKit"] + STDLIB_PACKAGES,
     "includes": STDLIB_INCLUDES,
-    "resources": [os.path.join(REPO_ROOT, "fused_render_lite", "static")],
+    "resources": [os.path.join(REPO_ROOT, "fused_render_app", "static")],
     # Third-party only: the stdlib is shipped whole (STDLIB_EXCLUDED is the
     # only list that trims it). PIL is imported lazily by runner-side modules
     # that only ever run inside a runner's own venv; the build venv has pillow
@@ -100,9 +100,9 @@ OPTIONS = {
     "excludes": ["setuptools", "pip", "PIL", "pillow", "packaging"],
     "no_report_missing_conditional_import": True,
     "plist": {
-        "CFBundleIdentifier": "io.fused.render.lite",
-        "CFBundleName": "RenderLite",
-        "CFBundleDisplayName": "Render Lite",
+        "CFBundleIdentifier": "io.fused.render.app",
+        "CFBundleName": "RenderApp",
+        "CFBundleDisplayName": "Render App",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
@@ -127,22 +127,22 @@ OPTIONS = {
                 "UTTypeTagSpecification": {"public.filename-extension": ["fused"]},
             }
         ],
-        "NSDesktopFolderUsageDescription": "Render Lite opens .fused apps from your Desktop.",
-        "NSDocumentsFolderUsageDescription": "Render Lite opens .fused apps from your Documents folder.",
-        "NSDownloadsFolderUsageDescription": "Render Lite opens .fused apps from your Downloads folder.",
+        "NSDesktopFolderUsageDescription": "Render App opens .fused apps from your Desktop.",
+        "NSDocumentsFolderUsageDescription": "Render App opens .fused apps from your Documents folder.",
+        "NSDownloadsFolderUsageDescription": "Render App opens .fused apps from your Downloads folder.",
         # Pages run inside the app's own WKWebView (mainwindow.py), so a
         # .fused app's getUserMedia is THIS process asking for the camera or
         # microphone. Without the usage string the OS kills the app instead
         # of prompting.
-        "NSCameraUsageDescription": "Render Lite uses the camera when a .fused app you opened asks for it.",
-        "NSMicrophoneUsageDescription": "Render Lite uses the microphone when a .fused app you opened asks for it.",
+        "NSCameraUsageDescription": "Render App uses the camera when a .fused app you opened asks for it.",
+        "NSMicrophoneUsageDescription": "Render App uses the microphone when a .fused app you opened asks for it.",
     },
 }
 
 if __name__ == "__main__":
     setup(
         app=APP,
-        name="RenderLite",
+        name="RenderApp",
         version=VERSION,
         options={"py2app": OPTIONS},
         setup_requires=["py2app"],

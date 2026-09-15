@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fused-render-lite"
+name = "fused-render-app"
 dynamic = ["version"]
 description = "Opens .fused single-file apps. Nothing else."
 readme = "README.md"
@@ -24,13 +24,13 @@ app = [
 ]
 
 [project.scripts]
-fused-render-lite = "fused_render_lite.cli:main"
+fused-render-app = "fused_render_app.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.hatch.version]
-path = "fused_render_lite/__init__.py"
+path = "fused_render_app/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["fused_render_lite"]
+packages = ["fused_render_app"]

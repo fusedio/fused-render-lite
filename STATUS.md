@@ -1,4 +1,4 @@
-# fused-render-lite status
+# fused-render-app status
 
 One section per version: what the `fused.*` runtime supports, what it does
 not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
@@ -24,9 +24,9 @@ users download.
 | 0.7.2 | 40.98 MB (40,975,692 B) | +0.03 MB | 96 MB | venv-symlink fix; server.json + shared/ (fused_ai, appenv, background_app) |
 | 0.7.1 | 40.95 MB (40,945,024 B) | +0.00 MB | 96 MB | rebuild from main head; no code change |
 | 0.7.0 | 40.94 MB (40,944,835 B) | +0.10 MB | 96 MB | fused.daemon (pure-Python source) + native windows / menu bar; no packaging change |
-| 0.6.1 | 40.85 MB (40,848,435 B) | −0.07 MB | 95 MB | rename to Render Lite; no packaging change |
+| 0.6.1 | 40.85 MB (40,848,435 B) | −0.07 MB | 95 MB | rename to Render App; no packaging change |
 | 0.6.0 | 40.92 MB (40,915,928 B) | +16.52 MB | 95 MB | build/CI parity with fused-render: uv bundled in the app (`Resources/bin/uv`, ~+15 MB), apple tier helper compiled + bundled (macos-26 runner), Mach-O/minos probes, prepare-release job, DMG smoke build in test.yml |
-| 0.5.8 | 24.39 MB (24,393,863 B) | −3.30 MB | 60 MB | size: drop Tcl/Tk, ncurses and CPython's `_test*` fixtures that the whole-stdlib copy dragged in (lite-only trim on top of fused-render's list) |
+| 0.5.8 | 24.39 MB (24,393,863 B) | −3.30 MB | 60 MB | size: drop Tcl/Tk, ncurses and CPython's `_test*` fixtures that the whole-stdlib copy dragged in (Render App-only trim on top of fused-render's list) |
 | 0.5.7 | 27.69 MB (27,690,249 B) | +0.1 KB | 69 MB | fix: a stale `uv` on PATH (no `--managed-python`/`--no-default-groups`) is skipped; the pinned uv is downloaded instead |
 | 0.5.6 | 27.69 MB (27,690,138 B) | +8.16 MB | 69 MB | fix: Python packaged exactly as fused-render (whole stdlib, `Contents/lib` symlink, self-locating bundled interpreter builds every venv; no uv-managed Python detour). App size up (full stdlib). |
 | 0.5.5 | 19.53 MB (19,526,644 B) | +0.2 KB | 29 MB | fix: opener materialises `<app>/.fused/{data,cache}` + `meta.json` on every open (fused-render convention) so `writeFile` into `.fused/data` works without `mkdir` |
@@ -38,7 +38,7 @@ users download.
 | 0.4.0 | 17.73 MB (17,729,166 B) | +1.79 KB | 25 MB | legacy env for apps without `pyproject.toml`; `autoReload(true)` throws |
 | 0.3.0 | 17.73 MB (17,727,372 B) | −1.77 KB | 25 MB | `uploadFile`, `mkdir`, `trackJob`/`watchJob`, `autoReload(false)` no-op, runPython timeout 600 s |
 | 0.2.0 | 17.73 MB (17,729,146 B) | +5.99 KB | 25 MB | `fused.ai.text` (Claude CLI tier) |
-| 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first lite build |
+| 0.1.0 | 17.72 MB (17,723,156 B) | — | 25 MB | first Render App build |
 
 The Claude tier costs nothing beyond one Python module and ~150 lines of
 runtime JS: inference runs in the user's own `claude` CLI, which is not
@@ -73,7 +73,7 @@ Dock: running indicator is a green dot inset in the tile's upper-left corner
 (headroom above tiles removed); Home tile leads the pinned zone wearing the
 app icon; placeholder tiles show the first letter on a palette-hashed
 background until a real icon arrives. Window title bar gains a Home button
-next to Open in Browser. GitHub links added to the dev and lite UIs. No
+next to Open in Browser. GitHub links added to the dev and Render App UIs. No
 packaging change.
 
 ## 0.8.5
@@ -85,7 +85,7 @@ Menu bar icon regenerated from the app glyph with the hollow centre.
 
 ## 0.8.4
 
-Homebrew: `brew install --cask fusedio/tap/fused-render-lite` (PR #7). The
+Homebrew: `brew install --cask fusedio/tap/render-app` (PR #7). The
 release workflow gained a `bump-homebrew` job that rewrites the cask's
 `version`/`sha256` in fusedio/homebrew-tap after the DMG lands on the Release;
 this is the first release that exercises it. No runtime change.
@@ -127,12 +127,12 @@ testing the embedded case. No packaging change.
 Fix: `fused.daemon.start()` refused every real app venv with "not an
 interpreter from the project venv store" — `engine_host._validate_interpreter`
 realpath'd the venv's `bin/python`, a symlink to the base interpreter outside
-`~/.fused-render-lite/venvs`. Now resolves the venv directory instead.
+`~/.fused-render-app/venvs`. Now resolves the venv directory instead.
 
 Fix: apps written to fused-render's background-apps contract could not find
-the server — lite never exported `FUSED_RENDER_HOME_DIR` nor wrote
+the server — Render App never exported `FUSED_RENDER_HOME_DIR` nor wrote
 `<home>/server.json`. `make_server` now does both (`{origin, port, pid,
-shared, version, started}`), and `fused_render_lite/shared/` ships
+shared, version, started}`), and `fused_render_app/shared/` ships
 `appenv.py`, `fused_ai.py`, `background_app.py` verbatim from fused-render so
 `sys.path.insert(0, info["shared"])` works the same way.
 
@@ -145,13 +145,13 @@ menu-bar work (PR #2) alongside `fused.daemon`. No code change.
 
 `fused.daemon` supported — fused-render's background-apps feature copied in
 (`background_apps.py`, `engine_host.py`, `engine_worker.py`,
-`background_app.py`, runtime.js block verbatim). Lite-specific: routes ported
+`background_app.py`, runtime.js block verbatim). Render App-specific: routes ported
 from FastAPI onto the stdlib `Handler` (`background_routes.py`), the proxy is
 synchronous (`engine_forward.py`: same pool / at-most-once / 504-never-heals /
 heal-then-retry-once rules, minus the browser-hangup 204 path), the daemon
 runs on the venv `env.py` built for the app, macOS spawns through a
 posix_spawn-safe bootstrap (no fork; setsid + chdir in the child), and the
-cache lives under `~/.fused-render-lite/engines/<id>/`.
+cache lives under `~/.fused-render-app/engines/<id>/`.
 
 | member | status | notes |
 | --- | --- | --- |
@@ -165,15 +165,15 @@ Server routes added: `GET/POST /api/apps/background/{status,start,stop,restart,a
 
 ## 0.6.1
 
-App renamed to **Render Lite**: `RenderLite.app`, `RenderLite-<version>.dmg`, menu-bar title,
-placeholder page and runtime error text. Python package (`fused_render_lite`), state dir
-(`~/.fused-render-lite`), env vars and bundle id `io.fused.render.lite` unchanged so existing
-installs keep their venvs and settings.
+App renamed to **Render App**: `RenderApp.app`, `RenderApp-<version>.dmg`, menu-bar title,
+placeholder page, runtime error text, Python package (`fused_render_app`), state dir
+(`~/.fused-render-app`), `FUSED_RENDER_APP_*` env vars, bundle id `io.fused.render.app`
+and the Homebrew cask token (`render-app`). Pre-release; no migration.
 
 ## 0.5.0
 
 Changes from 0.4.0: **local inference**, by copying fused-render's AI subsystem
-verbatim (`fused_render_lite/ai/`: registry, catalog, fit, hw_detect, hub_cache,
+verbatim (`fused_render_app/ai/`: registry, catalog, fit, hw_detect, hub_cache,
 supervisor, and every runner folder; `routes/ai_relay.py` + `routes/ai_routes.py`
 are fused-render's own `/api/ai*` routers mounted through a 250-line FastAPI-compat
 layer, `_web.py`). Runners are folders with a `pyproject.toml` + `worker.py`; the
@@ -193,7 +193,7 @@ machine's framework and died on `encodings`) and shipped a traced stdlib subset.
 The bundle is now packaged exactly as FusedRender.app (whole stdlib, symlink,
 self-locate + stdlib-complete probes in build_dmg.sh) and every venv — app,
 legacy, runner — is built on `Contents/MacOS/python`. The dangling
-`SSL_CERT_DIR` py2app exports is still dropped at startup (lite-only).
+`SSL_CERT_DIR` py2app exports is still dropped at startup (Render App-only).
 
 Verified on this Mac (M-series, macOS 26): local text (LFM2.5-1.2B, 4-bit),
 embed (nomic modernbert, 768-d), transcribe (whisper-tiny on a `say` clip,
@@ -216,7 +216,7 @@ a running job, page-driven calls in headless Chrome.
 Disk on first use (this Mac, measured): mlx-text runner venv 581 MB + the default
 0.7 GB text model; other capabilities pull their own runner venv (200 MB–4 GB)
 and model on first call. Models live in the Hugging Face cache; worker state
-under `~/.fused-render-lite/ai/`.
+under `~/.fused-render-app/ai/`.
 
 Routes added: `POST /api/ai/image|video|transcribe|embed`, `GET /api/ai/runtime`,
 `GET /api/ai/catalog`, `POST /api/ai/runtime/load|download|unload`,
@@ -237,8 +237,8 @@ now throws (only `autoReload(false)` is a no-op).
 Legacy set: `numpy`, `pandas`, `requests`, `pillow`, `openpyxl`, `python-pptx`,
 `msgpack>=1.0`, `fpdf2>=2.8.7`, `drain3>=0.9.11`. Not carried over from
 `[bundled]`: `botocore`, `google-auth`, `fused`, `mcp`. Override for tests with
-`FUSED_RENDER_LITE_LEGACY_DEPS` (comma list). Generated project lives at
-`~/.fused-render-lite/legacy/pyproject.toml`; a changed set invalidates the venv.
+`FUSED_RENDER_APP_LEGACY_DEPS` (comma list). Generated project lives at
+`~/.fused-render-app/legacy/pyproject.toml`; a changed set invalidates the venv.
 
 API table: identical to 0.3.0 except `fused.autoReload(true)` → ❌ throws.
 
@@ -264,8 +264,8 @@ detached process can `POST /api/jobs`.
 | `fused.trackJob(spec)` | ✅ new | `update/finish/fail/cancelled`, `cancelRequested`, `state`; fire-and-forget |
 | `fused.watchJob(id)` | ✅ new | `get()`, `watch(cb, ms)`, `stop()`, `cancel()` |
 | `fused.autoReload(false)` | ✅ no-op | opting out of live reload is accepted; nothing to watch in a .fused extract |
-| `fused.autoReload(true)` | ❌ throws | live reload needs a file watcher lite does not have; the app should know |
-| `fused.env` / `fused.device` / `fused.lite` | ✅ | |
+| `fused.autoReload(true)` | ❌ throws | live reload needs a file watcher Render App does not have; the app should know |
+| `fused.env` / `fused.device` / `fused.renderApp` | ✅ | |
 | `fused.ai.text` | ✅ Claude only | as 0.2.0 |
 | `fused.ai.models.list() / catalog()`, `fused.ai.cancel()` | ✅ | as 0.2.0 |
 | `fused.ai.text` with `history`/`raw`/`images` | ❌ `bad_request` | |
@@ -290,7 +290,7 @@ Server routes added: `POST /api/fs/upload`, `POST /api/fs/mkdir`, `GET/POST /api
 | `fused.stat(path)` | ✅ | `{path, name, is_dir, size, mtime, writable}` |
 | `fused.writeFile(path, content, opts?)` | ✅ | `expectedMtime` → 409 `conflict`; `create` → 409 `exists`; 403 `readonly` |
 | `fused.rawUrl(path)` | ✅ | Range requests honoured |
-| `fused.env` / `fused.device` / `fused.lite` | ✅ | `"local"` / `"desktop"` / `true` |
+| `fused.env` / `fused.device` / `fused.renderApp` | ✅ | `"local"` / `"desktop"` / `true` |
 | `fused.ai.text({prompt, ...})` | ✅ Claude only | one `claude -p` per call. `model`: `haiku` (default), `sonnet`, `opus`, `fable`, `claude-*`. `systemPrompt`, `effort` (`low` = no thinking, `medium`, `high`, `xhigh`), `onChunk` (NDJSON over chunked HTTP), `abortSignal` (kills the CLI). `temperature`/`maxTokens`/`topP` → `warnings[]`. Errors: `ai_unavailable`, `bad_request`, `unavailable`, `ai_error`, `timeout` 600 s, `cancelled` |
 | `fused.ai.models.list() / catalog()` | ✅ | Claude catalog; `catalog().unsupported` names the local capabilities |
 | `fused.ai.cancel()` | ✅ | resolves `false`; use `abortSignal` |
@@ -306,11 +306,11 @@ Server routes added: `POST /api/fs/upload`, `POST /api/fs/mkdir`, `GET/POST /api
 | `fused.autoReload` | ❌ throws | live reload |
 | `fused.snapshot` | ❌ throws | git snapshots |
 
-"throws" = `Error("<name> is not supported on fused-render-lite")`, `err.type === "unsupported"`, on property read for namespaces (Proxy) or on call.
+"throws" = `Error("<name> is not supported on fused-render-app")`, `err.type === "unsupported"`, on property read for namespaces (Proxy) or on call.
 
 Server routes: `GET /`, `/open?_file=`, `/render?path=`, `/api/health`, `/api/fs/raw`, `/api/fs/stat`, `/api/open/status`, `/api/ai/runtime`, `/api/ai/catalog`; `POST /api/open`, `/api/drop`, `/api/run`, `/api/fs/write`, `/api/ai` (JSON or chunked NDJSON), `/api/ai/cancel`; other `POST /api/ai/*` → 409 `unavailable`. POSTs need `X-Fused: 1`. 127.0.0.1 only.
 
-Requires the `claude` CLI on the machine for the AI tier (`FUSED_RENDER_LITE_CLAUDE_BIN`, PATH, `~/.claude/local`, `~/.local/bin`, `~/.bun/bin`, Homebrew).
+Requires the `claude` CLI on the machine for the AI tier (`FUSED_RENDER_APP_CLAUDE_BIN`, PATH, `~/.claude/local`, `~/.local/bin`, `~/.bun/bin`, Homebrew).
 
 ---
 
@@ -321,7 +321,7 @@ Requires the `claude` CLI on the machine for the AI tier (`FUSED_RENDER_LITE_CLA
 | `fused.runPython` | ✅ | as above |
 | `fused.params.*` | ✅ | as above |
 | `fused.readFile` / `stat` / `writeFile` / `rawUrl` | ✅ | as above |
-| `fused.env` / `fused.device` / `fused.lite` | ✅ | |
+| `fused.env` / `fused.device` / `fused.renderApp` | ✅ | |
 | `fused.ai.*` (all verbs, `models`, `cancel`) | ❌ throws | whole namespace a Proxy |
 | `fused.capture.*`, `fused.fileIndex.*`, `fused.daemon.*` | ❌ throws | |
 | `fused.trackJob`, `watchJob`, `uploadFile`, `mkdir`, `autoReload`, `snapshot` | ❌ throws | |
@@ -330,7 +330,7 @@ Server routes: as 0.2.0 minus every `/api/ai*` route.
 
 ---
 
-## Removed from fused-render (never in lite)
+## Removed from fused-render (never in Render App)
 
 Explorer shell (React/Vite), ~50 preview templates and their vendored JS,
 file index, LAN sharing, background daemons, jobs, capture, git snapshots,

@@ -20,15 +20,15 @@ def main(n: int = 1, label: str = "x") -> dict:
 
 
 @pytest.fixture(autouse=True)
-def lite_home(tmp_path, monkeypatch):
+def app_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
-    monkeypatch.setenv("FUSED_RENDER_LITE_HOME", str(home))
+    monkeypatch.setenv("FUSED_RENDER_APP_HOME", str(home))
     return home
 
 
 @pytest.fixture
 def v2_fused(tmp_path):
-    from fused_render_lite import container
+    from fused_render_app import container
 
     out = tmp_path / "demo.fused"
     container.write(
@@ -78,7 +78,7 @@ class Client:
 
 @pytest.fixture
 def client():
-    from fused_render_lite import jobs, server
+    from fused_render_app import jobs, server
 
     jobs.reset()  # the job registry is process-wide; each server starts clean
     srv, thread = server.serve_in_thread(0)
@@ -94,7 +94,7 @@ ICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle
 @pytest.fixture
 def v2_fused_icon(tmp_path):
     """Like ``v2_fused`` plus a shipped ``icon.svg`` (the menu-bar dock's card icon)."""
-    from fused_render_lite import container
+    from fused_render_app import container
 
     out = tmp_path / "iconic.fused"
     container.write(

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the apple tier's Swift helper (fused_render_lite/ai/apple/helper/main.swift)
+# Build the apple tier's Swift helper (fused_render_app/ai/apple/helper/main.swift)
 # into a single arm64 binary.
 #
 #   scripts/build_apple_helper.sh [OUT]
 #
-# OUT defaults to fused_render_lite/ai/apple/bin/fused-apple-ai — the checkout
+# OUT defaults to fused_render_app/ai/apple/bin/fused-apple-ai — the checkout
 # location `fused_render/ai/apple/host.py` looks in (gitignored). build_dmg.sh
 # and the `apple-helper` CI job pass their own OUT.
 #
@@ -15,8 +15,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO_ROOT/fused_render_lite/ai/apple/helper/main.swift"
-OUT="${1:-$REPO_ROOT/fused_render_lite/ai/apple/bin/fused-apple-ai}"
+SRC="$REPO_ROOT/fused_render_app/ai/apple/helper/main.swift"
+OUT="${1:-$REPO_ROOT/fused_render_app/ai/apple/bin/fused-apple-ai}"
 MIN_SDK_MAJOR=26
 
 if [[ "$(uname -s)" != "Darwin" ]]; then

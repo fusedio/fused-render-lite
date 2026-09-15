@@ -52,7 +52,7 @@ jobs:
           fi
           PREV_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n1 || true)"
           gh release create "$TAG" --target "${{ github.sha }}" \
-            --title "RenderLite $TAG" \
+            --title "RenderApp $TAG" \
             --generate-notes ${PREV_TAG:+--notes-start-tag "$PREV_TAG"}
 
   build-sign-notarize-release:
@@ -93,7 +93,7 @@ jobs:
       # CODESIGN_CERT_PASSWORD, CODESIGN_IDENTITY (SHA-1 of the Developer ID
       # Application cert), KEYCHAIN_PASSWORD, NOTARY_API_KEY_P8, NOTARY_API_KEY_ID,
       # NOTARY_API_ISSUER_ID. Without them the build is ad-hoc signed and not
-      # notarized (lite-only fallback; main requires them).
+      # notarized (Render App-only fallback; main requires them).
       - name: Import signing cert + notary credentials into ephemeral keychain
         env:
           CODESIGN_CERT_P12: ${{ secrets.CODESIGN_CERT_P12 }}
@@ -162,7 +162,7 @@ jobs:
           # only after the upload succeeds, so the cask never points at a DMG
           # that never made it onto the Release. Version + hash come from the
           # DMG that was actually built, not from the git tag.
-          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderLite-//')" >> "$GITHUB_OUTPUT"
+          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')" >> "$GITHUB_OUTPUT"
           echo "dmg_sha256=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
   bump-homebrew:
@@ -182,12 +182,34 @@ jobs:
           set -euo pipefail
           git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/fusedio/homebrew-tap.git" /tmp/homebrew-tap
           cd /tmp/homebrew-tap
-          sed -i \
-            -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
-            -e "s/^  sha256 \".*\"/  sha256 \"${DMG_SHA256}\"/" \
-            Casks/fused-render-lite.rb
-          git config user.name "fused-render-lite-ci"
+          # Write the whole cask instead of sed-ing version/sha256: the DMG and
+          # .app names (RenderApp-*.dmg, RenderApp.app) live here too, so a
+          # rename ships atomically with the first release built under the new
+          # name. The cask token is render-app.
+          cat > Casks/render-app.rb <<CASK
+          cask "render-app" do
+            version "${VERSION}"
+            sha256 "${DMG_SHA256}"
+
+            url "https://github.com/fusedio/fused-render-app/releases/download/v#{version}/RenderApp-#{version}.dmg"
+            name "Fused Render App"
+            desc "Lightweight runtime for .fused apps: Python-powered interactive HTML views"
+            homepage "https://github.com/fusedio/fused-render-app"
+
+            livecheck do
+              url :url
+              strategy :github_latest
+            end
+
+            depends_on macos: :monterey
+
+            app "RenderApp.app"
+
+            uninstall quit: "io.fused.render.app"
+          end
+          CASK
+          git config user.name "fused-render-app-ci"
           git config user.email "ci@fused.io"
-          git add Casks/fused-render-lite.rb
-          git commit -m "fused-render-lite ${VERSION}"
+          git add Casks/render-app.rb
+          git commit -m "render-app ${VERSION}"
           git push origin main

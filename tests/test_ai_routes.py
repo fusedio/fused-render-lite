@@ -6,12 +6,12 @@ import os
 
 import pytest
 
-from fused_render_lite import claude_health
+from fused_render_app import claude_health
 
 
 @pytest.fixture(autouse=True)
 def no_claude(monkeypatch, tmp_path):
-    monkeypatch.setenv(claude_health.LITE_BIN_ENV, str(tmp_path / "missing"))
+    monkeypatch.setenv(claude_health.APP_BIN_ENV, str(tmp_path / "missing"))
     monkeypatch.setenv(claude_health.BIN_ENV, str(tmp_path / "missing"))
 
 
@@ -48,7 +48,7 @@ def test_text_requires_guard_and_validates(client):
 def test_local_model_ids_route_to_the_local_tier(client, monkeypatch):
     # A repo id selects the local tier; a folder-less request must not spawn
     # anything here, so make the supervisor say "not resident" without loading.
-    from fused_render_lite.ai import supervisor
+    from fused_render_app.ai import supervisor
 
     def fake_generate_text(model, body):
         raise supervisor.ModelNotReady(f"{model} is loading", "sys:ai-model:test")
@@ -77,7 +77,7 @@ def test_runtime_load_rejects_garbage(client):
 
 
 def test_runner_folders_ship_with_the_package():
-    from fused_render_lite.ai import registry
+    from fused_render_app.ai import registry
 
     for runner in registry._RUNNERS:
         assert os.path.isfile(os.path.join(runner.folder, "pyproject.toml")), runner.code
@@ -91,7 +91,7 @@ def test_packaged_app_builds_venvs_on_its_own_interpreter(monkeypatch):
     (None) and never downloads a uv-managed Python."""
     import sys
 
-    from fused_render_lite import engine, env, envinstall
+    from fused_render_app import engine, env, envinstall
 
     monkeypatch.setattr(sys, "frozen", "macosx_app", raising=False)
     envinstall.reset_script_python_cache()

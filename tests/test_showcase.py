@@ -1,13 +1,13 @@
-"""The showcase .fused apps shipped in fused_render_lite/showcase/."""
+"""The showcase .fused apps shipped in fused_render_app/showcase/."""
 import json
 import os
 import sys
 
 import pytest
 
-from fused_render_lite import appfile, container, env, showcase
+from fused_render_app import appfile, container, env, showcase
 
-# Every member a showcase app must NOT call: lite throws on these. An app that
+# Every member a showcase app must NOT call: Render App throws on these. An app that
 # probes one inside try/catch and falls back (OpenWhisper: fused.capture ->
 # getUserMedia) lists it under "guarded" in showcase.json.
 UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.snapshot", "autoReload(true")
@@ -41,7 +41,7 @@ def test_sidecar_matches_files():
         assert row["description"] == meta[row["id"]]["description"]
 
 
-def test_showcase_call_nothing_lite_rejects():
+def test_showcase_calls_nothing_render_app_rejects():
     with open(showcase.SIDECAR, encoding="utf-8") as f:
         meta = json.load(f)
     for path in showcase.showcase_files():
@@ -61,11 +61,11 @@ def test_showcase_call_nothing_lite_rejects():
         assert container.find(index, "pyproject.toml") is not None, path
 
 
-def test_showcase_open(lite_home):
+def test_showcase_open(app_home):
     for path in showcase.showcase_files():
         result = appfile.open_app_file(path)
         assert os.path.isfile(result["entry"])
-        assert result["dir"].startswith(str(lite_home / "apps"))
+        assert result["dir"].startswith(str(app_home / "apps"))
         assert os.path.getsize(path) > 0  # the packaged file is only read, never moved
 
 

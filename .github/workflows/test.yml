@@ -30,7 +30,7 @@ jobs:
               - 'scripts/setup_py2app.py'
               - 'scripts/app_entry.py'
               - 'scripts/build_apple_helper.sh'
-              - 'fused_render_lite/ai/apple/helper/**'
+              - 'fused_render_app/ai/apple/helper/**'
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
 
