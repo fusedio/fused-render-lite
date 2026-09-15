@@ -8,64 +8,126 @@
   :root {
     color-scheme: light dark;
     --fg: #1f2023; --muted: #6b7078; --bg: #f6f7f8; --card: #ffffff;
-    --line: #d9dce1; --accent: #b7f000; --accent-ink: #1a2400; --err: #c62828;
+    --line: #d9dce1; --accent: #ebfd66; --accent-ink: #0d0d0f; --err: #c62828;
   }
   @media (prefers-color-scheme: dark) {
     :root { --fg: #e8eaed; --muted: #9aa0a6; --bg: #131417; --card: #1b1d21; --line: #2c2f35; --err: #ff6b6b; }
   }
-  html, body { height: 100%; margin: 0; }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { min-height: 100%; margin: 0; }
   body {
-    display: grid; place-items: center; padding: 24px; box-sizing: border-box;
+    display: grid; grid-template-columns: minmax(0, 1fr); place-items: safe center; min-height: 100vh; padding: 24px;
+    overflow-x: hidden;
     font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     color: var(--fg); background: var(--bg);
   }
   .zone {
-    width: min(560px, 100%); padding: 48px 32px; text-align: center; border-radius: 16px;
-    background: var(--card); border: 2px dashed var(--line); transition: border-color .15s, background .15s;
+    position: relative; width: min(560px, 100%); padding: 48px 32px; text-align: center; border-radius: 16px;
+    background: color-mix(in srgb, var(--fg) 3%, var(--card));
+    border: 2px dashed color-mix(in srgb, var(--fg) 22%, transparent);
+    transition: border-color .15s, background-color .15s, box-shadow .15s, transform .15s;
   }
-  .zone.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
-  h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
-  p { margin: 0; color: var(--muted); }
+  .zone:hover { border-color: color-mix(in srgb, var(--fg) 32%, transparent); background: color-mix(in srgb, var(--fg) 5%, var(--card)); }
+  .zone.over {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--card));
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent);
+    transform: scale(1.01);
+  }
+  h1 { margin: 0 0 8px; font-size: 20px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.3; }
+  h1 code {
+    font-size: 0.8em; font-weight: 500; padding: 2px 8px; margin: 0 2px; border-radius: 6px;
+    background: color-mix(in srgb, var(--fg) 7%, transparent); border: 1px solid var(--line); vertical-align: 2px;
+  }
+  p { margin: 0; color: var(--muted); font-size: 13px; }
   .or { margin: 22px 0 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-  form { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+  form { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; max-width: 420px; margin: 0 auto; }
   input[type=text] {
-    flex: 1 1 260px; min-width: 0; padding: 10px 12px; border-radius: 8px; font: inherit; font-size: 14px;
+    flex: 1 1 200px; min-width: 0; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 12px;
     border: 1px solid var(--line); background: var(--bg); color: var(--fg);
   }
+  input[type=text]::placeholder { color: color-mix(in srgb, var(--muted) 70%, transparent); }
   button, label.pick {
-    padding: 10px 16px; border-radius: 8px; border: 0; font: inherit; font-size: 14px; font-weight: 600;
-    background: var(--accent); color: var(--accent-ink); cursor: pointer;
+    padding: 6px 12px; border-radius: 6px; font: inherit; font-size: 12px; font-weight: 500;
+    background: transparent; color: var(--muted); border: 1px solid var(--line); cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
   }
-  label.pick { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+  button:hover, label.pick:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
+  label.pick, form.has-text button[type=submit] { color: var(--fg); }
   input[type=file] { display: none; }
   .status { margin-top: 16px; min-height: 1.5em; font-size: 13px; color: var(--muted); }
   .status.err { color: var(--err); }
-  .foot { margin-top: 28px; font-size: 12px; color: var(--muted); }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .wrap { width: min(760px, 100%); display: grid; gap: 28px; justify-items: center; }
-  .showcase { width: 100%; }
+  .brand { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 4px; }
+  .brand .logo { width: 64px; height: 64px; flex: 0 0 auto; border-radius: 16px; background: #1b1d21; display: block; }
+  .brand .name { margin: 0; font-size: 40px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; color: var(--fg); }
+  .brand .name .lite { color: var(--accent); }
+  @media (max-width: 480px) {
+    .brand { gap: 12px; }
+    .brand .logo { width: 40px; height: 40px; border-radius: 10px; }
+    .brand .name { font-size: 26px; }
+  }
+  .wrap { width: min(760px, 100%); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; justify-items: center; }
+  .showcase { width: 100%; min-width: 0; }
   .showcase[hidden] { display: none; }
-  .showcase h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); text-align: center; }
-  .showcase p.lead { margin: 0 0 16px; text-align: center; font-size: 13px; }
+  .showcase h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); text-align: left; }
   .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; }
   .version:empty { display: none; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; justify-content: center; }
+  /* Showcase: a horizontal rail of thumbnails pinned at the bottom. */
+  .rail-wrap { position: relative; width: 100%; min-width: 0; }
+  .rail {
+    display: flex; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity; scroll-behavior: smooth;
+    padding: 4px 2px 10px; scrollbar-width: thin;
+  }
+  .rail.centered { justify-content: center; }
+  .rail::-webkit-scrollbar { height: 6px; }
+  .rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
+  .rail::-webkit-scrollbar-track { background: transparent; }
   .card {
-    display: flex; flex-direction: column; text-align: left; padding: 0; overflow: hidden; border-radius: 12px;
-    background: var(--card); border: 1px solid var(--line); color: var(--fg); font: inherit; cursor: pointer;
+    flex: 0 0 200px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
+    padding: 0; background: transparent; border: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left;
+  }
+  .card .shot {
+    aspect-ratio: 16 / 10; width: 100%; display: block; border-radius: 10px; background: var(--card);
+    border: 1px solid var(--line); object-fit: cover; object-position: top;
     transition: border-color .15s, transform .15s, box-shadow .15s;
   }
-  .card:hover, .card:focus-visible { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,.08); outline: none; }
-  .card .shot { aspect-ratio: 16 / 10; width: 100%; background: var(--bg); object-fit: cover; object-position: top; display: block; border-bottom: 1px solid var(--line); }
-  .card .shot.blank { display: grid; place-items: center; font-size: 32px; color: var(--muted); }
-  .card .body { padding: 12px 14px 14px; display: grid; gap: 4px; }
-  .card .title { font-weight: 600; font-size: 14px; }
-  .card .desc { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
-  .card .open { margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--accent-ink); background: var(--accent); padding: 4px 10px; border-radius: 6px; justify-self: start; }
+  .card:hover .shot, .card:focus-visible .shot { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+  .card:focus-visible { outline: none; }
+  .card .shot.blank { display: grid; place-items: center; font-size: 28px; color: var(--muted); }
+  .card .title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
+  .rail-nav {
+    position: absolute; top: 40%; transform: translateY(-50%); z-index: 1;
+    width: 30px; height: 30px; padding: 0; display: none; align-items: center; justify-content: center;
+    border-radius: 999px; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+    font-size: 18px; line-height: 1; font-weight: 400; cursor: pointer; box-shadow: 0 2px 10px rgba(0,0,0,.12);
+  }
+  .rail-nav.show { display: flex; }
+  .rail-nav:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  #rail-prev { left: -12px; }
+  #rail-next { right: -12px; }
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .zone { padding: 32px 16px; }
+    h1 { font-size: 18px; }
+    .wrap { gap: 20px; }
+    .card { flex-basis: 160px; }
+    #rail-prev { left: -4px; }
+    #rail-next { right: -4px; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
+<header class="brand" aria-label="Render Lite">
+  <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+    <rect width="64" height="64" rx="14" fill="#1b1d21"/>
+    <path d="M32 10 C34 24 40 30 54 32 C40 34 34 40 32 54 C30 40 24 34 10 32 C24 30 30 24 32 10 Z" fill="#ebfd66"/>
+    <circle cx="32" cy="32" r="5" fill="#1b1d21"/>
+  </svg>
+  <div class="name">Render <span class="lite">Lite</span></div>
+</header>
 <div class="zone" id="zone">
   <h1>Drop a <code>.fused</code> app here</h1>
   <p>or double-click one in Finder, or paste its path.</p>
@@ -76,12 +138,14 @@
     <label class="pick">Choose file…<input type="file" id="file" accept=".fused" /></label>
   </form>
   <div class="status" id="status"></div>
-  <div class="foot">Render Lite only opens <code>.fused</code> apps. Supported API: runPython, params, readFile, stat, writeFile, rawUrl.</div>
 </div>
 <section class="showcase" id="showcase" hidden>
-  <h2>Or start from a showcase app</h2>
-  <p class="lead">Apps that ship with Render Lite. Click one to open it.</p>
-  <div class="cards" id="cards"></div>
+  <h2>Showcase</h2>
+  <div class="rail-wrap">
+    <button id="rail-prev" class="rail-nav" type="button" title="Previous" aria-label="Scroll showcase left">&#8249;</button>
+    <div class="rail" id="rail"></div>
+    <button id="rail-next" class="rail-nav" type="button" title="Next" aria-label="Scroll showcase right">&#8250;</button>
+  </div>
 </section>
 <div class="version" id="version"></div>
 </div>
@@ -121,6 +185,10 @@
     openPath(p);
   });
   document.getElementById("file").addEventListener("change", (e) => upload(e.target.files[0]));
+  const pathInput = document.getElementById("path");
+  const syncHasText = () => document.getElementById("form").classList.toggle("has-text", pathInput.value.trim() !== "");
+  pathInput.addEventListener("input", syncHasText);
+  syncHasText();
 
   for (const ev of ["dragenter", "dragover"]) {
     document.addEventListener(ev, (e) => { e.preventDefault(); zone.classList.add("over"); });
@@ -145,7 +213,7 @@
       return;
     }
     if (!rows.length) return;
-    const cards = document.getElementById("cards");
+    const rail = document.getElementById("rail");
     for (const ex of rows) {
       const card = document.createElement("button");
       card.type = "button";
@@ -164,23 +232,36 @@
         blank.textContent = "\u25A3";
         card.appendChild(blank);
       }
-      const body = document.createElement("div");
-      body.className = "body";
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = ex.title;
-      const desc = document.createElement("div");
-      desc.className = "desc";
-      desc.textContent = ex.description || "";
-      const open = document.createElement("span");
-      open.className = "open";
-      open.textContent = "Open";
-      body.append(title, desc, open);
-      card.appendChild(body);
+      card.appendChild(title);
       card.addEventListener("click", () => openPath(ex.file));
-      cards.appendChild(card);
+      rail.appendChild(card);
     }
     document.getElementById("showcase").hidden = false;
+
+    // Arrows only appear when the rail overflows; a rail that fits sits centred.
+    const prev = document.getElementById("rail-prev");
+    const next = document.getElementById("rail-next");
+    const updateNav = () => {
+      const over = rail.scrollWidth - rail.clientWidth - 1;
+      prev.classList.toggle("show", rail.scrollLeft > 4);
+      next.classList.toggle("show", over > 0 && rail.scrollLeft < over);
+      rail.classList.toggle("centered", over <= 0);
+    };
+    const nudge = (dir) => rail.scrollBy({ left: dir * rail.clientWidth * 0.8, behavior: "smooth" });
+    prev.addEventListener("click", () => nudge(-1));
+    next.addEventListener("click", () => nudge(1));
+    rail.addEventListener("scroll", updateNav, { passive: true });
+    rail.addEventListener("wheel", (e) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      e.preventDefault();
+      rail.scrollLeft += e.deltaY;
+    }, { passive: false });
+    window.addEventListener("resize", updateNav);
+    updateNav();
+    requestAnimationFrame(updateNav);
   }
   loadShowcase();
 
