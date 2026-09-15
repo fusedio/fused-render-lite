@@ -272,6 +272,14 @@ def main() -> None:
 
     def quit_app(_sender) -> None:
         logger.info("quitting")
+        # Unload every page and destroy its web view first, so media stops
+        # and WebKit closes its pages before the process goes away.
+        wins = state.get("windows")
+        if wins is not None:
+            try:
+                wins.close_all()
+            except Exception:  # noqa: BLE001 — quitting regardless
+                logger.debug("close_all failed during quit", exc_info=True)
         server.stop_ai()  # evict resident models (kills worker processes), stop the warm claude
         srv = state.get("server")
         if srv is not None:
