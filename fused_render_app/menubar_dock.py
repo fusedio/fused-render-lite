@@ -32,6 +32,7 @@ import subprocess
 import AppKit
 import objc
 from AppKit import (
+    NSAnimationContext,
     NSApp,
     NSColor,
     NSEvent,
@@ -58,6 +59,7 @@ from AppKit import (
     NSWindowCollectionBehaviorTransient,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
+    NSWorkspace,
     NSBackingStoreBuffered,
 )
 from Foundation import NSURL, NSURLRequest
@@ -82,6 +84,37 @@ MAX_SIZE = (1400, 420)
 MESSAGE_NAME = "dock"
 TRAY_RADIUS = 18.0
 GAP_BELOW_MENU_BAR = 4.0
+
+# Appear / dismiss: the panel drops from the menu bar (starts tucked up by
+# APPEAR_OFFSET, fully transparent) and settles into place; dismissal is the
+# reverse, quicker, since it follows a click elsewhere and must not feel
+# laggy. The fade is decoupled from the motion and much shorter: the tray is
+# fully visible while most of the travel still happens, so the movement
+# reads (a fade as long as the slide hides the slide). The slide curve is a
+# spring-like "expo out": fast start, long soft settle, no overshoot — window
+# frames cannot take a CASpringAnimation, this is the closest bezier.
+# Skipped when Reduce Motion is on.
+APPEAR_OFFSET = 18.0
+APPEAR_DURATION = 0.42
+APPEAR_FADE = 0.14
+DISMISS_OFFSET = 8.0
+DISMISS_DURATION = 0.2
+DISMISS_FADE = 0.16
+EASE_SPRING = (0.16, 1.0, 0.3, 1.0)
+EASE_IN = (0.4, 0.0, 1.0, 1.0)
+EASE_LINEAR = (0.0, 0.0, 1.0, 1.0)
+
+
+# QuartzCore class, reached through the runtime: it is already loaded by
+# AppKit, and pyobjc-framework-Quartz is not a dependency.
+CAMediaTimingFunction = objc.lookUpClass("CAMediaTimingFunction")
+
+
+def _reduce_motion() -> bool:
+    try:
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion())
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _make_glass(w: float, h: float):
@@ -282,6 +315,9 @@ class DockController:
         self._size = INITIAL_SIZE
         self._tray = None  # (x, y, w, h) in page coordinates, top-left origin
         self._resizing = False  # separator drag in progress (resize cursor held)
+        self._closing = False  # dismiss animation running (panel still ordered in)
+        self._animating_in = False  # appear animation running: _place must not snap
+        self._anim_gen = 0  # bumps on every show/close; stale completions bail
         self._build_panel()
         self._take_over_status_item()
 
@@ -296,7 +332,9 @@ class DockController:
         self._load()
 
     def is_shown(self) -> bool:
-        return bool(self._panel.isVisible())
+        # A panel mid-dismiss counts as hidden: a status-item click while it
+        # fades out reopens it instead of doing nothing.
+        return bool(self._panel.isVisible()) and not self._closing
 
     def toggle_popover(self) -> None:
         if self.is_shown():
@@ -311,14 +349,52 @@ class DockController:
         if self._monitor is not None:
             NSEvent.removeMonitor_(self._monitor)
             self._monitor = None
-        if self.is_shown():
+        if not self._panel.isVisible() or self._closing:
+            return
+        self._anim_gen += 1
+        gen = self._anim_gen
+        self._animating_in = False
+        if _reduce_motion():
             self._panel.orderOut_(None)
+            return
+        self._closing = True
+        frame = self._panel.frame()
+        target = NSMakeRect(frame.origin.x, frame.origin.y + DISMISS_OFFSET,
+                            frame.size.width, frame.size.height)
+
+        def done():
+            if gen != self._anim_gen:
+                return  # re-shown mid-fade: leave it up
+            self._closing = False
+            self._panel.orderOut_(None)
+            self._panel.setAlphaValue_(1.0)
+
+        self._animate(target, DISMISS_DURATION, EASE_IN, 0.0, DISMISS_FADE, done)
 
     def show_popover(self) -> None:
         if not self._loaded:
             self._load()
+        self._anim_gen += 1
+        gen = self._anim_gen
+        self._closing = False
         self._place()
-        self._panel.makeKeyAndOrderFront_(None)
+        if _reduce_motion():
+            self._panel.setAlphaValue_(1.0)
+            self._panel.makeKeyAndOrderFront_(None)
+        else:
+            rest = self._panel.frame()
+            start = NSMakeRect(rest.origin.x, rest.origin.y + APPEAR_OFFSET,
+                               rest.size.width, rest.size.height)
+            self._panel.setFrame_display_(start, False)
+            self._panel.setAlphaValue_(0.0)
+            self._panel.makeKeyAndOrderFront_(None)
+            self._animating_in = True
+
+            def done():
+                if gen == self._anim_gen:
+                    self._animating_in = False
+
+            self._animate(rest, APPEAR_DURATION, EASE_SPRING, 1.0, APPEAR_FADE, done)
         # A click anywhere outside the panel — in another app, on the desktop,
         # on the menu bar — dismisses it, like the Dock's own menus. The
         # non-activating panel does not make us the active app, so
@@ -330,6 +406,24 @@ class DockController:
                 mask, lambda _e: self.close())
         self._webview.evaluateJavaScript_completionHandler_(
             "window.dockShown && window.dockShown();", None)
+
+    def _animate(self, frame, duration, ease, alpha, fade, completion) -> None:
+        """Slide the panel to ``frame`` over ``duration`` and fade it to
+        ``alpha`` over ``fade`` — two groups, so the fade can be short while
+        the slide is long. ``completion`` runs when the slide ends."""
+        def group(secs, curve, done, apply):
+            NSAnimationContext.beginGrouping()
+            ctx = NSAnimationContext.currentContext()
+            ctx.setDuration_(secs)
+            ctx.setTimingFunction_(CAMediaTimingFunction.functionWithControlPoints____(*curve))
+            if done is not None:
+                ctx.setCompletionHandler_(done)
+            apply()
+            NSAnimationContext.endGrouping()
+
+        group(fade, EASE_LINEAR, None, lambda: self._panel.animator().setAlphaValue_(alpha))
+        group(duration, ease, completion,
+              lambda: self._panel.animator().setFrame_display_(frame, True))
 
     def set_tray(self, tray: dict | None) -> None:
         """Move the glass to a new tray rect without touching the panel."""
@@ -383,7 +477,9 @@ class DockController:
             except (KeyError, TypeError, ValueError):
                 self._tray = None
         self._layout()
-        if self.is_shown():
+        # Not while dropping in: _place would snap the panel to rest and cut
+        # the slide short (dockShown → refresh → report lands right here).
+        if self.is_shown() and not self._animating_in:
             self._place()
         if self._resizing:  # frame changes reset the cursor: see set_resizing
             AppKit.NSCursor.resizeUpDownCursor().set()
@@ -577,8 +673,13 @@ class DockController:
         bottom-left coordinates); webview = whole panel."""
         w, h = self._size
         frame = self._panel.frame()
-        self._panel.setFrame_display_(
-            NSMakeRect(frame.origin.x, frame.origin.y + frame.size.height - h, w, h), True)
+        if (w, h) != (frame.size.width, frame.size.height):
+            # A direct setFrame cancels a running animator slide where it
+            # stands. Only touch the frame when the size really changed —
+            # the page reports its (unchanged) size on every show.
+            self._animating_in = False
+            self._panel.setFrame_display_(
+                NSMakeRect(frame.origin.x, frame.origin.y + frame.size.height - h, w, h), True)
         self._panel.contentView().setFrame_(NSMakeRect(0, 0, w, h))
         self._webview.setFrame_(NSMakeRect(0, 0, w, h))
         self._layout_glass()
