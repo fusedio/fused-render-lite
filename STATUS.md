@@ -50,6 +50,12 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.2
+
+Menu bar: Dock popover listing pinned and recent apps (PR #4).
+
+Window title bar: "Open in Browser" button (PR #3). No packaging change.
+
 ## 0.8.1
 
 Launcher: showcase cards redesigned as a horizontal scroll rail with a
