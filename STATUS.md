@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.6 | 42.50 MB (42,497,237 B) | +0.01 MB | 98 MB | dock green running badge, Home leads pinned zone, palette placeholders, Home title-bar button, GitHub links; no packaging change |
 | 0.8.5 | 42.48 MB (42,482,659 B) | −0.00 MB | 98 MB | dock Home tile focus fix, softer magnify, hollow menubar icon; no packaging change |
 | 0.8.4 | 42.48 MB (42,482,819 B) | +0.00 MB | 98 MB | Homebrew cask + `bump-homebrew` release job (PR #7); no code change |
 | 0.8.3 | 42.48 MB (42,479,175 B) | −0.19 MB | 98 MB | first Developer ID-signed + notarized + stapled DMG; DMG container codesigned (PR #6); no code change |
