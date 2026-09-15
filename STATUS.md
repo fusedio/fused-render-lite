@@ -51,6 +51,14 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.3
+
+Release pipeline: first Developer ID-signed + notarized + stapled DMG. The 7
+signing/notary secrets are now set on the repo. `build_dmg.sh` also codesigns
+the DMG container itself after `dmgbuild` (PR #6) — without it notarization
+and stapling succeeded but Gatekeeper's `spctl -a -t open` rejected the DMG
+with `no usable signature`. No runtime change.
+
 ## 0.8.2
 
 Menu bar: Dock popover listing pinned and recent apps (PR #4).
