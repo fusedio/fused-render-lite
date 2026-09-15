@@ -303,6 +303,14 @@
     tile.replaceChildren(span);
   }
 
+  // ---------- theme ----------
+  // The tray follows the OS (no pinned theme here, unlike fused-render's
+  // shell). Icons are re-fetched with the new theme on a scheme flip: render()
+  // recomputes every tile's src and retargets the ones that changed.
+  const darkMq = window.matchMedia("(prefers-color-scheme: dark)");
+  const theme = () => (darkMq.matches ? "dark" : "light");
+  darkMq.addEventListener("change", () => render());
+
   // ---------- item nodes ----------
   function makeItem(app) {
     const b = document.createElement("button");
@@ -330,7 +338,10 @@
     if (wantImg) {
       // iconVersion changes when an extract-dir override lands, so an
       // existing <img> retargets instead of showing the first icon forever.
-      const src = "/api/dock/icon?file=" + encodeURIComponent(app.file) + "&v=" + encodeURIComponent(app.iconVersion ?? "");
+      // The theme rides along too: a picked glyph strokes in currentColor
+      // and the server resolves it (icon_color.py) — an <img> cannot see
+      // this page's colour scheme — so a scheme flip is also a new src.
+      const src = "/api/dock/icon?file=" + encodeURIComponent(app.file) + "&v=" + encodeURIComponent(app.iconVersion ?? "") + "&theme=" + theme();
       if (!img || img.dataset.src !== src) {
         tile.classList.remove("fallback"); tile.style.background = "";
         const im = document.createElement("img"); im.alt = ""; im.draggable = false; im.dataset.src = src; im.src = src;
