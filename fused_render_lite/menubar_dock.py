@@ -385,6 +385,8 @@ class DockController:
         self._layout()
         if self.is_shown():
             self._place()
+        if self._resizing:  # frame changes reset the cursor: see set_resizing
+            AppKit.NSCursor.resizeUpDownCursor().set()
 
     # ---- status item -------------------------------------------------------------
 

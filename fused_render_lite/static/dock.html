@@ -538,7 +538,10 @@
     placeBubble();
     reportTray();  // the native glass follows the widening tray every frame
     if (moving) mag.raf = requestAnimationFrame(tick);
-    else if (!mag.active) { mag.rest = null; report(); }  // back at rest: settle the panel size
+    // Back at rest: settle the panel size — unless the separator is being
+    // dragged (the panel was sized once for the whole drag; onSepDown's
+    // release settles it).
+    else if (!mag.active && !state.resizing) { mag.rest = null; report(); }
   }
   function kick() { if (!mag.raf) mag.raf = requestAnimationFrame(tick); }
   function pointerAt(px) {
@@ -772,8 +775,10 @@
       if (ev.pointerId !== start.id) return;
       // Anchored to the menu bar: the tray's bottom edge moves 1:1 with the tile.
       let t = Math.round(start.tile + (ev.clientY - start.y));
-      t = Math.min(Math.max(t, TILE_MIN), start.max);
       if (ev.altKey) t = TILE_SNAPS.reduce((a, b) => Math.abs(b - t) < Math.abs(a - t) ? b : a);
+      // Clamp AFTER the snap: the nearest snap can sit above the screen-fit
+      // cap the panel was reserved for at drag start.
+      t = Math.min(Math.max(t, TILE_MIN), start.max);
       start.want = t;
       if (!start.raf) start.raf = requestAnimationFrame(frame);
     };
