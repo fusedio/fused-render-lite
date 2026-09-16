@@ -784,6 +784,14 @@ class DockController:
         w, h = self._size
         frame = self._panel.frame()
         key = (self._rx, w, h)
+        # Views first, window frame second, and no forced display: the web
+        # view's offset (canvas (rx, 0) → panel top-left) and the glass must
+        # be in place before the panel shows its new region, and all of it
+        # commits in the one Core Animation transaction at the end of this
+        # run-loop pass. A display:YES here would paint the new viewport over
+        # the old canvas slice — exactly the sideways flash this avoids.
+        self._webview.setFrame_(NSMakeRect(-self._rx, h - CANVAS[1], CANVAS[0], CANVAS[1]))
+        self._layout_glass()
         if not self._panel.isVisible():
             if key != self._applied:
                 self._panel.setFrame_display_(self._rest_frame(), False)
@@ -796,19 +804,15 @@ class DockController:
                 old_to = self._slide.target()
                 dx, dy = frame.origin.x - old_to[0], frame.origin.y - old_to[1]
                 self._panel.setFrame_display_(
-                    NSMakeRect(rest.origin.x + dx, rest.origin.y + lift + dy, w, h), True)
+                    NSMakeRect(rest.origin.x + dx, rest.origin.y + lift + dy, w, h), False)
                 self._slide.retarget((rest.origin.x, rest.origin.y + lift))
             else:
-                self._panel.setFrame_display_(rest, True)
+                self._panel.setFrame_display_(rest, False)
             self._send_anchor()
         elif not self._slide.running():
             self._place()  # same region, but the status item may have moved
         self._applied = key
         self._panel.contentView().setFrame_(NSMakeRect(0, 0, w, h))
-        # Same size always; only the offset changes (canvas (rx, 0) → panel
-        # top-left). AppKit-side, so it commits with the frame change above.
-        self._webview.setFrame_(NSMakeRect(-self._rx, h - CANVAS[1], CANVAS[0], CANVAS[1]))
-        self._layout_glass()
 
     def _anchor(self):
         """Status-item centre x, menu-bar bottom y, and the screen's usable
