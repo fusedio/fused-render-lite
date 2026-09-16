@@ -58,6 +58,16 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.10
+
+Release DMG is now also uploaded to S3 (`fused-render` bucket,
+`render-app-dmgs/` prefix) and served from the same CloudFront distribution
+as fused-render at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/`
+(PR #18; IAM role `github_render_app_role`, fusedlabs/application#8016). The
+Homebrew cask `render-app` downloads from the CDN instead of GitHub Release
+assets (homebrew-tap #7). Dock accepts `icon.png` as a lower-priority
+fallback to `icon.svg` (PR #17). No packaging change.
+
 ## 0.8.9
 
 Dock icons follow the system theme (port of fused-render's icon-color swap,
