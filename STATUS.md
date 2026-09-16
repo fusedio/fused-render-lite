@@ -60,6 +60,24 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.12
+
+Native macOS notifications for background work (PR #21). Render App posts
+its own `UNUserNotificationCenter` banners for model downloads, env
+installs, renders and AI jobs, without adopting fused-render's in-app
+notification panel. One stable identifier per job row: the silent
+"started" banner is replaced in place by the outcome. `jobs.set_transition_hook`
+fires once per row creation or state change (never on a progress tick);
+`notify_policy` (pure) decides which transitions notify, mirroring
+fused-render's tier semantics (silent/transient success stays quiet,
+error/cancelled is always news, start banners only for model downloads and
+env installs); `webnotify` gains module-level notify/remove/click dispatch by
+identifier prefix; `jobnotify` is the glue macapp installs, routing clicks:
+an install banner focuses the app whose env it built, a render banner
+reveals the output file, everything else shows Home. Error banners show the
+first line naming an exception or uv's `error:`, else the last line; an
+approved compile silently replaces its "approve" banner. No packaging change.
+
 ## 0.8.11
 
 Browser parity in app windows (PR #20). WKWebView asks the host before
