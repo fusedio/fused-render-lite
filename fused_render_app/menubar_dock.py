@@ -10,9 +10,20 @@ borderless, non-opaque ``NSPanel`` under the status item, and the glass is an
 ``NSVisualEffectView`` with rounded corners sized to the tray rect the page
 reports — nothing else is drawn, so there is no popover box around the Dock
 (an ``NSPopover`` always paints its own chrome; that is why it is not one).
-The page reports its size and the tray rect through a script message and
-the panel follows; the panel tells the page where the status item is, so a
-tray resized by dragging the separator stays anchored under it.
+
+The web view is never resized. It is a fixed ``CANVAS``-sized surface
+(``MAX_SIZE``) pinned in screen space — centred under the status item, its
+top at the menu bar — and the panel is a viewport onto it: the page lays the
+tray out where it wants inside the canvas, reports the rect it occupies, and
+the panel's frame plus the web view's offset inside it are set together so
+that rect (and only it) is on screen. Resizing a WKWebView is a two-process
+affair: AppKit moves the window at once, WebKit paints the new layout a frame
+later, and in between the old content shows at the new place — the tray
+flashed sideways whenever the panel grew (drag start, first size report).
+Moving a window and offsetting a view inside it is AppKit-only and commits
+in one transaction, so nothing flashes. The panel tells the page where the
+status item and screen edges are in canvas coordinates, and the page centres
+the tray under the icon itself.
 
 Status item: rumps attached an ``NSMenu`` to it, which AppKit opens on every
 click without ever firing the button's action. The menu is taken off; left
@@ -82,6 +93,7 @@ logger = logging.getLogger(__name__)
 INITIAL_SIZE = (360, 100)
 MIN_SIZE = (120, 60)
 MAX_SIZE = (1400, 420)
+CANVAS = MAX_SIZE  # the web view's fixed size; the panel shows a region of it
 MESSAGE_NAME = "dock"
 TRAY_RADIUS = 18.0
 GAP_BELOW_MENU_BAR = 4.0
@@ -313,7 +325,7 @@ class _ScriptHandler(NSObject):
         tray = data.get("tray")
         tray = dict(tray) if tray is not None else None
         if kind == "size":
-            self._c.resize_to(data.get("width"), data.get("height"), tray)
+            self._c.resize_to(data.get("width"), data.get("height"), tray, data.get("x", 0))
         elif kind == "tray":  # per-frame while the fisheye is live: glass only
             self._c.set_tray(tray)
         elif kind == "resize":  # separator drag started / ended
@@ -415,6 +427,8 @@ class DockController:
         self._loaded = False
         self._monitor = None
         self._size = INITIAL_SIZE
+        self._rx = 0.0  # the region's left edge in canvas (page) coordinates
+        self._applied = None  # (rx, w, h) the panel frame was last set for
         self._tray = None  # (x, y, w, h) in page coordinates, top-left origin
         self._resizing = False  # separator drag in progress (resize cursor held)
         self._closing = False  # dismiss animation running (panel still ordered in)
@@ -542,28 +556,36 @@ class DockController:
             return
         _w, h = self._size
         tx, ty, tw, th = self._tray
-        self._glass.setFrame_(NSMakeRect(tx, h - ty - th, tw, th))
+        # Page coordinates are canvas coordinates; the panel shows the canvas
+        # from (rx, 0), so shift by rx and flip.
+        self._glass.setFrame_(NSMakeRect(tx - self._rx, h - ty - th, tw, th))
         self._glass.setHidden_(False)
 
-    def resize_to(self, width, height, tray: dict | None = None) -> None:
+    def resize_to(self, width, height, tray: dict | None = None, x=0) -> None:
+        """The page reports the canvas region it occupies: ``x`` (its left
+        edge in canvas px; top is always 0) and its size."""
         try:
             w = float(width)
             h = float(height)
+            rx = float(x or 0)
         except (TypeError, ValueError):
             return
-        if not (math.isfinite(w) and math.isfinite(h)):
+        if not (math.isfinite(w) and math.isfinite(h) and math.isfinite(rx)):
             return
         w = min(max(math.ceil(w), MIN_SIZE[0]), MAX_SIZE[0])
         h = min(max(math.ceil(h), MIN_SIZE[1]), MAX_SIZE[1])
         self._size = (w, h)
+        self._rx = float(min(max(math.floor(rx), 0), CANVAS[0] - w))
         if tray:
             try:
                 self._tray = tuple(float(tray[k]) for k in ("x", "y", "w", "h"))
             except (KeyError, TypeError, ValueError):
                 self._tray = None
         self._layout()
-        if self._panel.isVisible():
-            self._send_anchor()  # the page always has a fresh anchor after a report
+        # The page always has a fresh anchor after a report — including its
+        # first, hidden one, so the first show lands right. It re-reports only
+        # when the anchor changed, so this does not loop.
+        self._send_anchor()
         if self._resizing:  # frame changes reset the cursor: see set_resizing
             AppKit.NSCursor.resizeUpDownCursor().set()
 
@@ -733,7 +755,7 @@ class DockController:
             pass
 
         self._webview = WKWebView.alloc().initWithFrame_configuration_(
-            NSMakeRect(0, 0, w, h), config)
+            NSMakeRect(0, h - CANVAS[1], CANVAS[0], CANVAS[1]), config)
         # Transparent: only the tiles paint; the glass beneath is native.
         try:
             self._webview.setValue_forKey_(False, "drawsBackground")
@@ -753,18 +775,19 @@ class DockController:
         self._layout()
 
     def _layout(self) -> None:
-        """Panel = page size, placed under the status item; glass = the tray
-        rect (flipped into AppKit's bottom-left coordinates); webview = whole
-        panel. One frame write per size change. While the panel is sliding,
-        the slide is retargeted to the new rest spot instead of snapped (the
-        page reports its real size right after ``dockShown``)."""
+        """Panel = the reported canvas region, placed so the canvas stays put
+        on screen; webview = the whole canvas, offset so the region sits at
+        the panel's top-left; glass = the tray rect (flipped into AppKit's
+        bottom-left coordinates). One frame write per region change. While
+        the panel is sliding, the slide is retargeted to the new rest spot
+        instead of snapped (the page reports right after ``dockShown``)."""
         w, h = self._size
         frame = self._panel.frame()
+        key = (self._rx, w, h)
         if not self._panel.isVisible():
-            if (w, h) != (frame.size.width, frame.size.height):
-                self._panel.setFrame_display_(
-                    NSMakeRect(frame.origin.x, frame.origin.y + frame.size.height - h, w, h), False)
-        elif (w, h) != (frame.size.width, frame.size.height):
+            if key != self._applied:
+                self._panel.setFrame_display_(self._rest_frame(), False)
+        elif key != self._applied:
             rest = self._rest_frame()
             if self._slide.running():
                 # Resize in place: keep the panel's current offset from its
@@ -779,9 +802,12 @@ class DockController:
                 self._panel.setFrame_display_(rest, True)
             self._send_anchor()
         elif not self._slide.running():
-            self._place()  # same size, but the status item may have moved
+            self._place()  # same region, but the status item may have moved
+        self._applied = key
         self._panel.contentView().setFrame_(NSMakeRect(0, 0, w, h))
-        self._webview.setFrame_(NSMakeRect(0, 0, w, h))
+        # Same size always; only the offset changes (canvas (rx, 0) → panel
+        # top-left). AppKit-side, so it commits with the frame change above.
+        self._webview.setFrame_(NSMakeRect(-self._rx, h - CANVAS[1], CANVAS[0], CANVAS[1]))
         self._layout_glass()
 
     def _anchor(self):
@@ -801,16 +827,31 @@ class DockController:
         vis = screen.visibleFrame()
         return cx, top, vis.origin.x + 4, vis.origin.x + vis.size.width - 4
 
+    def _canvas_x(self, cx: float, left: float, right: float) -> float:
+        """Screen x of the canvas's left edge: centred under the status item,
+        then pushed onto the screen (right edge first, then left) so the
+        canvas — and with it the room the tray may grow into — covers as much
+        of the screen as it can. On a screen narrower than the canvas it
+        starts at the left edge and overhangs the right; the anchor's range
+        then spans the whole screen."""
+        ox = cx - CANVAS[0] / 2
+        if math.isfinite(right):
+            ox = min(ox, right - CANVAS[0])
+        if math.isfinite(left):
+            ox = max(ox, left)
+        return ox
+
     def _rest_frame(self):
-        """Where the panel rests: centred under the status item, hanging
-        from the menu bar, kept on screen."""
+        """Where the panel rests: the reported region of the canvas, the
+        canvas centred under the status item and hanging from the menu bar.
+        Keeping the tray on screen is the page's job (see ``_send_anchor``)."""
         w, h = self._size
         a = self._anchor()
         if a is None:
             f = self._panel.frame()
             return NSMakeRect(f.origin.x, f.origin.y + f.size.height - h, w, h)
         cx, top, left, right = a
-        x = max(left, min(cx - w / 2, right - w))
+        x = self._canvas_x(cx, left, right) + self._rx
         y = top - GAP_BELOW_MENU_BAR - h
         return NSMakeRect(x, y, w, h)
 
@@ -824,21 +865,22 @@ class DockController:
         self._send_anchor()
 
     def _send_anchor(self) -> None:
-        """Tell the page where the status item is (screen x) and how far the
-        panel may go left/right. While the separator is dragged the panel is
-        pinned to the largest reachable size and, on a narrow screen, shoved
-        left to fit — with this the page keeps the tray exactly where it will
-        rest for the current tile size, under the icon, instead of at the
-        centre of a screen-wide panel. Screen points are CSS px."""
+        """Tell the page, in canvas (page) coordinates, where the status
+        item's centre is and the leftmost/rightmost x the tray may occupy
+        (screen edges, 4px in, clipped to the canvas). The page centres the
+        tray under the icon and clamps it to that range; the panel just
+        frames whatever region the page reports. Screen points are CSS px.
+        The page re-reports when the anchor changes, so this is idempotent."""
         a = self._anchor()
         if a is None:
             return
         cx, _top, left, right = a
-        left = left if math.isfinite(left) else -1e9
-        right = right if math.isfinite(right) else 1e9
+        ox = self._canvas_x(cx, left, right)
+        left = max(0.0, left - ox) if math.isfinite(left) else 0.0
+        right = min(float(CANVAS[0]), right - ox) if math.isfinite(right) else float(CANVAS[0])
         self._webview.evaluateJavaScript_completionHandler_(
             "window.dockAnchor && window.dockAnchor({icon:%r,left:%r,right:%r});"
-            % (float(cx), float(left), float(right)), None)
+            % (float(cx - ox), float(left), float(right)), None)
 
     def _url(self) -> str:
         return f"http://127.0.0.1:{self._port}/dock"
