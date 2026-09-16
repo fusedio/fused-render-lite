@@ -216,12 +216,12 @@
     border: 6px solid transparent; border-bottom-color: rgba(56,56,60,.92); border-top: 0;
   }
   #bubble.on { opacity: 1; }
-  /* With a preview: the picture on top, the name under it, like a Dock
+  /* With a preview: the name on top, the picture under it, like a Dock
      tooltip grown into a card. The <img> is set on hover (setHover), never
      on render, so a poll re-render does not refetch N pictures. */
   #bubble.pic { padding: 6px 6px 5px; border-radius: 12px; }
   #bubble img {
-    display: block; margin: 0 auto 5px;
+    display: block; margin: 5px auto 0;
     max-width: var(--preview-w); max-height: var(--preview-h); width: auto; height: auto;
     border-radius: 7px; background: rgba(255,255,255,.06);
   }
@@ -635,7 +635,7 @@
     name.textContent = b.dataset.name + (missing ? " (missing)" : "");
     const src = missing ? "" : b.dataset.preview;
     bubble.classList.toggle("pic", !!src);
-    bubble.replaceChildren(...(src ? [previewImg(src), name] : [name]));
+    bubble.replaceChildren(...(src ? [name, previewImg(src)] : [name]));
   }
   tray.addEventListener("pointermove", (e) => {
     if (state.dragging || state.menuFor || state.resizing) return;
