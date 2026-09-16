@@ -175,14 +175,18 @@ keychain profile) additionally notarizes and staples.
 ### Release pipeline (GitHub Actions)
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
-macOS release job step for step (no S3/CloudFront, update manifest or
-Windows/Linux builds): `prepare-release` creates the GitHub Release, then on
-`macos-26` an ephemeral keychain gets the Developer ID cert and an App Store
-Connect API key, `build_dmg.sh` builds + signs + notarizes + staples, the
-ticket is verified, and the DMG lands on the Release. `bump-homebrew` then
-rewrites `version`/`sha256` in `Casks/render-app.rb` of
-[fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap) and pushes,
-so `brew upgrade --cask render-app` picks the release up. To rebuild an existing tag:
+macOS release job step for step (no update manifest or Windows/Linux builds):
+`prepare-release` creates the GitHub Release, then on `macos-26` an ephemeral
+keychain gets the Developer ID cert and an App Store Connect API key,
+`build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified, the
+DMG is uploaded to the `fused-render` S3 bucket under `render-app-dmgs/` (served
+by the same CloudFront distribution as fused-render, at
+`https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg`; the
+CI assumes `github_render_app_role` via OIDC, which can only write that prefix),
+and the DMG + wheel land on the Release. `bump-homebrew` then rewrites
+`Casks/render-app.rb` of [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap)
+to point at the CDN copy and pushes, so `brew upgrade --cask render-app` picks
+the release up. To rebuild an existing tag:
 `gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
 tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
 packaging files change. Signing needs these repository secrets (values are
