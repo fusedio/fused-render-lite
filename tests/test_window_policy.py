@@ -32,6 +32,27 @@ def test_classify(url, kind):
     assert wp.classify(url, PORT) == kind
 
 
+@pytest.mark.parametrize(
+    "host, port, own",
+    [
+        ("127.0.0.1", PORT, True),
+        ("localhost", PORT, True),
+        ("LOCALHOST", PORT, True),
+        ("[::1]", PORT, True),
+        ("127.0.0.1", PORT + 1, False),  # some other local server
+        ("127.0.0.1", 0, False),          # WKSecurityOrigin of an opaque origin
+        ("127.0.0.1", None, False),
+        ("huggingface.co", PORT, False),  # a foreign host on "our" port number
+        ("", PORT, False),
+        (None, PORT, False),
+    ],
+)
+def test_is_own_origin(host, port, own):
+    # Media-capture and geolocation grants hinge on this: our pages yes,
+    # a third-party iframe inside an app no.
+    assert wp.is_own_origin(host, port, PORT) is own
+
+
 def _nav(url, **kw):
     base = dict(is_main_frame=True, has_target_frame=True,
                 wants_download=False, new_window_modifier=False)

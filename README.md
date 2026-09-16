@@ -21,11 +21,14 @@ menu bar item, a main menu, and one window per opened `.fused`.
 | in a window | what happens |
 | --- | --- |
 | Finder open, Dock click, File → Open… (⌘O), New Window (⌘N) | a new window (Dock click focuses the front one if any) |
-| `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window |
+| `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window (`window.open` returns a live handle: `postMessage`, `opener`, `close()` work) |
+| `window.close()` from a page | closes that window |
 | a link to another site | the default browser |
 | `<a download>`, `Content-Disposition: attachment`, a type WebKit can't show | saved to `~/Downloads` (Finder-style `name 2` on collision) |
 | `alert` / `confirm` / `prompt`, `<input type=file>` | native panels |
-| `getUserMedia` from the app's own page | granted; the system camera/mic prompt still applies |
+| `getUserMedia`, `navigator.geolocation` from the app's own page | granted; the system camera/mic/location prompt still applies |
+| `requestPointerLock` (FPS-style mouse look) | granted, Esc releases |
+| `Notification.requestPermission` / `new Notification` from the app's own page | granted; shown as a macOS notification, click focuses the app |
 | ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
 
 Closing the last window does not quit. The menu-bar item has four entries:

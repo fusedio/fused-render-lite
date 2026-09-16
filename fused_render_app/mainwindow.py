@@ -18,8 +18,13 @@ What the browser used to do for a page, the delegates here do instead
 - `<a download>`, `Content-Disposition: attachment`, un-showable MIME types →
   saved into ~/Downloads under a Finder-style unique name.
 - `alert()` / `confirm()` / `prompt()` → NSAlert; `<input type=file>` →
-  NSOpenPanel; camera/mic requests from the app's own origin → granted (the
-  system TCC prompt still gates the hardware); `requestFullscreen` enabled.
+  NSOpenPanel; camera/mic and geolocation requests from the app's own
+  origin → granted (the system TCC prompt still gates the hardware);
+  `requestFullscreen` enabled; `requestPointerLock` granted;
+  `window.close()` closes the window.
+- `Notification.requestPermission()` / `new Notification(...)` from the
+  app's own origin → granted, shown as a macOS notification (`webnotify.py`
+  installs a WebKit C API notification provider on the shared process pool).
 
 A main menu is installed too (rumps never builds one): without an Edit menu
 a WKWebView has no ⌘C/⌘V/⌘X/⌘Z/⌘A, and there would be no ⌘W/⌘N/⌘R/⌘P/⌘M.
@@ -81,6 +86,7 @@ from WebKit import (
     WKNavigationActionPolicyDownload,
     WKNavigationResponsePolicyAllow,
     WKNavigationResponsePolicyDownload,
+    WKPermissionDecisionDeny,
     WKPermissionDecisionGrant,
     WKPermissionDecisionPrompt,
     WKProcessPool,
@@ -89,7 +95,7 @@ from WebKit import (
     WKWebViewConfiguration,
 )
 
-from fused_render_app import __version__, paths, window_policy
+from fused_render_app import __version__, paths, webnotify, window_policy
 from fused_render_app.cli import open_url
 
 logger = logging.getLogger(__name__)
@@ -139,6 +145,98 @@ def _open_external(url: str) -> None:
 def _downloads_dir() -> str:
     found = NSSearchPathForDirectoriesInDomains(NSDownloadsDirectory, NSUserDomainMask, True)
     return str(found[0]) if found else os.path.expanduser("~/Downloads")
+
+
+# ---- private WKUIDelegate selectors ------------------------------------------
+#
+# Pointer lock and geolocation have no public WKUIDelegate method on macOS:
+# WebKit asks through `WKUIDelegatePrivate` selectors (leading underscore),
+# and a host that lacks them gets a silent deny. PyObjC ships no block
+# metadata for private selectors, so without the registrations below the
+# completion blocks would arrive as ``cannot call block without a signature``
+# — the same failure the class docstring describes for `protocols=`. Shapes
+# copied from WebKit/_metadata.py (requestMediaCapturePermissionForOrigin…);
+# argument indices count self and _cmd, so the web view is 2. Block param
+# types from WKUIDelegatePrivate.h: ``void (^)(BOOL)`` for pointer lock
+# (PyObjC spells BOOL ``Z``), ``void (^)(WKPermissionDecision)`` (NSInteger,
+# ``q``) for geolocation. Registered on NSObject like PyObjC's own entries,
+# which is where the plain-NSObject-subclass delegate picks them up.
+
+_SEL_POINTER_LOCK_REQUEST = b"_webViewDidRequestPointerLock:completionHandler:"
+_SEL_POINTER_LOCK_LOST = b"_webViewDidLosePointerLock:"
+_SEL_GEOLOCATION = (b"_webView:requestGeolocationPermissionForOrigin:"
+                    b"initiatedByFrame:decisionHandler:")
+_SEL_NOTIFICATION_PERMISSION = (b"_webView:requestNotificationPermissionForSecurityOrigin:"
+                                b"decisionHandler:")
+_SEL_DID_CLOSE = b"webViewDidClose:"
+
+objc.registerMetaDataForSelector(
+    b"NSObject",
+    _SEL_POINTER_LOCK_REQUEST,
+    {
+        "required": False,
+        "retval": {"type": b"v"},
+        "arguments": {
+            2: {"type": b"@"},
+            3: {
+                "callable": {
+                    "retval": {"type": b"v"},
+                    "arguments": {0: {"type": b"^v"}, 1: {"type": b"Z"}},
+                },
+                "type": b"@?",
+            },
+        },
+    },
+)
+objc.registerMetaDataForSelector(
+    b"NSObject",
+    _SEL_GEOLOCATION,
+    {
+        "required": False,
+        "retval": {"type": b"v"},
+        "arguments": {
+            2: {"type": b"@"},
+            3: {"type": b"@"},
+            4: {"type": b"@"},
+            5: {
+                "callable": {
+                    "retval": {"type": b"v"},
+                    "arguments": {0: {"type": b"^v"}, 1: {"type": b"q"}},
+                },
+                "type": b"@?",
+            },
+        },
+    },
+)
+# Web Notifications: ``void (^)(BOOL)`` like pointer lock.
+objc.registerMetaDataForSelector(
+    b"NSObject",
+    _SEL_NOTIFICATION_PERMISSION,
+    {
+        "required": False,
+        "retval": {"type": b"v"},
+        "arguments": {
+            2: {"type": b"@"},
+            3: {"type": b"@"},
+            4: {
+                "callable": {
+                    "retval": {"type": b"v"},
+                    "arguments": {0: {"type": b"^v"}, 1: {"type": b"Z"}},
+                },
+                "type": b"@?",
+            },
+        },
+    },
+)
+
+
+def _private(selector: bytes, signature: bytes):
+    """Decorator: bind a method to an underscore-prefixed Objective-C
+    selector verbatim. PyObjC's name mangling (``_`` ↔ ``:``) would turn
+    ``_webViewDidLosePointerLock_`` into ``:webViewDidLosePointerLock:``."""
+    def wrap(fn):
+        return objc.selector(fn, selector=selector, signature=signature)
+    return wrap
 
 
 class _WebDelegate(NSObject):
@@ -257,8 +355,12 @@ class _WebDelegate(NSObject):
         url = str(request.URL().absoluteString()) if request and request.URL() else None
         kind = window_policy.classify(url, self._manager.port)
         if kind == "app":
-            self._manager.open(url)
-        elif kind == "external":
+            # A real popup, like a browser's: built on the configuration
+            # WebKit handed us (same process as the opener), so the opener
+            # gets a live handle back — `popup.postMessage`, `popup.close()`,
+            # `window.opener` all work, instead of `window.open` → null.
+            return self._manager.open_popup(url, configuration).webview
+        if kind == "external":
             _open_external(url)
         # None: we made no view for it; the opener's `window.open` gets null.
         return None
@@ -312,9 +414,71 @@ class _WebDelegate(NSObject):
         # Our own page asked (a .fused app using the webcam or mic): grant —
         # the system TCC prompt still gates the hardware. A third-party
         # iframe inside an app gets WebKit's own prompt.
-        own = str(origin.host()) in ("127.0.0.1", "localhost") and \
-            int(origin.port()) == self._manager.port
+        own = self._own_origin(origin)
         decision(WKPermissionDecisionGrant if own else WKPermissionDecisionPrompt)
+
+    def _own_origin(self, origin) -> bool:
+        manager = self._manager
+        if manager is None or origin is None:
+            return False
+        return window_policy.is_own_origin(
+            str(origin.host() or ""), origin.port(), manager.port)
+
+    # ---- private WKUIDelegate: pointer lock, geolocation ---------------------
+
+    @_private(_SEL_GEOLOCATION, b"v@:@@@@?")
+    def webView_requestGeolocationPermissionForOrigin_initiatedByFrame_decisionHandler_(
+            self, webview, origin, frame, decision):
+        # First of two gates: WebKit asks us, then CoreLocation asks the OS
+        # (TCC; the bundle's NSLocation*UsageDescription strings). A page of
+        # ours is granted here like camera/mic; anything else is denied — a
+        # browser would have shown its own prompt, which WebKit does not
+        # offer for geolocation.
+        own = self._own_origin(origin)
+        logger.info("geolocation request from %s:%s -> %s",
+                    origin.host() if origin else "?", origin.port() if origin else "?",
+                    "grant" if own else "deny")
+        decision(WKPermissionDecisionGrant if own else WKPermissionDecisionDeny)
+
+    @_private(_SEL_NOTIFICATION_PERMISSION, b"v@:@@@?")
+    def webView_requestNotificationPermissionForSecurityOrigin_decisionHandler_(
+            self, webview, origin, decision):
+        # `Notification.requestPermission()`. Granted for a page of ours only
+        # when the provider that will actually show them is installed —
+        # never "granted" with the notification then dropped on the floor.
+        manager = self._manager
+        own = self._own_origin(origin) and manager is not None and manager.notifications is not None
+        logger.info("notification permission request from %s:%s -> %s",
+                    origin.host() if origin else "?", origin.port() if origin else "?",
+                    "grant" if own else "deny")
+        decision(bool(own))
+
+    @_private(_SEL_POINTER_LOCK_REQUEST, b"v@:@@?")
+    def webViewDidRequestPointerLock_completionHandler_(self, webview, completion):
+        # `canvas.requestPointerLock()` (FPS-style mouse look). Needs a user
+        # gesture on the page already; the browser granted it silently too.
+        logger.debug("pointer lock requested: granted")
+        completion(True)
+
+    @_private(_SEL_POINTER_LOCK_LOST, b"v@:@")
+    def webViewDidLosePointerLock_(self, webview):
+        # Esc / focus loss. WebKit restores the cursor itself; nothing to do
+        # but keep the selector present so the callback has a home.
+        logger.debug("pointer lock lost")
+
+    # ---- window.close() (WKUIDelegate) -------------------------------------
+
+    def webViewDidClose_(self, webview):
+        # The page closed itself (a popup we opened for its `window.open`,
+        # done with its job). Same path as ⌘W, one run-loop turn later: not
+        # tearing the web view down from inside its own delegate callback.
+        window = self._window
+        if window is None:
+            return
+        logger.info("page asked to close its window (%s)", window.app_file or "home")
+        from PyObjCTools import AppHelper
+
+        AppHelper.callAfter(window.close)
 
     # ---- window title follows the page title (KVO) -------------------------
 
@@ -331,10 +495,19 @@ class _WebDelegate(NSObject):
         self._manager._touch(self._window)
 
 
+for _sel in (_SEL_POINTER_LOCK_REQUEST, _SEL_POINTER_LOCK_LOST, _SEL_GEOLOCATION,
+             _SEL_DID_CLOSE):
+    if not _WebDelegate.instancesRespondToSelector_(_sel):
+        # A mangled selector name would leave the feature silently denied
+        # again; say so where the log will show it.
+        logger.error("_WebDelegate does not respond to %s", _sel.decode())
+
+
 class _Window:
     """One open window: the NSWindow, its WKWebView, and the strong delegate."""
 
-    def __init__(self, manager: "WindowManager", url: str, configuration):
+    def __init__(self, manager: "WindowManager", url: str, configuration,
+                 load: bool = True):
         self.manager = manager
         self.app_file: str | None = app_file_of(url)
         style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
@@ -364,7 +537,10 @@ class _Window:
         self._add_titlebar_button()
 
         self._place()
-        self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
+        # A popup WebKit asked us to create (`window.open`) loads itself once
+        # we hand the view back; loading here too would race it.
+        if load:
+            self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
 
     def _add_titlebar_button(self) -> None:
         """"Open in Browser" and "Home" buttons at the right end of the title
@@ -590,6 +766,17 @@ class WindowManager:
         # localStorage is a single set, and `storage` events reach the other
         # windows exactly as they reached other tabs of one browser.
         self._pool = WKProcessPool.alloc().init()
+        # Web Notifications provider, once per pool, before any web view
+        # exists on it. If this WebKit lacks the C API the delegate keeps
+        # answering "deny", so a page never gets a grant it cannot see.
+        self.notifications = None
+        try:
+            self.notifications = webnotify.install(
+                self._pool, lambda: self.port, self._focus_origin)
+        except webnotify.NotificationsUnavailable as exc:
+            logger.error("web notifications unavailable: %s", exc)
+        except Exception:  # noqa: BLE001 — same outcome, but unexpected: keep the trace
+            logger.exception("web notifications: provider install failed")
         self._configuration = self._make_configuration()
 
         # A `.venv/bin/python -m fused_render_app.macapp` dev run is not a
@@ -625,9 +812,25 @@ class WindowManager:
         self.port = port
         self.home_url = open_url(port, None)
 
+    def _focus_origin(self, origin: str | None) -> None:
+        """A macOS notification banner was clicked: bring a window showing
+        ``origin`` forward (every window of ours is on the one origin, so the
+        key window if any, else the first). Main thread."""
+        win = self.key() or (self._windows[0] if self._windows else None)
+        if win is not None and win.ns is not None:
+            win.ns.makeKeyAndOrderFront_(None)
+
     def open(self, url: str) -> _Window:
         """Open ``url`` in a NEW window and bring it to the front."""
         win = _Window(self, url, self._configuration)
+        self._windows.append(win)
+        win.show()
+        return win
+
+    def open_popup(self, url: str, configuration) -> _Window:
+        """A window for a page's `window.open`: WebKit supplies the
+        configuration and performs the load itself (see `_Window`)."""
+        win = _Window(self, url, configuration, load=False)
         self._windows.append(win)
         win.show()
         return win

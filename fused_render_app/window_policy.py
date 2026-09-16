@@ -22,6 +22,26 @@ from urllib.parse import urlsplit
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
 
+def is_own_origin(host: str | None, port: int | None, app_port: int) -> bool:
+    """Is a security origin (``host``, ``port``) this process's own server?
+
+    The gate behind every "may this page …" question WebKit puts to the host:
+    camera/mic, geolocation. Our own pages (loopback, our port) get the
+    answer the browser would have given after the user clicked Allow once;
+    anything else — a third-party iframe inside an app — does not. Same
+    host rule as `classify` so the two never disagree about what "ours" is.
+    """
+    if not host or port is None:
+        return False
+    host = host.lower()
+    if host not in _LOOPBACK_HOSTS and not host.startswith("127."):
+        return False
+    try:
+        return int(port) == app_port
+    except (TypeError, ValueError):
+        return False
+
+
 def classify(url: str | None, port: int) -> str:
     """Kind of ``url`` relative to the server on ``port`` (module docstring)."""
     if not url:

@@ -136,6 +136,11 @@ OPTIONS = {
         # of prompting.
         "NSCameraUsageDescription": "Render App uses the camera when a .fused app you opened asks for it.",
         "NSMicrophoneUsageDescription": "Render App uses the microphone when a .fused app you opened asks for it.",
+        # Same for navigator.geolocation: mainwindow.py grants our own pages,
+        # then CoreLocation asks the OS, and without these strings that
+        # second prompt never appears (the request just fails).
+        "NSLocationUsageDescription": "Render App uses your location when a .fused app you opened asks for it.",
+        "NSLocationWhenInUseUsageDescription": "Render App uses your location when a .fused app you opened asks for it.",
     },
 }
 
