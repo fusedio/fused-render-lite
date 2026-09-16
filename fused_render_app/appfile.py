@@ -159,6 +159,24 @@ def _file_key(fused_path: str, name: str) -> str:
     return key
 
 
+def extract_dir_for(fused_path: str) -> str | None:
+    """Where `open_app_file` extracts (or has extracted) ``fused_path`` —
+    the same ``<apps_dir>/<slug>-<hash>`` it would answer as ``dir`` — WITHOUT
+    extracting anything. None if the file cannot be read as a .fused.
+
+    The reverse of the mapping a job row's ``page`` carries: an environment
+    install names the extracted app folder it is building for, and a native
+    notification click has to find the window showing the .fused that folder
+    came from. Cheap on repeat calls (`_file_key` memoises on size+mtime)."""
+    fused_path = os.path.abspath(fused_path)
+    try:
+        manifest = read_manifest(fused_path)
+        name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
+        return os.path.join(paths.apps_dir(), _file_key(fused_path, name))
+    except (AppFileError, OSError):
+        return None
+
+
 def ensure_dot_fused(app_dir: str) -> bool:
     """Materialise ``<app>/.fused/data``, ``.fused/cache`` and ``meta.json``.
 

@@ -325,6 +325,19 @@ def main() -> None:
             state["windows"] = WindowManager(port, quit=lambda: quit_app(None))
         except Exception:  # noqa: BLE001 — logged; browser fallback is the design
             logger.exception("windows unavailable; falling back to browser tabs")
+        # Model downloads, environment installs and AI jobs announce their
+        # start/finish as native notifications (jobnotify.py). Needs the
+        # window manager for what a click does; guarded like everything else
+        # here — no banners is a lesser outcome than no app.
+        if state["windows"] is not None:
+            try:
+                from fused_render_app import dock_store, jobnotify
+
+                jobnotify.install(
+                    state["windows"], paths.apps_dir(),
+                    remembered_files=lambda: [a["file"] for a in dock_store.list_apps()])
+            except Exception:  # noqa: BLE001
+                logger.exception("job notifications unavailable")
         # The menu-bar Dock (menubar_dock.py) replaces rumps' menu with a
         # popover tray of pinned + recent apps; right-click keeps the old
         # entries. Needs the window manager (focus-or-open is its point).

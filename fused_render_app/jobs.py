@@ -34,12 +34,16 @@ module; keep it acyclic.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+
+logger = logging.getLogger(__name__)
 
 # The state machine. "running" and "waiting" are the two NON-terminal
 # states; the three terminal ones differ in what the user has to do about
@@ -448,6 +452,47 @@ _jobs: dict[str, Job] = {}
 # first one to drop when the cap bites.
 _dismissed: dict[str, float] = {}
 
+# `(prev, after)` — the public record (`_public` shape) as it stood BEFORE an
+# `upsert` touched the row, or None if the row did not exist, and the public
+# record `upsert` is about to return. Called only when the row's `state`
+# changed (or the row was just created) — never on a plain progress tick, so
+# a subscriber sees a state machine, not a firehose of `done=` deltas.
+TransitionHook = Callable[[dict | None, dict], None]
+_transition_hook: TransitionHook | None = None
+
+
+def set_transition_hook(hook: TransitionHook | None) -> None:
+    """Install (or, with None, remove) the ONE subscriber to state transitions.
+
+    This is how the native shell (`macapp.py`) learns that a model download
+    started, a venv build is waiting on a question, a generation failed —
+    the events a macOS banner is for — without the registry importing
+    anything native (CI runs this module on Linux) and without polling a
+    list it already writes. One slot rather than a list of listeners: there
+    is exactly one shell per process, and a second consumer would be a
+    reason to add a list, not a reason to build one speculatively.
+
+    Two properties the caller may rely on, both enforced by `upsert`:
+
+    - The hook runs AFTER `_lock` is released, so it may call back into
+      this module (`list_jobs`, `dismiss`, another `upsert`) without
+      deadlocking on the registry's plain, non-reentrant Lock. What it
+      loses is atomicity with the write that triggered it — a hook that
+      re-reads the row may see a LATER tick already applied — which is the
+      right trade: a banner is a notification about an event, not a view of
+      the row.
+    - An exception inside the hook is logged (`logger.exception`) and
+      swallowed. The reporter whose tick fired the hook did nothing wrong,
+      and failing its POST because the shell could not draw a banner would
+      turn a cosmetic failure into a broken progress loop.
+
+    `reset()` deliberately leaves the hook installed: the shell installs it
+    once at startup, and `reset()` empties the REGISTRY (rows, dismissals),
+    not the process's wiring. Pass None here to clear it.
+    """
+    global _transition_hook
+    _transition_hook = hook
+
 
 # ------------------------------------------------------------------ validation
 
@@ -551,6 +596,12 @@ def upsert(body: dict, *, page: str = "", origin: str | None = None,
     truthy value always wins, on every tick, the same way a truthy `page=`
     always overwrites. See the `"origin" in body` gate below for the one
     other channel that can still set it.
+
+    One side effect beyond the write: when the row is created, or its
+    `state` changes, the installed transition hook (`set_transition_hook`)
+    is called with the before/after public records — after `_lock` is
+    released, and never for a plain progress tick or a late tick on a
+    dismissed id.
     """
     if not isinstance(body, dict):
         raise JobError("request body must be a JSON object")
@@ -579,6 +630,11 @@ def upsert(body: dict, *, page: str = "", origin: str | None = None,
                 )
 
         job = _jobs.get(job_id)
+        # Snapshot for the transition hook BEFORE any field below is applied:
+        # `Job` is mutated in place, so this is the only moment the previous
+        # state is still readable. `_public` goes through `asdict`, a copy,
+        # so the snapshot does not alias the row it describes.
+        prev = None if job is None else _public(job, now)
         if job is None:
             title = _text(body.get("title"), TITLE_MAX)
             if not title:
@@ -672,7 +728,19 @@ def upsert(body: dict, *, page: str = "", origin: str | None = None,
 
         job.updated_at = now
         _sweep(now)
-        return _public(job, now)
+        after = _public(job, now)
+        hook = _transition_hook
+
+    # Outside the lock, on purpose — see `set_transition_hook`. Only a
+    # CHANGE of state (or a brand-new row) is news; a progress tick that
+    # leaves `state` alone is not. The `_dismissed` early return above never
+    # reaches this point, so a late tick on a closed row fires nothing.
+    if hook is not None and (prev is None or after["state"] != prev["state"]):
+        try:
+            hook(prev, after)
+        except Exception:
+            logger.exception("job transition hook failed for %r", job_id)
+    return after
 
 
 def request_cancel(job_id: str, *, now: float | None = None) -> dict | None:
@@ -809,7 +877,11 @@ def clear_finished(*, now: float | None = None) -> int:
 
 
 def reset() -> None:
-    """Empty the registry — for tests, and for nothing else."""
+    """Empty the registry — for tests, and for nothing else.
+
+    The transition hook is NOT cleared here: it is process wiring the shell
+    installs once, not registry contents. See `set_transition_hook`.
+    """
     with _lock:
         _jobs.clear()
         _dismissed.clear()
