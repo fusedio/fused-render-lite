@@ -1,12 +1,10 @@
 name: release
 
-# Mirrors fusedio/fused-render's release.yml, macOS job only (no update
-# manifest or Windows/Linux builds). Same shape: prepare-release creates the
-# GitHub Release, the macOS job builds, signs, notarizes and staples the DMG on
-# an ephemeral keychain, uploads it to the fused-render S3 bucket (served via
-# the same CloudFront distribution as the main app, under render-app-dmgs/)
-# and attaches it to the Release; bump-homebrew then points the
-# fusedio/homebrew-tap cask at the CDN copy.
+# Mirrors fusedio/fused-render's release.yml, macOS job only (no S3/CloudFront,
+# update manifest or Windows/Linux builds). Same shape: prepare-release creates
+# the GitHub Release, the macOS job builds, signs, notarizes and staples the DMG
+# on an ephemeral keychain, then attaches it; bump-homebrew then points the
+# fusedio/homebrew-tap cask at the new DMG.
 
 on:
   push:
@@ -66,25 +64,12 @@ jobs:
     outputs:
       version: ${{ steps.artifacts.outputs.version }}
       dmg_sha256: ${{ steps.artifacts.outputs.dmg_sha256 }}
-      dmg_url: ${{ steps.artifacts.outputs.dmg_url }}
-      cdn_host: ${{ steps.artifacts.outputs.cdn_host }}
     permissions:
       contents: write # needed to attach the DMG to the GitHub Release
-      id-token: write # needed to assume the AWS role via OIDC
     env:
       RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
       KEYCHAIN_PATH: ${{ github.workspace }}/ci-signing.keychain-db
       NOTARY_PROFILE: ci-notary
-      AWS_DEFAULT_REGION: us-west-2
-      # Same bucket + CloudFront distribution as fused-render, but the role
-      # (github_render_app_role, fusedlabs/application#8016) can only write
-      # under S3_PREFIX — never the main app's dmgs, latest.json or download
-      # page. Flip CDN_DOMAIN to render.fused.io together with fused-render;
-      # the cask's `verified:` host follows it.
-      S3_BUCKET: fused-render
-      S3_PREFIX: render-app-dmgs
-      CDN_DOMAIN: d2ic19jpchjovp.cloudfront.net
-      CLOUDFRONT_DISTRIBUTION_ID: E393B7TS7Y3EDS
     steps:
       - uses: actions/checkout@v5
 
@@ -165,58 +150,28 @@ jobs:
             echo "not notarized (no signing secrets) — ad-hoc build"
           fi
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: arn:aws:iam::926411091187:role/github_render_app_role
-          role-session-name: GithubRenderAppRelease
-          aws-region: us-west-2
-
-      - name: Upload DMG to S3
-        id: artifacts
-        run: |
-          set -euo pipefail
-          # Not `brew install awscli`: GH's macOS images don't have the
-          # `aws/tap` cask pre-trusted, and Homebrew's tap-trust gate fails
-          # the install outright. Apple's own .pkg installer sidesteps
-          # Homebrew (and its taps) entirely.
-          if ! command -v aws >/dev/null; then
-            curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o "$RUNNER_TEMP/AWSCLIV2.pkg"
-            sudo installer -pkg "$RUNNER_TEMP/AWSCLIV2.pkg" -target /
-          fi
-          DMG_PATH="$(ls dist/*.dmg)"
-          DMG_SHA256="$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)"
-          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
-          # DMG only: the role's PutObject is scoped to ${S3_PREFIX}/*, so the
-          # wheel stays a GitHub Release asset (uploaded below).
-          aws s3 cp "$DMG_PATH" "s3://${S3_BUCKET}/${S3_PREFIX}/$(basename "$DMG_PATH")"
-          # Exposed as job outputs for the split-out bump-homebrew job. Written
-          # only after the S3 upload succeeds, so the cask never points at a
-          # DMG that never made it onto the CDN. Version + hash come from the
-          # DMG that was actually built, not from the git tag.
-          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')" >> "$GITHUB_OUTPUT"
-          echo "dmg_sha256=$DMG_SHA256" >> "$GITHUB_OUTPUT"
-          echo "dmg_url=https://${CDN_DOMAIN}/${S3_PREFIX}/$(basename "$DMG_PATH")" >> "$GITHUB_OUTPUT"
-          echo "cdn_host=${CDN_DOMAIN}" >> "$GITHUB_OUTPUT"
-
-      - name: Invalidate CloudFront
-        # Filenames are versioned, so this only matters when an existing tag
-        # is rebuilt (workflow_dispatch --ref <tag>) and the object replaced.
-        run: |
-          set -euo pipefail
-          aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths "/${S3_PREFIX}/*"
-
       - name: Upload DMG + wheel to GitHub Release
+        id: artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" "$DMG_PATH" dist/*.whl --clobber
+        run: |
+          set -euo pipefail
+          DMG_PATH="$(ls dist/*.dmg)"
+          gh release upload "$RELEASE_TAG" dist/*.dmg dist/*.whl --clobber
+          # Exposed as job outputs for the split-out bump-homebrew job. Written
+          # only after the upload succeeds, so the cask never points at a DMG
+          # that never made it onto the Release. Version + hash come from the
+          # DMG that was actually built, not from the git tag.
+          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=$(shasum -a 256 "$DMG_PATH" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
   bump-homebrew:
     # Separate job so a tap-push failure can't fail the DMG job after the
     # Release already published.
     needs: build-sign-notarize-release
+    # Disabled while the CDN upload (PR #18) is reverted pending the AWS OIDC
+    # role fix; drop this `if` when re-landing it.
+    if: false
     runs-on: ubuntu-latest
     permissions: {} # uses the tap PAT only; no GITHUB_TOKEN scopes needed
     steps:
@@ -226,9 +181,6 @@ jobs:
           # From the DMG that was actually built+hashed, not the git tag.
           VERSION: ${{ needs.build-sign-notarize-release.outputs.version }}
           DMG_SHA256: ${{ needs.build-sign-notarize-release.outputs.dmg_sha256 }}
-          # CloudFront host the DMG was published under (CDN_DOMAIN of the
-          # build job), so the cask `url`/`verified:` can never drift from it.
-          CDN_HOST: ${{ needs.build-sign-notarize-release.outputs.cdn_host }}
         run: |
           set -euo pipefail
           git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/fusedio/homebrew-tap.git" /tmp/homebrew-tap
@@ -236,25 +188,19 @@ jobs:
           # Write the whole cask instead of sed-ing version/sha256: the DMG and
           # .app names (RenderApp-*.dmg, RenderApp.app) live here too, so a
           # rename ships atomically with the first release built under the new
-          # name. The cask token is render-app. The download comes from the
-          # CDN (same as fused-render's cask); `verified:` is required because
-          # the host differs from the homepage. livecheck keeps using GitHub
-          # Releases (still published, with the same DMG attached) — the
-          # :github_latest strategy only understands github.com URLs, so it
-          # can't be pointed at the CDN `url`.
+          # name. The cask token is render-app.
           cat > Casks/render-app.rb <<CASK
           cask "render-app" do
             version "${VERSION}"
             sha256 "${DMG_SHA256}"
 
-            url "https://${CDN_HOST}/render-app-dmgs/RenderApp-#{version}.dmg",
-                verified: "${CDN_HOST}/render-app-dmgs/"
+            url "https://github.com/fusedio/fused-render-lite/releases/download/v#{version}/RenderApp-#{version}.dmg"
             name "Render App"
             desc "Lightweight runtime for .fused apps: Python-powered interactive HTML views"
             homepage "https://github.com/fusedio/fused-render-lite"
 
             livecheck do
-              url "https://github.com/fusedio/fused-render-lite/releases/latest"
+              url :url
               strategy :github_latest
             end
 
