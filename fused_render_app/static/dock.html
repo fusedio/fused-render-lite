@@ -755,12 +755,35 @@
   // changes (the glass follows per frame, as in the fisheye). Resizing the
   // panel on every pointer event moved the whole page under the tiles.
   // Pointer events are coalesced to one layout per animation frame, and the
-  // centred tray is snapped to a whole pixel (its width changes parity with
-  // every 1px step, which otherwise puts the icons on half pixels: shimmer).
+  // tray is snapped to a whole pixel (its width changes parity with every
+  // 1px step, which otherwise puts the icons on half pixels: shimmer).
+  //
+  // Where the tray sits inside that big panel: exactly where it will REST
+  // for the current tile size. The native side centres the panel on the
+  // status item and clamps it to the screen (4px margins); on a narrow
+  // screen the big panel is shoved left and spans most of it, so a tray
+  // simply centred in the panel would land in the middle of the screen,
+  // away from the icon (and jump back under it on release). The native side
+  // tells the page the icon's screen x and the clamp range (dockAnchor,
+  // screen points = CSS px); the page replays the same centre-and-clamp for
+  // both the big panel and the rest panel, and offsets the tray by the
+  // difference. Without an anchor (browser dev mode) the tray is centred.
+  let anchor = null;
+  window.dockAnchor = (a) => { anchor = a; };
+  function placedX(w) { return Math.max(anchor.left, Math.min(anchor.icon - w / 2, anchor.right - w)); }
   function snapTray() {
-    const inner = wrap.clientWidth - 2 * parseFloat(getComputedStyle(wrap).paddingLeft);
-    const pos = (inner - restLayout().right) / 2;
-    tray.style.left = (Math.floor(pos) - pos) + "px";
+    const slack = parseFloat(getComputedStyle(wrap).paddingLeft);
+    const inner = wrap.clientWidth - 2 * slack;
+    const trayW = restLayout().right;
+    const natural = (inner - trayW) / 2;  // centred: where the tray sits with left = 0
+    let want = natural;
+    if (anchor) {
+      const panelW = Math.ceil(wrap.getBoundingClientRect().width);
+      const restW = Math.ceil(trayW + 2 * slack);  // the panel at rest = tray + slack both sides
+      const trayScreenX = placedX(restW) + (restW - trayW) / 2;
+      want = Math.max(0, Math.min(trayScreenX - placedX(panelW) - slack, inner - trayW));
+    }
+    tray.style.left = (Math.floor(want) - natural) + "px";
   }
   function onSepDown(e) {
     if (e.button !== 0 || state.dragging) return;
