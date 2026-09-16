@@ -89,6 +89,12 @@ def client():
 
 
 ICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle r="8" cx="8" cy="8"/></svg>'
+# A real 1x1 red PNG (signature + IHDR + IDAT + IEND, 69 bytes): the icon.png
+# fallback the dock accepts when an app ships no icon.svg.
+ICON_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 @pytest.fixture
@@ -103,6 +109,31 @@ def v2_fused_icon(tmp_path):
         [("index.html", ENTRY_HTML.encode()), ("calc.py", CALC_PY.encode()),
          ("icon.svg", ICON_SVG)],
     )
+    return str(out)
+
+
+@pytest.fixture
+def v2_fused_png(tmp_path):
+    """A v2 .fused that ships only an ``icon.png`` (no svg)."""
+    from fused_render_app import container
+
+    out = tmp_path / "raster.fused"
+    container.write(
+        str(out),
+        {"name": "raster", "entry": "index.html"},
+        [("index.html", ENTRY_HTML.encode()), ("icon.png", ICON_PNG)],
+    )
+    return str(out)
+
+
+@pytest.fixture
+def v1_fused_png(tmp_path):
+    out = tmp_path / "legacy-png.fused"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(
+            {"fused_app_file": 1, "name": "legacy-png", "entry": "index.html"}))
+        zf.writestr("files/index.html", ENTRY_HTML)
+        zf.writestr("files/icon.png", ICON_PNG)
     return str(out)
 
 

@@ -20,8 +20,9 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/health                             {ok, version, pid}
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
   GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}], tilesize}
-  GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg, currentColor
-                                               resolved for the theme (icon_color.py), or 404
+  GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg (currentColor
+                                               resolved for the theme, icon_color.py), else
+                                               its icon.png as is, or 404
   POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
@@ -364,10 +365,15 @@ class Handler(BaseHTTPRequestHandler):
         data = appfile.icon_bytes(file) if os.path.isabs(file) else None
         if data is None:
             return self._error("not found", 404)
+        headers = {"Cache-Control": "no-cache"}
+        # The png fallback (appfile.ICON_NAMES) is a raster: nothing to
+        # recolour, served as is; the tile clips it to its rounded corners.
+        if appfile.is_png(data):
+            return self._send(200, data, "image/png", headers)
         # A picked glyph names its colour and strokes in currentColor; the
         # dock's <img> cannot see the page's theme, so resolve it here.
         data = icon_color.theme_icon_svg(data, q.get("theme") or "")
-        self._send(200, data, "image/svg+xml", {"Cache-Control": "no-cache"})
+        self._send(200, data, "image/svg+xml", headers)
 
     def _dock(self, action: str) -> None:
         if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home", "size"):

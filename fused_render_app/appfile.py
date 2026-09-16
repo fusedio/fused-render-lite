@@ -246,40 +246,72 @@ def open_app_file(fused_path: str) -> dict:
 
 # ---- icon --------------------------------------------------------------------
 
-ICON_NAME = "icon.svg"
+# The app icon names, in PRECEDENCE order (fused-render's app_listing.
+# ICON_NAMES): `icon.svg` wins, `icon.png` stands in when there is no svg. An
+# svg owns its own plate and is drawn as is; a png is a plain square raster the
+# dock tile clips to its rounded corners (`.tile { overflow: hidden }` +
+# `object-fit: cover` in dock.html).
+ICON_NAMES = ("icon.svg", "icon.png")
+# The svg — the name the picker writes on the fused-render side, and the one
+# that outranks a png dropped in beside it.
+ICON_NAME = ICON_NAMES[0]
 ICON_MAX_BYTES = 64 * 1024
+# A raster is bigger by nature (a 256px opaque png runs tens of KB), but the
+# dock draws it at ~128px @2x at most: half a MB is generous, a photo is not
+# an icon.
+PNG_ICON_MAX_BYTES = 512 * 1024
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def icon_override_path(fused_path: str) -> str | None:
-    """Where an app's extract would hold a written ``icon.svg`` (whether or
-    not it exists yet), or None if the file is unreadable. Cheap after the
-    first call: ``_file_key`` is memoised on the file's (size, mtime)."""
+def icon_cap(name: str) -> int:
+    """The byte cap for an icon file by its name; over it counts as absent."""
+    return PNG_ICON_MAX_BYTES if name.endswith(".png") else ICON_MAX_BYTES
+
+
+def is_png(data: bytes) -> bool:
+    return data.startswith(PNG_SIGNATURE)
+
+
+def icon_override_paths(fused_path: str) -> list[str] | None:
+    """Where an app's extract would hold a written icon, one path per
+    ``ICON_NAMES`` in precedence order (whether or not any exists yet), or
+    None if the file is unreadable. Cheap after the first call: ``_file_key``
+    is memoised on the file's (size, mtime)."""
     try:
         fused_path = os.path.abspath(fused_path)
         if not os.path.isfile(fused_path):
             return None
         manifest = read_manifest(fused_path)
         name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
-        return os.path.join(paths.apps_dir(), _file_key(fused_path, name), ICON_NAME)
+        base = os.path.join(paths.apps_dir(), _file_key(fused_path, name))
+        return [os.path.join(base, n) for n in ICON_NAMES]
     except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
         return None
 
 
 def _shipped_icon_bytes(fused_path: str, manifest: dict) -> bytes | None:
-    """The ``icon.svg`` packed inside the .fused itself (no extract lookup)."""
-    if manifest.get("fused_app_file") == container.VERSION:
-        data = container.read_member(fused_path, manifest, ICON_NAME, ICON_MAX_BYTES)
-    else:
-        with zipfile.ZipFile(fused_path) as zf:
-            with zf.open(f"{PAYLOAD_DIR}/{ICON_NAME}") as f:
-                data = f.read(ICON_MAX_BYTES + 1)
-    if data is None or len(data) > ICON_MAX_BYTES:
-        return None
-    return data
+    """The icon packed inside the .fused itself (no extract lookup): the
+    first of ``ICON_NAMES`` that is there and within its cap. An over-cap
+    svg does not hide a png beside it."""
+    v2 = manifest.get("fused_app_file") == container.VERSION
+    for name in ICON_NAMES:
+        cap = icon_cap(name)
+        if v2:
+            data = container.read_member(fused_path, manifest, name, cap)
+        else:
+            with zipfile.ZipFile(fused_path) as zf:
+                try:
+                    with zf.open(f"{PAYLOAD_DIR}/{name}") as f:
+                        data = f.read(cap + 1)
+                except KeyError:
+                    data = None
+        if data is not None and len(data) <= cap:
+            return data
+    return None
 
 
 def has_shipped_icon(fused_path: str) -> bool:
-    """Whether the .fused packs an ``icon.svg`` (ignores any extract override)."""
+    """Whether the .fused packs an icon (``ICON_NAMES``; ignores any extract override)."""
     try:
         fused_path = os.path.abspath(fused_path)
         if not os.path.isfile(fused_path):
@@ -289,15 +321,30 @@ def has_shipped_icon(fused_path: str) -> bool:
         return False
 
 
+def _override_icon_bytes(candidates: list[str]) -> bytes | None:
+    """The first extract-dir icon that exists and is within its cap."""
+    for p in candidates:
+        cap = icon_cap(p)
+        try:
+            if os.path.isfile(p) and os.path.getsize(p) <= cap:
+                with open(p, "rb") as f:
+                    return f.read(cap)
+        except OSError:
+            continue
+    return None
+
+
 def icon_bytes(fused_path: str) -> bytes | None:
-    """The app's ``icon.svg`` for the menu-bar dock, or None. Never raises.
+    """The app's icon (``icon.svg``, else ``icon.png``) for the menu-bar
+    dock, or None. Never raises. `is_png` tells the two apart.
 
     Looked up in this order, cheapest-first for the common case and so an
     app that WRITES its own icon into its extract wins over the shipped one:
-    the extracted dir (if any), then the v2 container member, then the v1
-    zip's ``files/icon.svg``. Anything over ``ICON_MAX_BYTES`` counts as
-    absent — the dock polls this for every card and an SVG that size is not
-    an icon.
+    the extracted dir (if any; svg then png), then the container member /
+    the v1 zip's ``files/`` (svg then png). Anything over its cap
+    (`icon_cap`) counts as absent and the walk goes on — the dock polls this
+    for every card and a file that size is not an icon. `dock_store._icon_info`
+    walks the same candidates, so ``hasIcon`` and this route agree.
     """
     try:
         fused_path = os.path.abspath(fused_path)
@@ -305,11 +352,10 @@ def icon_bytes(fused_path: str) -> bytes | None:
             return None
         manifest = read_manifest(fused_path)
         name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
-        extracted = os.path.join(paths.apps_dir(), _file_key(fused_path, name), ICON_NAME)
-        if os.path.isfile(extracted) and os.path.getsize(extracted) <= ICON_MAX_BYTES:
-            with open(extracted, "rb") as f:
-                return f.read(ICON_MAX_BYTES)
-        # (an over-cap override is ignored and the shipped icon still shows)
+        base = os.path.join(paths.apps_dir(), _file_key(fused_path, name))
+        data = _override_icon_bytes([os.path.join(base, n) for n in ICON_NAMES])
+        if data is not None:
+            return data
         return _shipped_icon_bytes(fused_path, manifest)
     except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
         return None

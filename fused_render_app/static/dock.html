@@ -156,6 +156,8 @@
     pointer-events: none;
     position: relative;
   }
+  /* An svg icon carries its own plate; an icon.png fallback is a plain square
+     that the tile's overflow:hidden + radius clip into the rounded shape. */
   .tile img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .tile.fallback .mono { color: #fff; font-size: calc(var(--tile) * 0.46); }
   .item .tile.fallback .mono { font-size: calc(var(--tile) * 0.46 * var(--s)); }
