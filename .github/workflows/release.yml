@@ -169,6 +169,9 @@ jobs:
     # Separate job so a tap-push failure can't fail the DMG job after the
     # Release already published.
     needs: build-sign-notarize-release
+    # Disabled while the CDN upload (PR #18) is reverted pending the AWS OIDC
+    # role fix; drop this `if` when re-landing it.
+    if: false
     runs-on: ubuntu-latest
     permissions: {} # uses the tap PAT only; no GITHUB_TOKEN scopes needed
     steps:
