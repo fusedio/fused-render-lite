@@ -10,10 +10,12 @@ description: Use when cutting a new fused-render-app (Render App) release, bumpi
 A release is: bump `__version__`, land it on `main` of `origin`
 (fusedio/fused-render-lite), tag that commit `vX.Y.Z`, push the tag. The tag
 push triggers `.github/workflows/release.yml`: `prepare-release` creates the
-GitHub Release, then the macos-26 job builds, signs, (notarizes) and uploads
-`RenderApp-X.Y.Z.dmg` + the wheel, and `bump-homebrew` pushes the new
-version + sha256 into `Casks/render-app.rb` of fusedio/homebrew-tap
-(needs the `TAP_PUSH_TOKEN` repo secret). Afterwards, add the shipped DMG
+GitHub Release, then the macos-26 job builds, signs, (notarizes), uploads
+`RenderApp-X.Y.Z.dmg` to S3 (`fused-render` bucket, `render-app-dmgs/`
+prefix, served at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/`)
+and attaches DMG + wheel to the Release, and `bump-homebrew` pushes the new
+version + sha256 (with the CDN url) into `Casks/render-app.rb` of
+fusedio/homebrew-tap (needs the `TAP_PUSH_TOKEN` repo secret). Afterwards, add the shipped DMG
 size to the table in `STATUS.md` — every version has a row.
 
 **Remotes.** `origin` is fusedio/fused-render-lite. `main` is not protected:
@@ -90,8 +92,8 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 | Tag format | `vX.Y.Z` (== `__version__`, commit on main) |
 | Remote | `origin` = fusedio/fused-render-lite |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
-| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` |
-| Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb`; check `brew update && brew info --cask fusedio/tap/render-app` |
+| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`, fusedlabs/application#8016) |
+| Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb` (url = CDN copy); check `brew update && brew info --cask fusedio/tap/render-app` |
 | After release | size row in `STATUS.md` |
 | Do NOT edit | `pyproject.toml` version |
 
