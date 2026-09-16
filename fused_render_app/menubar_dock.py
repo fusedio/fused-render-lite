@@ -1,6 +1,6 @@
 """The menu-bar Dock: a click on the status item drops a macOS-Dock-like tray
 of the .fused apps you have opened — pinned ones first, then recent — each a
-tile with the app's own ``icon.svg``, its name beneath, and a dot when it is
+tile with the app's own ``icon.svg`` (or ``icon.png``), its name beneath, and a dot when it is
 open in a window. A click focuses the app's window if there is one, else
 opens it; right-click pins, reveals, forgets.
 

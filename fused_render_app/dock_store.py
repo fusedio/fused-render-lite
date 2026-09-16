@@ -172,7 +172,7 @@ def reorder(files: list[str]) -> None:
         _save(result)
 
 
-_icon_cache: dict[tuple, tuple[bool, str | None]] = {}
+_icon_cache: dict[tuple, tuple[bool, list[str] | None]] = {}
 
 
 def _icon_info(file: str) -> tuple[bool, int | None]:
@@ -181,10 +181,12 @@ def _icon_info(file: str) -> tuple[bool, int | None]:
     Everything that needs the .fused opened — whether it PACKS an icon, and
     where its extract would hold an override — is memoised on (file, size,
     mtime): the dock polls this list every ~1.5 s and parsing a container
-    index per card per poll adds up. Per poll only two stats happen: the
-    .fused (cache key) and the override path, so an app that writes
-    ``icon.svg`` after the first poll still shows up, and ``iconVersion``
-    changes with it so tiles retarget their ``<img>``.
+    index per card per poll adds up. Per poll only a few stats happen: the
+    .fused (cache key) and the override paths (``appfile.ICON_NAMES``, svg
+    before png), so an app that writes an icon after the first poll still
+    shows up, and ``iconVersion`` changes with it so tiles retarget their
+    ``<img>``. The walk mirrors ``appfile.icon_bytes`` so ``hasIcon`` and
+    ``/api/dock/icon`` never disagree.
     """
     try:
         st = os.stat(file)
@@ -193,18 +195,18 @@ def _icon_info(file: str) -> tuple[bool, int | None]:
     key = (file, st.st_size, st.st_mtime_ns)
     hit = _icon_cache.get(key)
     if hit is None:
-        hit = (appfile.has_shipped_icon(file), appfile.icon_override_path(file))
+        hit = (appfile.has_shipped_icon(file), appfile.icon_override_paths(file))
         if len(_icon_cache) > 256:
             _icon_cache.clear()
         _icon_cache[key] = hit
-    shipped, override = hit
-    if override is not None:
+    shipped, overrides = hit
+    for override in overrides or ():
         try:
             ost = os.stat(override)
-            if ost.st_size <= appfile.ICON_MAX_BYTES:
-                return True, ost.st_mtime_ns
         except OSError:
-            pass
+            continue
+        if ost.st_size <= appfile.icon_cap(override):
+            return True, ost.st_mtime_ns
     return shipped, (st.st_mtime_ns if shipped else None)
 
 

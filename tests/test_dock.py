@@ -8,7 +8,7 @@ import urllib.parse
 import pytest
 
 from fused_render_app import appfile, container, dock_store, env, icon_color, server
-from tests.conftest import ENTRY_HTML, ICON_SVG
+from tests.conftest import ENTRY_HTML, ICON_PNG, ICON_SVG
 
 
 @pytest.fixture(autouse=True)
@@ -210,6 +210,67 @@ def test_icon_bytes_extracted_dir_overrides(v2_fused_icon):
     assert appfile.icon_bytes(v2_fused_icon) == ICON_SVG
 
 
+def test_icon_bytes_png_fallback(v2_fused_png, v1_fused_png):
+    """icon.png is accepted when there is no icon.svg — v2 member and v1 zip alike."""
+    assert appfile.icon_bytes(v2_fused_png) == ICON_PNG
+    assert appfile.icon_bytes(v1_fused_png) == ICON_PNG
+    assert appfile.has_shipped_icon(v2_fused_png) and appfile.has_shipped_icon(v1_fused_png)
+    assert appfile.is_png(ICON_PNG) and not appfile.is_png(ICON_SVG)
+
+
+def test_icon_bytes_svg_outranks_png(tmp_path):
+    out = tmp_path / "both.fused"
+    container.write(str(out), {"name": "both", "entry": "index.html"},
+                    [("index.html", ENTRY_HTML.encode()), ("icon.svg", ICON_SVG), ("icon.png", ICON_PNG)])
+    assert appfile.icon_bytes(str(out)) == ICON_SVG
+    # an over-cap svg does not hide the png beside it
+    big = b"<svg>" + b"x" * appfile.ICON_MAX_BYTES + b"</svg>"
+    out2 = tmp_path / "bigsvg.fused"
+    container.write(str(out2), {"name": "bigsvg", "entry": "index.html"},
+                    [("index.html", ENTRY_HTML.encode()), ("icon.svg", big), ("icon.png", ICON_PNG)])
+    assert appfile.icon_bytes(str(out2)) == ICON_PNG
+
+
+def test_icon_bytes_png_override_in_extract(v2_fused, v2_fused_png):
+    # a png written into the extract of an iconless app is its icon
+    result = appfile.open_app_file(v2_fused)
+    png_path = os.path.join(result["dir"], "icon.png")
+    with open(png_path, "wb") as f:
+        f.write(ICON_PNG)
+    assert appfile.icon_bytes(v2_fused) == ICON_PNG
+    # ...but an svg written beside it outranks the png
+    with open(os.path.join(result["dir"], appfile.ICON_NAME), "wb") as f:
+        f.write(b"<svg>mine</svg>")
+    assert appfile.icon_bytes(v2_fused) == b"<svg>mine</svg>"
+    # a png has its own, larger cap; over it counts as absent and the shipped png shows
+    result = appfile.open_app_file(v2_fused_png)
+    over = os.path.join(result["dir"], "icon.png")
+    with open(over, "wb") as f:
+        f.write(ICON_PNG + b"\0" * appfile.PNG_ICON_MAX_BYTES)
+    assert appfile.icon_bytes(v2_fused_png) == ICON_PNG
+    with open(over, "wb") as f:
+        f.write(ICON_PNG + b"\0" * (appfile.ICON_MAX_BYTES * 2))  # over the svg cap, under the png cap
+    assert appfile.icon_bytes(v2_fused_png) == ICON_PNG + b"\0" * (appfile.ICON_MAX_BYTES * 2)
+
+
+def test_list_apps_tracks_png_override(v2_fused):
+    dock_store.record_open(v2_fused, "demo")
+    assert dock_store.list_apps()[0]["hasIcon"] is False
+    result = appfile.open_app_file(v2_fused)
+    png_path = os.path.join(result["dir"], "icon.png")
+    with open(png_path, "wb") as f:
+        f.write(ICON_PNG)
+    row = dock_store.list_apps()[0]
+    assert row["hasIcon"] is True and row["iconVersion"] == os.stat(png_path).st_mtime_ns
+    # the svg beside it takes over the version too
+    svg_path = os.path.join(result["dir"], appfile.ICON_NAME)
+    with open(svg_path, "wb") as f:
+        f.write(ICON_SVG)
+    later = row["iconVersion"] + 10**9
+    os.utime(svg_path, ns=(later, later))
+    assert dock_store.list_apps()[0]["iconVersion"] == later
+
+
 def test_icon_bytes_oversized_is_none(tmp_path):
     big = b"<svg>" + b"x" * appfile.ICON_MAX_BYTES + b"</svg>"
     out = tmp_path / "big.fused"
@@ -329,7 +390,7 @@ def test_list_apps_opens_the_fused_once_per_mtime(v2_fused_icon, monkeypatch):
     .fused's (size, mtime)."""
     dock_store.record_open(v2_fused_icon, "iconic")
     calls = {"shipped": 0, "override": 0}
-    real_shipped, real_override = appfile.has_shipped_icon, appfile.icon_override_path
+    real_shipped, real_override = appfile.has_shipped_icon, appfile.icon_override_paths
 
     def shipped(f):
         calls["shipped"] += 1
@@ -340,7 +401,7 @@ def test_list_apps_opens_the_fused_once_per_mtime(v2_fused_icon, monkeypatch):
         return real_override(f)
 
     monkeypatch.setattr(appfile, "has_shipped_icon", shipped)
-    monkeypatch.setattr(appfile, "icon_override_path", override)
+    monkeypatch.setattr(appfile, "icon_override_paths", override)
     for _ in range(3):
         assert dock_store.list_apps()[0]["hasIcon"] is True
     assert calls == {"shipped": 1, "override": 1}
@@ -399,6 +460,12 @@ def test_read_icon_color_legacy_names_still_follow_the_theme():
         svg = GLYPH_SVG.replace(b'data-fused-color="red"', b'data-fused-color="%s"' % name.encode()).decode()
         assert icon_color.read_icon_color(svg) == name
     assert icon_color.read_icon_color("<p>not svg</p>") is None
+
+
+def test_dock_icon_route_serves_png_as_is(client, v2_fused_png):
+    base = "/api/dock/icon?" + urllib.parse.urlencode({"file": v2_fused_png})
+    status, headers, body = client.get(base + "&theme=dark")
+    assert status == 200 and headers["Content-Type"] == "image/png" and body == ICON_PNG
 
 
 def test_dock_icon_route_recolours_for_theme(client, v2_fused_icon):
