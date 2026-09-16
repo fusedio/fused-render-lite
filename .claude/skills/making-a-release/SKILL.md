@@ -92,7 +92,7 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 | Tag format | `vX.Y.Z` (== `__version__`, commit on main) |
 | Remote | `origin` = fusedio/fused-render-lite |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
-| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`, fusedlabs/application#8016) |
+| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`) |
 | Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb` (url = CDN copy); check `brew update && brew info --cask fusedio/tap/render-app` |
 | After release | size row in `STATUS.md` |
 | Do NOT edit | `pyproject.toml` version |
