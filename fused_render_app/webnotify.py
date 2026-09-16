@@ -488,9 +488,15 @@ class _UNDisplay:
         self._center.addNotificationRequest_withCompletionHandler_(request, done)
 
     def remove(self, identifiers: list[str]) -> None:
-        if identifiers:
-            self._center.removeDeliveredNotificationsWithIdentifiers_(identifiers)
-            self._center.removePendingNotificationRequestsWithIdentifiers_(identifiers)
+        if not identifiers:
+            return
+        # Closed while the authorization answer was still in flight: drop it
+        # from the queue too, or it would be posted once the answer lands
+        # (a banner for a notification the page already closed).
+        gone = set(identifiers)
+        self._pending = [p for p in self._pending if identifier_for(p[0]) not in gone]
+        self._center.removeDeliveredNotificationsWithIdentifiers_(identifiers)
+        self._center.removePendingNotificationRequestsWithIdentifiers_(identifiers)
 
 
 def _un_delegate_class():
