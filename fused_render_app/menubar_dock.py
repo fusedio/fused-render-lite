@@ -92,7 +92,9 @@ logger = logging.getLogger(__name__)
 # Before the page has reported a size: room for two utility tiles + hint.
 INITIAL_SIZE = (360, 100)
 MIN_SIZE = (120, 60)
-MAX_SIZE = (1400, 420)
+# Height: headroom + the tray at the 128px ⌥-snap + the footroom that holds a
+# preview bubble (dock.html --footroom, body.has-previews) ≈ 415px; slack on top.
+MAX_SIZE = (1400, 520)
 CANVAS = MAX_SIZE  # the web view's fixed size; the panel shows a region of it
 MESSAGE_NAME = "dock"
 TRAY_RADIUS = 18.0

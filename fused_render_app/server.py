@@ -19,10 +19,13 @@ API (the six supported fused.* calls, plus what the shell needs)
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
-  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,hasIcon}], tilesize}
+  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,
+                                                 hasIcon,iconVersion,hasPreview,previewVersion}], tilesize}
   GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg (currentColor
                                                resolved for the theme, icon_color.py), else
                                                its icon.png as is, or 404
+  GET  /api/dock/preview?file=<abs>[&v=]       the app's preview.png (the hover bubble's
+                                               picture; ``v`` = previewVersion, so it caches), or 404
   POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
   GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
@@ -179,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "tilesize": dock_store.get_tilesize()})
             if route == "/api/dock/icon":
                 return self._dock_icon(q)
+            if route == "/api/dock/preview":
+                return self._dock_preview(q)
             if route == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
             if route == "/api/apps/background/status":
@@ -374,6 +379,16 @@ class Handler(BaseHTTPRequestHandler):
         # dock's <img> cannot see the page's theme, so resolve it here.
         data = icon_color.theme_icon_svg(data, q.get("theme") or "")
         self._send(200, data, "image/svg+xml", headers)
+
+    def _dock_preview(self, q: dict) -> None:
+        file = q.get("file") or ""
+        data = appfile.preview_bytes(file) if os.path.isabs(file) else None
+        if data is None:
+            return self._error("not found", 404)
+        # A preview can run to megabytes and is fetched on every hover; the
+        # page keys the URL on previewVersion (a new preview is a new URL),
+        # so the bytes may be cached for good.
+        self._send(200, data, "image/png", {"Cache-Control": "max-age=31536000, immutable"})
 
     def _dock(self, action: str) -> None:
         if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home", "size"):

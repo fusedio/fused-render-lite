@@ -138,6 +138,31 @@ def v1_fused_png(tmp_path):
 
 
 @pytest.fixture
+def v2_fused_preview(tmp_path):
+    """Like ``v2_fused`` plus a shipped ``preview.png`` (the dock bubble's picture)."""
+    from fused_render_app import container
+
+    out = tmp_path / "pictured.fused"
+    container.write(
+        str(out),
+        {"name": "pictured", "entry": "index.html"},
+        [("index.html", ENTRY_HTML.encode()), ("preview.png", ICON_PNG)],
+    )
+    return str(out)
+
+
+@pytest.fixture
+def v1_fused_preview(tmp_path):
+    out = tmp_path / "legacy-pictured.fused"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(
+            {"fused_app_file": 1, "name": "legacy-pictured", "entry": "index.html"}))
+        zf.writestr("files/index.html", ENTRY_HTML)
+        zf.writestr("files/preview.png", ICON_PNG)
+    return str(out)
+
+
+@pytest.fixture
 def v1_fused_icon(tmp_path):
     out = tmp_path / "legacy-icon.fused"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:

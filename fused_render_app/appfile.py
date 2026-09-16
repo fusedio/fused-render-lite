@@ -299,21 +299,19 @@ def icon_override_paths(fused_path: str) -> list[str] | None:
         fused_path = os.path.abspath(fused_path)
         if not os.path.isfile(fused_path):
             return None
-        manifest = read_manifest(fused_path)
-        name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
-        base = os.path.join(paths.apps_dir(), _file_key(fused_path, name))
+        base = _extract_base(fused_path, read_manifest(fused_path))
         return [os.path.join(base, n) for n in ICON_NAMES]
     except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
         return None
 
 
-def _shipped_icon_bytes(fused_path: str, manifest: dict) -> bytes | None:
-    """The icon packed inside the .fused itself (no extract lookup): the
-    first of ``ICON_NAMES`` that is there and within its cap. An over-cap
-    svg does not hide a png beside it."""
+def _shipped_member_bytes(fused_path: str, manifest: dict, names, cap_for) -> bytes | None:
+    """The first of ``names`` packed inside the .fused itself (no extract
+    lookup) that is there and within its cap (``cap_for(name)``). An
+    over-cap member does not hide the next name."""
     v2 = manifest.get("fused_app_file") == container.VERSION
-    for name in ICON_NAMES:
-        cap = icon_cap(name)
+    for name in names:
+        cap = cap_for(name)
         if v2:
             data = container.read_member(fused_path, manifest, name, cap)
         else:
@@ -328,6 +326,13 @@ def _shipped_icon_bytes(fused_path: str, manifest: dict) -> bytes | None:
     return None
 
 
+def _shipped_icon_bytes(fused_path: str, manifest: dict) -> bytes | None:
+    """The icon packed inside the .fused itself (no extract lookup): the
+    first of ``ICON_NAMES`` that is there and within its cap. An over-cap
+    svg does not hide a png beside it."""
+    return _shipped_member_bytes(fused_path, manifest, ICON_NAMES, icon_cap)
+
+
 def has_shipped_icon(fused_path: str) -> bool:
     """Whether the .fused packs an icon (``ICON_NAMES``; ignores any extract override)."""
     try:
@@ -339,10 +344,10 @@ def has_shipped_icon(fused_path: str) -> bool:
         return False
 
 
-def _override_icon_bytes(candidates: list[str]) -> bytes | None:
-    """The first extract-dir icon that exists and is within its cap."""
+def _override_bytes(candidates: list[str], cap_for) -> bytes | None:
+    """The first extract-dir file that exists and is within its cap."""
     for p in candidates:
-        cap = icon_cap(p)
+        cap = cap_for(p)
         try:
             if os.path.isfile(p) and os.path.getsize(p) <= cap:
                 with open(p, "rb") as f:
@@ -350,6 +355,17 @@ def _override_icon_bytes(candidates: list[str]) -> bytes | None:
         except OSError:
             continue
     return None
+
+
+def _override_icon_bytes(candidates: list[str]) -> bytes | None:
+    """The first extract-dir icon that exists and is within its cap."""
+    return _override_bytes(candidates, icon_cap)
+
+
+def _extract_base(fused_path: str, manifest: dict) -> str:
+    """Where ``fused_path``'s extract lives (whether or not it exists yet)."""
+    name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
+    return os.path.join(paths.apps_dir(), _file_key(fused_path, name))
 
 
 def icon_bytes(fused_path: str) -> bytes | None:
@@ -361,7 +377,7 @@ def icon_bytes(fused_path: str) -> bytes | None:
     the extracted dir (if any; svg then png), then the container member /
     the v1 zip's ``files/`` (svg then png). Anything over its cap
     (`icon_cap`) counts as absent and the walk goes on — the dock polls this
-    for every card and a file that size is not an icon. `dock_store._icon_info`
+    for every card and a file that size is not an icon. `dock_store._card_info`
     walks the same candidates, so ``hasIcon`` and this route agree.
     """
     try:
@@ -369,11 +385,80 @@ def icon_bytes(fused_path: str) -> bytes | None:
         if not os.path.isfile(fused_path):
             return None
         manifest = read_manifest(fused_path)
-        name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
-        base = os.path.join(paths.apps_dir(), _file_key(fused_path, name))
+        base = _extract_base(fused_path, manifest)
         data = _override_icon_bytes([os.path.join(base, n) for n in ICON_NAMES])
         if data is not None:
             return data
         return _shipped_icon_bytes(fused_path, manifest)
+    except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+# ---- preview -----------------------------------------------------------------
+
+# The app's screenshot, ``preview.png`` (the showcase cards' image, and the
+# picture the menu-bar dock shows in a tile's hover bubble). One name, one
+# cap, shared with showcase.py. A png only: the dock's <img> is fed it as is.
+PREVIEW_NAME = "preview.png"
+PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+
+
+def preview_cap(_name: str) -> int:
+    return PREVIEW_MAX_BYTES
+
+
+def preview_override_path(fused_path: str) -> str | None:
+    """Where an app's extract would hold a written ``preview.png`` (whether
+    or not it exists yet), or None if the file is unreadable."""
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return None
+        return os.path.join(_extract_base(fused_path, read_manifest(fused_path)), PREVIEW_NAME)
+    except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+def has_shipped_preview(fused_path: str) -> bool:
+    """Whether the .fused packs a ``preview.png`` within its cap (ignores
+    any extract override). Reads only the index for a v2 container / the
+    zip directory for v1 — the dock polls this for every card."""
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return False
+        manifest = read_manifest(fused_path)
+        if manifest.get("fused_app_file") == container.VERSION:
+            entry = container.find(manifest, PREVIEW_NAME)
+            return entry is not None and int(entry.get("size", 0)) <= PREVIEW_MAX_BYTES
+        with zipfile.ZipFile(fused_path) as zf:
+            try:
+                info = zf.getinfo(f"{PAYLOAD_DIR}/{PREVIEW_NAME}")
+            except KeyError:
+                return False
+            return info.file_size <= PREVIEW_MAX_BYTES
+    except (AppFileError, container.ContainerError, OSError, KeyError, ValueError, TypeError,
+            zipfile.BadZipFile):
+        return False
+
+
+def preview_bytes(fused_path: str) -> bytes | None:
+    """The app's ``preview.png`` for the dock's hover bubble, or None. Never
+    raises. Same walk as `icon_bytes`: the extract dir first (an app that
+    writes its own preview wins), then the shipped member / the v1 zip's
+    ``files/``; anything over `PREVIEW_MAX_BYTES` counts as absent.
+    `dock_store._card_info` walks the same candidates, so ``hasPreview`` and
+    ``/api/dock/preview`` agree.
+    """
+    try:
+        fused_path = os.path.abspath(fused_path)
+        if not os.path.isfile(fused_path):
+            return None
+        manifest = read_manifest(fused_path)
+        base = _extract_base(fused_path, manifest)
+        data = _override_bytes([os.path.join(base, PREVIEW_NAME)], preview_cap)
+        if data is not None:
+            return data
+        return _shipped_member_bytes(fused_path, manifest, (PREVIEW_NAME,), preview_cap)
     except (AppFileError, container.ContainerError, OSError, KeyError, zipfile.BadZipFile):
         return None

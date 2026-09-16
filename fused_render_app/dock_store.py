@@ -172,42 +172,54 @@ def reorder(files: list[str]) -> None:
         _save(result)
 
 
-_icon_cache: dict[tuple, tuple[bool, list[str] | None]] = {}
+_icon_cache: dict[tuple, tuple[bool, list[str] | None, bool, str | None]] = {}
 
 
-def _icon_info(file: str) -> tuple[bool, int | None]:
-    """``(hasIcon, iconVersion)`` for a dock card.
+def _card_info(file: str) -> tuple[bool, int | None, bool, int | None]:
+    """``(hasIcon, iconVersion, hasPreview, previewVersion)`` for a dock card.
 
-    Everything that needs the .fused opened — whether it PACKS an icon, and
-    where its extract would hold an override — is memoised on (file, size,
-    mtime): the dock polls this list every ~1.5 s and parsing a container
-    index per card per poll adds up. Per poll only a few stats happen: the
-    .fused (cache key) and the override paths (``appfile.ICON_NAMES``, svg
-    before png), so an app that writes an icon after the first poll still
-    shows up, and ``iconVersion`` changes with it so tiles retarget their
-    ``<img>``. The walk mirrors ``appfile.icon_bytes`` so ``hasIcon`` and
-    ``/api/dock/icon`` never disagree.
+    Everything that needs the .fused opened — whether it PACKS an icon / a
+    preview, and where its extract would hold an override — is memoised on
+    (file, size, mtime): the dock polls this list every ~1.5 s and parsing a
+    container index per card per poll adds up. Per poll only a few stats
+    happen: the .fused (cache key) and the override paths
+    (``appfile.ICON_NAMES``, svg before png; ``appfile.PREVIEW_NAME``), so
+    an app that writes an icon or a preview after the first poll still shows
+    up, and the version changes with it so tiles retarget their ``<img>``.
+    The walk mirrors ``appfile.icon_bytes`` / ``appfile.preview_bytes`` so
+    ``hasIcon`` / ``hasPreview`` and the routes never disagree.
     """
     try:
         st = os.stat(file)
     except OSError:
-        return False, None
+        return False, None, False, None
     key = (file, st.st_size, st.st_mtime_ns)
     hit = _icon_cache.get(key)
     if hit is None:
-        hit = (appfile.has_shipped_icon(file), appfile.icon_override_paths(file))
+        hit = (appfile.has_shipped_icon(file), appfile.icon_override_paths(file),
+               appfile.has_shipped_preview(file), appfile.preview_override_path(file))
         if len(_icon_cache) > 256:
             _icon_cache.clear()
         _icon_cache[key] = hit
-    shipped, overrides = hit
+    shipped, overrides, shipped_preview, preview_override = hit
+    has_icon, icon_version = shipped, (st.st_mtime_ns if shipped else None)
     for override in overrides or ():
         try:
             ost = os.stat(override)
         except OSError:
             continue
         if ost.st_size <= appfile.icon_cap(override):
-            return True, ost.st_mtime_ns
-    return shipped, (st.st_mtime_ns if shipped else None)
+            has_icon, icon_version = True, ost.st_mtime_ns
+            break
+    has_preview, preview_version = shipped_preview, (st.st_mtime_ns if shipped_preview else None)
+    if preview_override:
+        try:
+            pst = os.stat(preview_override)
+            if pst.st_size <= appfile.PREVIEW_MAX_BYTES:
+                has_preview, preview_version = True, pst.st_mtime_ns
+        except OSError:
+            pass
+    return has_icon, icon_version, has_preview, preview_version
 
 
 def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
@@ -221,7 +233,7 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
     out = []
     for a in pinned + recent:  # filesystem probes happen outside the lock
         file = a["file"]
-        has_icon, icon_version = _icon_info(file)
+        has_icon, icon_version, has_preview, preview_version = _card_info(file)
         out.append({
             "file": file,
             "name": a.get("name") or _stem(file),
@@ -231,6 +243,8 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
             "openedAt": a.get("openedAt"),
             "hasIcon": has_icon,
             "iconVersion": icon_version,
+            "hasPreview": has_preview,
+            "previewVersion": preview_version,
         })
     return out
 

@@ -150,7 +150,9 @@ def test_list_apps_shape(v2_fused_icon, v2_fused, tmp_path):
     dock_store.record_open(v2_fused_icon, "iconic")
     dock_store.record_open(ghost, "ghost")
     by_file = {a["file"]: a for a in dock_store.list_apps(running={v2_fused})}
-    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt", "hasIcon", "iconVersion"}
+    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt",
+                                      "hasIcon", "iconVersion", "hasPreview", "previewVersion"}
+    assert by_file[v2_fused]["hasPreview"] is False and by_file[v2_fused]["previewVersion"] is None
     assert by_file[v2_fused]["running"] is True and by_file[v2_fused]["hasIcon"] is False
     assert by_file[v2_fused_icon]["running"] is False and by_file[v2_fused_icon]["hasIcon"] is True
     assert by_file[ghost]["exists"] is False and by_file[ghost]["hasIcon"] is False
@@ -482,3 +484,65 @@ def test_dock_icon_route_recolours_for_theme(client, v2_fused_icon):
     # no theme: the raw file, as before
     status, _, body = client.get(base)
     assert status == 200 and body == GLYPH_SVG
+
+
+# ---- preview.png (the hover bubble's picture) ------------------------------
+
+
+def test_preview_bytes_v2_v1_and_absent(v2_fused_preview, v1_fused_preview, v2_fused, v1_fused):
+    assert appfile.preview_bytes(v2_fused_preview) == ICON_PNG
+    assert appfile.preview_bytes(v1_fused_preview) == ICON_PNG
+    assert appfile.preview_bytes(v2_fused) is None
+    assert appfile.preview_bytes(v1_fused) is None
+    assert appfile.preview_bytes("/nope/missing.fused") is None
+    assert appfile.has_shipped_preview(v2_fused_preview) and appfile.has_shipped_preview(v1_fused_preview)
+    assert not appfile.has_shipped_preview(v2_fused) and not appfile.has_shipped_preview("/nope.fused")
+
+
+def test_preview_bytes_extract_override_and_cap(v2_fused_preview, v2_fused):
+    # a preview written into the extract wins over the shipped one
+    result = appfile.open_app_file(v2_fused_preview)
+    with open(os.path.join(result["dir"], appfile.PREVIEW_NAME), "wb") as f:
+        f.write(b"mine")
+    assert appfile.preview_bytes(v2_fused_preview) == b"mine"
+    # an over-cap override is ignored; the shipped preview still shows
+    with open(os.path.join(result["dir"], appfile.PREVIEW_NAME), "wb") as f:
+        f.write(b"x" * (appfile.PREVIEW_MAX_BYTES + 1))
+    assert appfile.preview_bytes(v2_fused_preview) == ICON_PNG
+    # a preview written into the extract of an app that ships none is its preview
+    result = appfile.open_app_file(v2_fused)
+    with open(os.path.join(result["dir"], appfile.PREVIEW_NAME), "wb") as f:
+        f.write(b"late")
+    assert appfile.preview_bytes(v2_fused) == b"late"
+
+
+def test_list_apps_preview_flags_and_version(v2_fused_preview, v2_fused):
+    dock_store.record_open(v2_fused_preview, "pictured")
+    dock_store.record_open(v2_fused, "demo")
+    by_file = {a["file"]: a for a in dock_store.list_apps()}
+    assert by_file[v2_fused_preview]["hasPreview"] is True
+    assert by_file[v2_fused_preview]["previewVersion"] == os.stat(v2_fused_preview).st_mtime_ns
+    assert by_file[v2_fused]["hasPreview"] is False and by_file[v2_fused]["previewVersion"] is None
+    # a preview written into the extract later shows up on the next poll (the
+    # .fused's own status is memoised) with the override's mtime as version
+    result = appfile.open_app_file(v2_fused)
+    p = os.path.join(result["dir"], appfile.PREVIEW_NAME)
+    with open(p, "wb") as f:
+        f.write(ICON_PNG)
+    later = os.stat(v2_fused).st_mtime_ns + 10**9
+    os.utime(p, ns=(later, later))
+    row = {a["file"]: a for a in dock_store.list_apps()}[v2_fused]
+    assert row["hasPreview"] is True and row["previewVersion"] == later
+    # icon status is untouched by the preview
+    assert row["hasIcon"] is False and row["iconVersion"] is None
+
+
+def test_dock_preview_route(client, v2_fused_preview, v2_fused):
+    status, headers, body = client.get("/api/dock/preview?" + urllib.parse.urlencode({"file": v2_fused_preview, "v": "1"}))
+    assert status == 200 and body == ICON_PNG
+    assert headers["Content-Type"] == "image/png"
+    assert "immutable" in headers["Cache-Control"]
+    status, _, _ = client.get("/api/dock/preview?" + urllib.parse.urlencode({"file": v2_fused}))
+    assert status == 404
+    status, _, _ = client.get("/api/dock/preview?file=relative.fused")
+    assert status == 404
