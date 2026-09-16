@@ -25,8 +25,10 @@ from fused_render_app import appfile, container
 
 SHOWCASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "showcase")
 SIDECAR = os.path.join(SHOWCASE_DIR, "showcase.json")
-PREVIEW_MEMBER = "preview.png"
-MAX_PREVIEW_BYTES = 8 * 1024 * 1024
+# One name, one cap for the app screenshot, shared with the menu-bar dock's
+# hover bubble (appfile.preview_bytes).
+PREVIEW_MEMBER = appfile.PREVIEW_NAME
+MAX_PREVIEW_BYTES = appfile.PREVIEW_MAX_BYTES
 
 
 def _sidecar() -> dict:

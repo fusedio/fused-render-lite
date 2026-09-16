@@ -127,6 +127,11 @@ To add one: drop the `.fused` into that folder, give it a `title` and
 `pyproject.toml` (even with `dependencies = []`) and a `preview.png` —
 `tests/test_showcase.py` checks both, and that it calls nothing Render App rejects.
 
+Any app's `preview.png` (a member of the `.fused`, or one written into the
+app's extract dir) also shows in the menu-bar dock: hovering the app's tile
+opens the name bubble with the picture above the name
+(`GET /api/dock/preview`; 8 MB cap, PNG only).
+
 ## Python environments
 
 No packages are bundled. The DMG ships one CPython 3.12 (py2app's real

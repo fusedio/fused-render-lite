@@ -29,7 +29,18 @@
     --item-w: var(--tile);
     /* hangs from the menu bar: magnified tile (+tile/2) + name bubble grow DOWN */
     --footroom: calc(var(--tile) * 0.5 + 40px);
+    /* the bubble's preview box (fixed px, NOT tile-relative: at the 128px
+       ⌥-snap the panel must stay under menubar_dock.MAX_SIZE) */
+    --preview-w: 240px;
+    --preview-h: 120px;
   }
+  /* Some card packs a preview.png: reserve the taller bubble up front, so
+     the panel is sized once at rest (render → report) and never mid-hover. */
+  body.has-previews { --footroom: calc(var(--tile) * 0.5 + 40px + var(--preview-h) + 40px); }
+  /* ...and wide enough for it: the bubble is position:fixed inside the web
+     view, which is sized to #wrap (report), so a small tray (16/32px tiles,
+     one app) would clip it. min-width beats the pinned inline width. */
+  body.has-previews #wrap { min-width: calc(var(--preview-w) + 12px + 8px); }
   @media (prefers-color-scheme: dark) {
     :root {
       --tray-bg: rgba(30,30,32,.45);
@@ -205,6 +216,16 @@
     border: 6px solid transparent; border-bottom-color: rgba(56,56,60,.92); border-top: 0;
   }
   #bubble.on { opacity: 1; }
+  /* With a preview: the picture on top, the name under it, like a Dock
+     tooltip grown into a card. The <img> is set on hover (setHover), never
+     on render, so a poll re-render does not refetch N pictures. */
+  #bubble.pic { padding: 6px 6px 5px; border-radius: 12px; }
+  #bubble img {
+    display: block; margin: 0 auto 5px;
+    max-width: var(--preview-w); max-height: var(--preview-h); width: auto; height: auto;
+    border-radius: 7px; background: rgba(255,255,255,.06);
+  }
+  #bubble img:not(.ready) { display: none; }
 
   /* context menu */
   #menu {
@@ -335,6 +356,11 @@
     b.setAttribute("aria-label", name + (app.exists ? "" : " (missing)"));
     b.classList.toggle("running", !!app.running);
     b.classList.toggle("missing", !app.exists);
+    // previewVersion changes when a preview is (re)written, so the bubble's
+    // <img> retargets; the server caches the URL for good (immutable).
+    b.dataset.preview = app.hasPreview
+      ? "/api/dock/preview?file=" + encodeURIComponent(app.file) + "&v=" + encodeURIComponent(app.previewVersion ?? "")
+      : "";
     const wantImg = !!app.hasIcon;
     const img = tile.querySelector("img");
     if (wantImg) {
@@ -412,6 +438,7 @@
       i++;
     }
     while (tray.children.length > order.length) tray.lastElementChild.remove();
+    document.body.classList.toggle("has-previews", apps.some(a => a.hasPreview));
     mag.rest = null;
     if (!mag.active) report();
   }
@@ -580,10 +607,35 @@
     bubble.style.left = Math.min(Math.max(cx, bw / 2 + 4), window.innerWidth - bw / 2 - 4) + "px";
     bubble.classList.add("on");
   }
+  // Decoded previews by URL: a hover after the first shows the picture at
+  // once, and a poll re-render mid-hover (updateItem) never touches them.
+  const previews = new Map();
+  function previewImg(src) {
+    let im = previews.get(src);
+    if (im) return im;
+    im = document.createElement("img"); im.alt = ""; im.draggable = false;
+    // Sized only once decoded (.ready): the name shows at once, the bubble
+    // grows and re-centres (placeBubble) when the picture lands.
+    im.addEventListener("load", () => { im.classList.add("ready"); if (im.isConnected) placeBubble(); }, { once: true });
+    im.addEventListener("error", () => {
+      previews.delete(src);
+      if (im.isConnected) { im.remove(); bubble.classList.remove("pic"); placeBubble(); }
+    }, { once: true });
+    im.src = src;
+    if (previews.size > 64) previews.clear();
+    previews.set(src, im);
+    return im;
+  }
   function setHover(b) {
     if (state.hover === b) return;
     state.hover = b;
-    if (b) bubble.textContent = b.dataset.name + (b.classList.contains("app") && !b.dataset.exists ? " (missing)" : "");
+    if (!b) return;
+    const missing = b.classList.contains("app") && !b.dataset.exists;
+    const name = document.createElement("span");
+    name.textContent = b.dataset.name + (missing ? " (missing)" : "");
+    const src = missing ? "" : b.dataset.preview;
+    bubble.classList.toggle("pic", !!src);
+    bubble.replaceChildren(...(src ? [previewImg(src), name] : [name]));
   }
   tray.addEventListener("pointermove", (e) => {
     if (state.dragging || state.menuFor || state.resizing) return;
