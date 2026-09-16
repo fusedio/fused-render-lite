@@ -219,7 +219,8 @@
   /* With a preview: the name on top, the picture under it, like a Dock
      tooltip grown into a card. The <img> is set on hover (setHover), never
      on render, so a poll re-render does not refetch N pictures. */
-  #bubble.pic { padding: 6px 6px 5px; border-radius: 12px; }
+  #bubble.pic { padding: 5px 6px 6px; border-radius: 12px; text-align: center; }
+  #bubble.pic span { display: block; }
   #bubble img {
     display: block; margin: 5px auto 0;
     max-width: var(--preview-w); max-height: var(--preview-h); width: auto; height: auto;
