@@ -59,6 +59,21 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.11
+
+Browser parity in app windows (PR #20). WKWebView asks the host before
+granting several web APIs and an unanswered delegate is a deny, so `.fused`
+apps that worked in a browser tab lost input paths in a Render App window.
+Now: `requestPointerLock` granted (private `WKUIDelegatePrivate` selector);
+`navigator.geolocation` granted for the app's own origin only, with
+`NSLocation*UsageDescription` in the bundle plist; `Notification` granted
+for own origin and delivered through a WebKit C API notification provider
+(`webnotify.py`, ctypes) → `UNUserNotificationCenter`, with
+onshow/onclick/onclose round-tripped; `window.open` returns a live popup
+handle (opener, postMessage, `popup.close()`) and `window.close()` closes
+the window. `window_policy.is_own_origin` is the single gate for
+camera/mic, geolocation and notifications. No packaging change.
+
 ## 0.8.10
 
 Dock accepts `icon.png` as a lower-priority fallback to `icon.svg` (PR #17).
