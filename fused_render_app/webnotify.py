@@ -31,9 +31,23 @@ Display:
   ``DidShowNotification`` is still reported, so the page's ``onshow`` fires
   and its logic proceeds exactly as in the bundle.
 
-Import of this module never loads WebKit or ctypes symbols (CI runs on
-Linux); everything native happens in `install`. The pure helpers at the top
-are what the tests cover.
+Second entry point — job banners. `macapp` installs a `jobs` transition
+hook that runs each (prev, after) pair through `notify_policy.decide` and
+calls `notify(identifier, title, body, sound=...)` here for the ones that
+deserve a banner (model downloads starting, a job waiting on the user, a
+job finishing). That path shares the display singleton with the WebKit
+provider: one `UNUserNotificationCenter` delegate, one authorization
+request, one click dispatcher. Clicks are routed by identifier prefix —
+the provider owns ``web-`` (`IDENTIFIER_PREFIX`), `macapp` registers
+`notify_policy.IDENTIFIER_PREFIX` — through `register_click_handler`.
+`notify` / `remove` may be called from any thread (the jobs hook fires on
+the producer's thread); they hop to the main thread and, if `install` never
+ran (``fused-render serve`` on the CLI, Linux CI), build the display lazily
+or, when AppKit is missing altogether, log once and do nothing.
+
+Import of this module never loads WebKit, AppKit or ctypes symbols (CI runs
+on Linux); everything native happens in `install`, `notify` and friends.
+The pure helpers at the top are what the tests cover.
 """
 from __future__ import annotations
 
@@ -45,8 +59,11 @@ logger = logging.getLogger(__name__)
 
 IDENTIFIER_PREFIX = "web-"
 
-# UNNotificationPresentationOptions (macOS 11+): banner | list | sound.
-_UN_PRESENT_BANNER_LIST_SOUND = (1 << 4) | (1 << 3) | (1 << 1)
+# UNNotificationPresentationOptions (macOS 11+): banner | list, with and
+# without the sound bit. A banner posted with ``sound=False`` (a job merely
+# starting) gets the silent set from `willPresentNotification`.
+_UN_PRESENT_BANNER_LIST = (1 << 4) | (1 << 3)
+_UN_PRESENT_BANNER_LIST_SOUND = _UN_PRESENT_BANNER_LIST | (1 << 1)
 # UNAuthorizationOptions: badge | sound | alert.
 _UN_AUTH_BADGE_SOUND_ALERT = 7
 
@@ -81,6 +98,150 @@ def notification_id_from(identifier: str | None) -> int | None:
         return int(str(identifier)[len(IDENTIFIER_PREFIX):])
     except ValueError:
         return None
+
+
+# ---- module-level display + click registry --------------------------------------
+
+# The one display for the process (`_UNDisplay` or `_LogOnlyDisplay`).
+# Built by `install` (the WebKit provider) or lazily by the first `notify`
+# on the main thread — whichever comes first; both then share it. Stays
+# None where no display can exist (no AppKit).
+_display = None
+_no_display_logged = False
+
+# Click handlers by UN identifier prefix. A banner's identifier says who
+# posted it (``web-<id>`` from a page, ``job:<id>`` from `notify_policy`);
+# the longest registered prefix that matches wins, so a more specific
+# prefix can shadow a general one. Last registration per prefix wins.
+_click_handlers: dict[str, Callable[[str], None]] = {}
+
+
+def _handler_for(identifier: str | None) -> Callable[[str], None] | None:
+    """Pure: the registered handler whose prefix is the longest one that
+    ``identifier`` starts with, or None when nobody claims it."""
+    if not identifier:
+        return None
+    best: str | None = None
+    for prefix in _click_handlers:
+        if identifier.startswith(prefix) and (best is None or len(prefix) > len(best)):
+            best = prefix
+    return None if best is None else _click_handlers[best]
+
+
+def register_click_handler(prefix: str, handler: Callable[[str], None]) -> None:
+    """A banner whose UN identifier starts with ``prefix`` was clicked:
+    ``handler(identifier)`` runs on the MAIN thread after the app has been
+    activated (``NSApp.activateIgnoringOtherApps_(True)``). Last registration
+    per prefix wins."""
+    _click_handlers[prefix] = handler
+
+
+def _call_after(fn: Callable, *args) -> None:
+    """Hop to the main thread. The one place `AppHelper` is touched, so a
+    test can make it synchronous and a build without PyObjC fails here with
+    ImportError (callers catch it)."""
+    from PyObjCTools import AppHelper
+
+    AppHelper.callAfter(fn, *args)
+
+
+def _log_no_display_once() -> None:
+    global _no_display_logged
+    if not _no_display_logged:
+        _no_display_logged = True
+        logger.info("native notifications unavailable here (no AppKit / display); "
+                    "banners are dropped")
+
+
+def _ensure_display():
+    """Main thread. The shared display, built on first need. Unlike
+    `install`, a failure here (no PyObjC, no Foundation) is not an error:
+    ``fused-render serve`` has jobs too and must simply not notify. The
+    failure is not cached so a later `install` in a real app still builds."""
+    global _display
+    if _display is None:
+        try:
+            _display = _make_display(_dispatch_click)
+        except Exception:  # noqa: BLE001 — ImportError mostly; never raise to the caller
+            logger.debug("building the notification display failed", exc_info=True)
+            _log_no_display_once()
+            return None
+    return _display
+
+
+def notify(identifier: str, title: str, body: str, *, sound: bool = True) -> None:
+    """Post/replace a macOS notification (same identifier → UN replaces the
+    banner in place). Callable from ANY thread; hops to the main thread via
+    `AppHelper.callAfter`. No-op with an INFO log if no display exists and
+    one cannot be built (no AppKit, e.g. ``fused-render serve``)."""
+    try:
+        _call_after(_notify_main, str(identifier), title or "", body or "", bool(sound))
+    except Exception:  # noqa: BLE001 — no PyObjC at all
+        _log_no_display_once()
+
+
+def _notify_main(identifier: str, title: str, body: str, sound: bool) -> None:
+    display = _ensure_display()
+    if display is None:
+        return
+    try:
+        display.show(identifier, title, body, sound)
+    except Exception:  # noqa: BLE001 — a banner is never worth breaking the caller
+        logger.exception("notification %s: display failed", identifier)
+
+
+def remove(identifier: str) -> None:
+    """Take a delivered/pending banner down. Any thread."""
+    try:
+        _call_after(_remove_main, str(identifier))
+    except Exception:  # noqa: BLE001
+        _log_no_display_once()
+
+
+def _remove_main(identifier: str) -> None:
+    # Nothing to remove if no display was ever built — and building one
+    # (requestAuthorization) just to take nothing down would be wrong.
+    if _display is None:
+        return
+    try:
+        _display.remove([identifier])
+    except Exception:  # noqa: BLE001
+        logger.exception("notification %s: remove failed", identifier)
+
+
+def _dispatch_click(identifier: str) -> None:
+    """The display's click callback. Any thread (UN delivers on a
+    background queue); activation and the handler run on the main thread."""
+    try:
+        _call_after(_dispatch_click_main, str(identifier))
+    except Exception:  # noqa: BLE001
+        logger.exception("notification click %s: dispatch failed", identifier)
+
+
+def _activate_app() -> None:
+    """Bring the app forward. Own function so a test can stub it (calling
+    the real thing under pytest would spawn an NSApplication and steal
+    focus from the terminal)."""
+    from AppKit import NSApp
+
+    NSApp.activateIgnoringOtherApps_(True)
+
+
+def _dispatch_click_main(identifier: str) -> None:
+    # Activate once for every prefix (the handlers no longer do it), even
+    # when nobody claims the identifier: the user clicked *our* banner.
+    try:
+        _activate_app()
+    except Exception:  # noqa: BLE001 — still deliver the click
+        logger.exception("notification click %s: activating failed", identifier)
+    handler = _handler_for(identifier)
+    if handler is None:
+        logger.info("notification %s clicked: no handler registered", identifier)
+        return
+    try:
+        handler(identifier)
+    except Exception:  # noqa: BLE001
+        logger.exception("notification click %s: handler failed", identifier)
 
 
 # ---- WebKit C API bindings ---------------------------------------------------
@@ -205,7 +366,14 @@ class NotificationProvider:
         self.manager = wk.WKContextGetNotificationManager(objc.pyobjc_id(pool))
         if not self.manager:
             raise NotificationsUnavailable("WKContextGetNotificationManager returned NULL")
-        self._display = _make_display(self._clicked)
+        # Clicks on ``web-*`` banners come back here through the shared
+        # dispatcher; the display itself is shared with `notify` and may
+        # already exist if a job banner was posted before the first window.
+        register_click_handler(IDENTIFIER_PREFIX, self._clicked)
+        global _display
+        if _display is None:
+            _display = _make_display(_dispatch_click)
+        self._display = _display
         wk.WKNotificationManagerSetProvider(self.manager, ctypes.byref(self._struct))
         logger.info("web notification provider installed (%s)", self._display.describe())
 
@@ -227,7 +395,7 @@ class NotificationProvider:
         logger.info("web notification #%d from %s: %r / %r%s", nid, origin, title, body,
                     f" tag={tag!r}" if tag else "")
         try:
-            self._display.show(nid, title or "", body or "")
+            self._display.show(identifier_for(nid), title or "", body or "", True)
         except Exception:  # noqa: BLE001 — report shown anyway; the page must not hang
             logger.exception("web notification #%d: display failed", nid)
         wk.WKNotificationManagerProviderDidShowNotification(self.manager, nid)
@@ -317,22 +485,18 @@ class NotificationProvider:
             wk.WKRelease(arr)
 
     def _clicked(self, identifier: str) -> None:
-        """A banner was clicked. Any thread (UN delivers on a background
-        queue); the WebKit and AppKit work hops to the main thread."""
+        """A ``web-*`` banner was clicked; called by `_dispatch_click_main`
+        on the main thread with the app already activated. Tolerates any
+        thread anyway (hops), since the WebKit call must be on main."""
         nid = notification_id_from(identifier)
         if nid is None:
             return
-        from PyObjCTools import AppHelper
-
-        AppHelper.callAfter(self._clicked_main, nid)
+        _call_after(self._clicked_main, nid)
 
     def _clicked_main(self, nid: int) -> None:
         origin = self._origins.get(nid)
         logger.info("web notification #%d clicked", nid)
         try:
-            from AppKit import NSApp
-
-            NSApp.activateIgnoringOtherApps_(True)
             if self._on_click is not None:
                 self._on_click(origin)
         except Exception:  # noqa: BLE001 — still deliver the click to the page
@@ -358,9 +522,9 @@ class _LogOnlyDisplay:
     def describe(self) -> str:
         return "unbundled: notifications are logged, not displayed"
 
-    def show(self, nid: int, title: str, body: str) -> None:
-        logger.info("web notification #%d not displayed (unbundled run): %s — %s",
-                    nid, title, body)
+    def show(self, identifier: str, title: str, body: str, sound: bool) -> None:
+        logger.info("notification %s not displayed (unbundled run): %s — %s",
+                    identifier, title, body)
 
     def remove(self, identifiers: list[str]) -> None:
         pass
@@ -443,11 +607,19 @@ class _UNDisplay:
         _register_un_metadata()
         self._Content = objc.lookUpClass("UNMutableNotificationContent")
         self._Request = objc.lookUpClass("UNNotificationRequest")
+        try:
+            self._Sound = objc.lookUpClass("UNNotificationSound")
+        except objc.nosuchclass_error:  # a WebKit-only future without it: banners stay mute
+            self._Sound = None
         self._center = objc.lookUpClass("UNUserNotificationCenter").currentNotificationCenter()
-        self._delegate = _UNDelegate.alloc().initWithCallback_(on_click)
+        self._delegate = _UNDelegate.alloc().initWithCallback_options_(
+            on_click, self.options_for)
         self._center.setDelegate_(self._delegate)
         self._authorized: bool | None = None
-        self._pending: list[tuple[int, str, str]] = []
+        self._pending: list[tuple[str, str, str, bool]] = []
+        # Identifiers posted with sound=False; `willPresentNotification`
+        # asks `options_for` and leaves the sound bit off for these.
+        self._silent: set[str] = set()
         self._center.requestAuthorizationWithOptions_completionHandler_(
             _UN_AUTH_BADGE_SOUND_ALERT, self._authorized_cb)
 
@@ -465,25 +637,45 @@ class _UNDisplay:
         logger.info("notification authorization %s%s", "granted" if granted else "denied",
                     f" ({error.localizedDescription()})" if error is not None else "")
         pending, self._pending = self._pending, []
-        for nid, title, body in pending:
-            self.show(nid, title, body)
+        for identifier, title, body, sound in pending:
+            self.show(identifier, title, body, sound)
 
-    def show(self, nid: int, title: str, body: str) -> None:
+    def options_for(self, identifier: str) -> int:
+        """Presentation options for a banner about to be shown in the
+        foreground: no sound bit for one posted with ``sound=False``."""
+        if identifier in self._silent:
+            return _UN_PRESENT_BANNER_LIST
+        return _UN_PRESENT_BANNER_LIST_SOUND
+
+    def show(self, identifier: str, title: str, body: str, sound: bool) -> None:
+        # Recorded before the authorization gate so the answer is right when
+        # the queued banner is replayed too (replay re-records it anyway).
+        if sound:
+            self._silent.discard(identifier)
+        else:
+            self._silent.add(identifier)
         if self._authorized is None:
-            self._pending.append((nid, title, body))  # answer still in flight
+            self._pending.append((identifier, title, body, sound))  # answer still in flight
             return
         if not self._authorized:
-            logger.info("web notification #%d suppressed: notifications not authorized", nid)
+            logger.info("notification %s suppressed: notifications not authorized", identifier)
             return
         content = self._Content.alloc().init()
         content.setTitle_(title)
         content.setBody_(body)
+        if sound and self._Sound is not None:
+            # `willPresentNotification` only decides the FOREGROUND case; a
+            # banner delivered while another app is frontmost plays whatever
+            # the content carries, and a content with no sound is mute. A
+            # terminal "done"/"failed" is the one the user walked away from,
+            # so it is exactly the one that has to be audible.
+            content.setSound_(self._Sound.defaultSound())
         request = self._Request.requestWithIdentifier_content_trigger_(
-            identifier_for(nid), content, None)
+            identifier, content, None)
 
         def done(error):
             if error is not None:
-                logger.warning("web notification #%d: %s", nid, error.localizedDescription())
+                logger.warning("notification %s: %s", identifier, error.localizedDescription())
 
         self._center.addNotificationRequest_withCompletionHandler_(request, done)
 
@@ -494,7 +686,8 @@ class _UNDisplay:
         # from the queue too, or it would be posted once the answer lands
         # (a banner for a notification the page already closed).
         gone = set(identifiers)
-        self._pending = [p for p in self._pending if identifier_for(p[0]) not in gone]
+        self._pending = [p for p in self._pending if p[0] not in gone]
+        self._silent -= gone
         self._center.removeDeliveredNotificationsWithIdentifiers_(identifiers)
         self._center.removePendingNotificationRequestsWithIdentifiers_(identifiers)
 
@@ -504,18 +697,25 @@ def _un_delegate_class():
     import objc
 
     class _UNDelegate(NSObject):
-        def initWithCallback_(self, callback):
+        def initWithCallback_options_(self, callback, options_for):
             self = objc.super(_UNDelegate, self).init()
             if self is None:
                 return None
             self._callback = callback
+            self._options = options_for
             return self
 
         def userNotificationCenter_willPresentNotification_withCompletionHandler_(
                 self, center, notification, completion):
             # Show the banner even while we are the frontmost app — a browser
-            # tab's notification shows regardless of focus too.
-            completion(_UN_PRESENT_BANNER_LIST_SOUND)
+            # tab's notification shows regardless of focus too. Sound bit per
+            # banner (a job merely starting is silent).
+            try:
+                options = self._options(str(notification.request().identifier()))
+            except Exception:  # noqa: BLE001 — never leave the block uncalled
+                logger.exception("notification: presentation options failed")
+                options = _UN_PRESENT_BANNER_LIST_SOUND
+            completion(options)
 
         def userNotificationCenter_didReceiveNotificationResponse_withCompletionHandler_(
                 self, center, response, completion):

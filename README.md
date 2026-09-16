@@ -31,6 +31,15 @@ menu bar item, a main menu, and one window per opened `.fused`.
 | `Notification.requestPermission` / `new Notification` from the app's own page | granted; shown as a macOS notification, click focuses the app |
 | ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
 
+The app also posts its own macOS notifications for work it runs in the
+background: a model download or an app's environment install starting
+(silent), an install waiting for your approval, and every download, install,
+render, transcription or benchmark finishing or failing. A resident model
+load and a text generation stay quiet on success, as in fused-render. One
+banner per job: the "started" banner is replaced in place by the outcome.
+Clicking brings the app forward and, for an install, the app it was for
+(`jobnotify.py`, `notify_policy.py`).
+
 Closing the last window does not quit. The menu-bar item has four entries:
 "Open in app" (focus the front window or open the placeholder), "Open in
 browser", "Open app logs", "Quit". The Dock icon does the same as "Open in
