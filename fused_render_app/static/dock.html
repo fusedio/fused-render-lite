@@ -95,6 +95,11 @@
   /* In the app the glass is native (an NSVisualEffectView sized to the tray
      rect the page reports): the page draws no box of its own — the tray
      floats, like the Dock. */
+  /* In the app the page is a fixed 1400×420 canvas (menubar_dock.CANVAS)
+     pinned under the status item; the native panel frames just #wrap. The
+     script places #wrap where the tray should rest (centred under the icon,
+     kept on screen) and reports its rect. */
+  body.inapp #wrap { position: absolute; top: 0; left: 0; }
   body.inapp #tray {
     background: transparent;
     -webkit-backdrop-filter: none; backdrop-filter: none;
@@ -416,6 +421,17 @@
     if (!mag.active) report();
   }
 
+  // The status item's centre and the leftmost/rightmost x the tray may take
+  // (screen edges), all in canvas px — sent by the native side (dockAnchor)
+  // on show and after every size report. Without it (browser dev mode)
+  // #wrap sits at 0.
+  let anchor = null;
+  window.dockAnchor = (a) => {
+    if (anchor && anchor.icon === a.icon && anchor.left === a.left && anchor.right === a.right) return;
+    anchor = a;
+    if (!state.resizing) report();  // re-place for the new geometry
+  };
+  function placedX(w) { return anchor ? Math.max(anchor.left, Math.min(anchor.icon - w / 2, anchor.right - w)) : 0; }
   function trayRect() {
     const t = tray.getBoundingClientRect();
     return { x: Math.round(t.left), y: Math.round(t.top), w: Math.round(t.width), h: Math.round(t.height) };
@@ -430,18 +446,24 @@
     // (While the separator is being dragged #wrap is pinned to the LARGEST
     // size the drag can reach, once, so the panel stays put: see onSepDown.)
     if (!state.resizing) {
+      wrap.style.left = "";  // measure at 0: near the canvas's right edge an absolute box shrinks to fit
       wrap.style.width = "";
       wrap.style.width = Math.ceil(wrap.getBoundingClientRect().width) + "px";
     }
-    const r = wrap.getBoundingClientRect();
+    let r = wrap.getBoundingClientRect();
     let w = Math.ceil(r.width), h = Math.ceil(r.height);
+    // Place #wrap in the canvas where the tray rests: centred under the
+    // icon, clamped to the screen (the native side sent both, in canvas px).
+    if (INAPP) { wrap.style.left = Math.round(placedX(w)) + "px"; r = wrap.getBoundingClientRect(); }
+    const x = Math.round(r.left);
     if (menu.classList.contains("on")) {
       const m = menu.getBoundingClientRect();
-      w = Math.max(w, Math.ceil(m.right + 6)); h = Math.max(h, Math.ceil(m.bottom + 6));
+      w = Math.max(w, Math.ceil(m.right - x + 6)); h = Math.max(h, Math.ceil(m.bottom + 6));
     }
-    // The tray rect (page coordinates, top-left origin) is where the native
-    // glass goes; everything outside it stays fully transparent.
-    window.webkit?.messageHandlers?.dock?.postMessage({ type: "size", width: w, height: h, tray: trayRect() });
+    // The region of the canvas the panel shows, and the tray rect (canvas
+    // coordinates, top-left origin) where the native glass goes; everything
+    // outside the tray stays fully transparent.
+    window.webkit?.messageHandlers?.dock?.postMessage({ type: "size", x, width: w, height: h, tray: trayRect() });
   }
 
   // ---------- open ----------
@@ -740,14 +762,14 @@
   // persists (the Dock's `defaults write com.apple.dock tilesize`); the
   // tray shrinks to fit the screen rather than run off it.
   const TILE_MIN = 16, TILE_MAX = 128, TILE_SNAPS = [16, 32, 64, 128];
-  const PANEL_MAX_W = 1400;  // menubar_dock.MAX_SIZE: the native panel clips beyond it
+  const PANEL_MAX_W = 1400;  // menubar_dock.CANVAS width: nothing renders beyond it
   function maxTileForScreen() {
     // Rest width at tile t: 2·PAD_X + n·t + (n−1)·GAP + SEP_W + hint, plus
     // the wave slack (1.1·t each side) and the 4px margins _place keeps.
     const n = items().length;
     let fixed = 2 * PAD_X + Math.max(0, n - 1) * GAP + SEP_W + 8;
     if (hint.isConnected) fixed += hint.getBoundingClientRect().width + GAP;
-    const avail = Math.min(screen.availWidth || Infinity, PANEL_MAX_W);
+    const avail = anchor ? anchor.right - anchor.left : Math.min(screen.availWidth || Infinity, PANEL_MAX_W);
     return Math.max(TILE_MIN, Math.min(TILE_MAX, Math.floor((avail - fixed) / (n + 2.2))));
   }
   // Smoothness: the native panel is resized and re-centred ONCE, at drag
@@ -755,12 +777,27 @@
   // changes (the glass follows per frame, as in the fisheye). Resizing the
   // panel on every pointer event moved the whole page under the tiles.
   // Pointer events are coalesced to one layout per animation frame, and the
-  // centred tray is snapped to a whole pixel (its width changes parity with
-  // every 1px step, which otherwise puts the icons on half pixels: shimmer).
+  // tray is snapped to a whole pixel (its width changes parity with every
+  // 1px step, which otherwise puts the icons on half pixels: shimmer).
+  //
+  // Where the tray sits inside that big #wrap: exactly where it will REST
+  // for the current tile size — #wrap is placed by the same centre-and-
+  // clamp as at rest (placedX), just for its pinned width, so on a narrow
+  // screen it is shoved left and spans most of the canvas while the tray
+  // must not move. Without an anchor (browser dev mode) the tray is centred.
   function snapTray() {
-    const inner = wrap.clientWidth - 2 * parseFloat(getComputedStyle(wrap).paddingLeft);
-    const pos = (inner - restLayout().right) / 2;
-    tray.style.left = (Math.floor(pos) - pos) + "px";
+    const slack = parseFloat(getComputedStyle(wrap).paddingLeft);
+    const inner = wrap.clientWidth - 2 * slack;
+    const trayW = restLayout().right;
+    const natural = (inner - trayW) / 2;  // centred: where the tray sits with left = 0
+    let want = natural;
+    if (anchor) {
+      const restW = Math.ceil(trayW + 2 * slack);  // #wrap at rest = tray + slack both sides
+      const trayRestX = placedX(restW) + (restW - trayW) / 2;  // canvas x of the tray at rest
+      const wrapX = parseFloat(wrap.style.left) || 0;
+      want = Math.max(0, Math.min(trayRestX - wrapX - slack, inner - trayW));
+    }
+    tray.style.left = (Math.floor(want) - natural) + "px";
   }
   function onSepDown(e) {
     if (e.button !== 0 || state.dragging) return;
@@ -775,11 +812,14 @@
     // Pin #wrap to the size of the largest reachable tray, then size the
     // panel to it once. The tray stays centred inside as it grows.
     setTile(start.max);
-    wrap.style.width = ""; wrap.style.height = "";
+    wrap.style.left = ""; wrap.style.width = ""; wrap.style.height = "";  // measure at 0 (see report)
     const big = wrap.getBoundingClientRect();
     wrap.style.width = Math.ceil(big.width) + "px"; wrap.style.height = Math.ceil(big.height) + "px";
-    setTile(start.tile); snapTray();
-    report();
+    setTile(start.tile);
+    // Place the big #wrap where report() will, snap the tray to its rest
+    // spot inside it, then report once: region and glass in one message.
+    wrap.style.left = Math.round(placedX(Math.ceil(big.width))) + "px";
+    snapTray(); report();
     const frame = () => {
       start.raf = 0;
       if (start.want !== TILE) { setTile(start.want); snapTray(); reportTray(); }
