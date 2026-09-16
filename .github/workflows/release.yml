@@ -77,7 +77,7 @@ jobs:
       NOTARY_PROFILE: ci-notary
       AWS_DEFAULT_REGION: us-west-2
       # Same bucket + CloudFront distribution as fused-render, but the role
-      # (github_render_app_role, fusedlabs/application#8016) can only write
+      # (github_render_app_role) can only write
       # under S3_PREFIX — never the main app's dmgs, latest.json or download
       # page. Flip CDN_DOMAIN to render.fused.io together with fused-render;
       # the cask's `verified:` host follows it.
