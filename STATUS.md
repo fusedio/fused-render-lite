@@ -61,6 +61,23 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.13
+
+Menu-bar dock fixes (PRs #22, #23). The appear/dismiss slide is driven by
+our own run-loop timer instead of `animator()` + `NSAnimationContext`, whose
+completion semantics differ across macOS versions and made the panel jump
+on macOS 15 (expo-out appear, cubic-in dismiss, explicit cancel, mid-slide
+retarget and reversal; also removes the first-open snap). The web view is
+never resized: a fixed 1400x420 canvas pinned in screen space, the panel a
+viewport onto it, so a separator drag no longer flashes the tray or lands it
+at screen centre on narrow displays (the page replays the native
+centre-and-clamp from `dockAnchor`; web view offset and glass are set before
+the panel frame so it all commits in one transaction). The tile hover bubble
+shows the app's preview.png above its name when the app ships one
+(`appfile.preview_bytes`, `/api/dock/preview` with immutable caching,
+presence memoised in `dock_store` so the poll stays cheap; MAX_SIZE height
+420 -> 520). No packaging change.
+
 ## 0.8.12
 
 Native macOS notifications for background work (PR #21). Render App posts
