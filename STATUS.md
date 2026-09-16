@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.12 | 42.52 MB (42,517,525 B) | −0.02 MB | 98 MB | native macOS notifications for model downloads, env installs and AI jobs (PR #21); no packaging change |
 | 0.8.11 | 42.54 MB (42,538,988 B) | −0.01 MB | 98 MB | browser parity in windows: pointer lock, geolocation, notifications, popups (PR #20); no packaging change |
 | 0.8.10 | 42.55 MB (42,550,462 B) | −0.00 MB | 98 MB | icon.png dock fallback; CDN upload landed (PR #18) then reverted (PR #19) pending AWS OIDC role fix, bump-homebrew disabled; no packaging change |
 | 0.8.9 | 42.55 MB (42,551,093 B) | +0.00 MB | 98 MB | dock icons follow system theme, dock appear/dismiss animation, dev iframe releases link removed; no packaging change |
