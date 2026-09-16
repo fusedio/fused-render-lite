@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.11 | 42.54 MB (42,538,988 B) | −0.01 MB | 98 MB | browser parity in windows: pointer lock, geolocation, notifications, popups (PR #20); no packaging change |
 | 0.8.10 | 42.55 MB (42,550,462 B) | −0.00 MB | 98 MB | icon.png dock fallback; CDN upload landed (PR #18) then reverted (PR #19) pending AWS OIDC role fix, bump-homebrew disabled; no packaging change |
 | 0.8.9 | 42.55 MB (42,551,093 B) | +0.00 MB | 98 MB | dock icons follow system theme, dock appear/dismiss animation, dev iframe releases link removed; no packaging change |
 | 0.8.8 | 42.55 MB (42,547,067 B) | +0.05 MB | 98 MB | renamed to Render App: `RenderApp.app`, `RenderApp-<version>.dmg`, package `fused_render_app`, cask `render-app`; no packaging change |
