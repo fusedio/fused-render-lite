@@ -10,8 +10,20 @@ borderless, non-opaque ``NSPanel`` under the status item, and the glass is an
 ``NSVisualEffectView`` with rounded corners sized to the tray rect the page
 reports — nothing else is drawn, so there is no popover box around the Dock
 (an ``NSPopover`` always paints its own chrome; that is why it is not one).
-The page reports its size and the tray rect through a script message and
-the panel follows.
+
+The web view is never resized. It is a fixed ``CANVAS``-sized surface
+(``MAX_SIZE``) pinned in screen space — centred under the status item, its
+top at the menu bar — and the panel is a viewport onto it: the page lays the
+tray out where it wants inside the canvas, reports the rect it occupies, and
+the panel's frame plus the web view's offset inside it are set together so
+that rect (and only it) is on screen. Resizing a WKWebView is a two-process
+affair: AppKit moves the window at once, WebKit paints the new layout a frame
+later, and in between the old content shows at the new place — the tray
+flashed sideways whenever the panel grew (drag start, first size report).
+Moving a window and offsetting a view inside it is AppKit-only and commits
+in one transaction, so nothing flashes. The panel tells the page where the
+status item and screen edges are in canvas coordinates, and the page centres
+the tray under the icon itself.
 
 Status item: rumps attached an ``NSMenu`` to it, which AppKit opens on every
 click without ever firing the button's action. The menu is taken off; left
@@ -28,11 +40,11 @@ import logging
 import math
 import os
 import subprocess
+import time
 
 import AppKit
 import objc
 from AppKit import (
-    NSAnimationContext,
     NSApp,
     NSColor,
     NSEvent,
@@ -62,7 +74,7 @@ from AppKit import (
     NSWorkspace,
     NSBackingStoreBuffered,
 )
-from Foundation import NSURL, NSURLRequest
+from Foundation import NSRunLoop, NSRunLoopCommonModes, NSTimer, NSURL, NSURLRequest
 from WebKit import (
     WKNavigationActionPolicyAllow,
     WKNavigationActionPolicyCancel,
@@ -83,6 +95,7 @@ MIN_SIZE = (120, 60)
 # Height: headroom + the tray at the 128px ⌥-snap + the footroom that holds a
 # preview bubble (dock.html --footroom, body.has-previews) ≈ 415px; slack on top.
 MAX_SIZE = (1400, 520)
+CANVAS = MAX_SIZE  # the web view's fixed size; the panel shows a region of it
 MESSAGE_NAME = "dock"
 TRAY_RADIUS = 18.0
 GAP_BELOW_MENU_BAR = 4.0
@@ -93,23 +106,31 @@ GAP_BELOW_MENU_BAR = 4.0
 # laggy. The fade is decoupled from the motion and much shorter: the tray is
 # fully visible while most of the travel still happens, so the movement
 # reads (a fade as long as the slide hides the slide). The slide curve is a
-# spring-like "expo out": fast start, long soft settle, no overshoot — window
-# frames cannot take a CASpringAnimation, this is the closest bezier.
-# Skipped when Reduce Motion is on.
+# spring-like "expo out": fast start, long soft settle, no overshoot.
+#
+# The motion is driven by our own timer (``_Slide``), not by the window's
+# ``animator()``: the animator-driven window-frame slide behaved differently
+# on macOS 15 (the panel jumped on every open and close; fine on 26) — its
+# completion and cancellation semantics are not the same across versions,
+# and the old code leaned on both. With our own driver the destination can
+# be retargeted while the panel is still moving (the page reports its real
+# size right after ``dockShown``), a re-show mid-dismiss reverses from where
+# the panel is, and cancellation is explicit. Skipped when Reduce Motion is on.
 APPEAR_OFFSET = 18.0
 APPEAR_DURATION = 0.42
 APPEAR_FADE = 0.14
 DISMISS_OFFSET = 8.0
 DISMISS_DURATION = 0.2
 DISMISS_FADE = 0.16
-EASE_SPRING = (0.16, 1.0, 0.3, 1.0)
-EASE_IN = (0.4, 0.0, 1.0, 1.0)
-EASE_LINEAR = (0.0, 0.0, 1.0, 1.0)
+FRAME_INTERVAL = 1.0 / 120.0  # timer cadence; progress is clock-based, not tick-counted
 
 
-# QuartzCore class, reached through the runtime: it is already loaded by
-# AppKit, and pyobjc-framework-Quartz is not a dependency.
-CAMediaTimingFunction = objc.lookUpClass("CAMediaTimingFunction")
+def ease_out_expo(t: float) -> float:
+    return 1.0 if t >= 1.0 else 1.0 - 2.0 ** (-10.0 * t)
+
+
+def ease_in_cubic(t: float) -> float:
+    return t * t * t
 
 
 def _reduce_motion() -> bool:
@@ -143,6 +164,99 @@ def _make_glass(w: float, h: float):
         glass.layer().setCornerCurve_("continuous")  # squircle, like the Dock
     logger.info("dock glass: NSVisualEffectView")
     return glass
+
+
+class _Slide(NSObject):
+    """Slides a window's origin and fades its alpha on a main-run-loop timer.
+
+    Progress comes from the monotonic clock, so a late tick never lags the
+    motion. ``retarget`` moves the destination while running (the panel keeps
+    going from where it is; the remaining travel bends toward the new spot).
+    ``cancel`` stops the timer without a completion; ``done`` runs once, when
+    both the slide and the fade have ended."""
+
+    def initWithWindow_(self, window):
+        self = objc.super(_Slide, self).init()
+        if self is None:
+            return None
+        self._w = window
+        self._timer = None
+        self._done = None
+        self._to = (0.0, 0.0)
+        return self
+
+    @objc.python_method
+    def start(self, to_origin, duration, ease, to_alpha, fade, done) -> None:
+        self.cancel()
+        frame = self._w.frame()
+        self._from = (float(frame.origin.x), float(frame.origin.y))
+        self._to = (float(to_origin[0]), float(to_origin[1]))
+        self._alpha0 = float(self._w.alphaValue())
+        self._alpha1 = float(to_alpha)
+        self._duration = max(float(duration), 1e-3)
+        self._fade = max(float(fade), 1e-3)
+        self._ease = ease
+        self._done = done
+        self._t0 = time.monotonic()
+        self._timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            FRAME_INTERVAL, self, b"tick:", None, True)
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self._timer, NSRunLoopCommonModes)
+        self.tick_(None)
+
+    @objc.python_method
+    def running(self) -> bool:
+        return self._timer is not None
+
+    @objc.python_method
+    def target(self):
+        return self._to
+
+    @objc.python_method
+    def retarget(self, to_origin) -> None:
+        """Move the destination of a running slide; the panel keeps going
+        from where it is. No-op when idle."""
+        if self._timer is None:
+            return
+        frame = self._w.frame()
+        p = self._progress()
+        cur = (float(frame.origin.x), float(frame.origin.y))
+        to = (float(to_origin[0]), float(to_origin[1]))
+        if p >= 0.999:
+            self._from = to
+        else:
+            # Re-base so from + p·(to − from) == cur at the current fraction:
+            # progress so far stays, only the remaining travel changes.
+            self._from = tuple((c - p * t) / (1.0 - p) for c, t in zip(cur, to))
+        self._to = to
+
+    @objc.python_method
+    def cancel(self) -> None:
+        if self._timer is not None:
+            self._timer.invalidate()
+            self._timer = None
+        self._done = None
+
+    @objc.python_method
+    def _progress(self) -> float:
+        t = (time.monotonic() - self._t0) / self._duration
+        return self._ease(min(max(t, 0.0), 1.0))
+
+    def tick_(self, _timer) -> None:
+        if self._timer is None:
+            return
+        now = time.monotonic() - self._t0
+        p = self._progress()
+        x = self._from[0] + (self._to[0] - self._from[0]) * p
+        y = self._from[1] + (self._to[1] - self._from[1]) * p
+        f = min(max(now / self._fade, 0.0), 1.0)
+        alpha = self._alpha0 + (self._alpha1 - self._alpha0) * f
+        self._w.setFrameOrigin_(NSMakePoint(x, y))
+        self._w.setAlphaValue_(alpha)
+        if now >= self._duration and now >= self._fade:
+            done = self._done
+            self.cancel()
+            if done is not None:
+                done()
 
 
 class _Target(NSObject):
@@ -213,7 +327,7 @@ class _ScriptHandler(NSObject):
         tray = data.get("tray")
         tray = dict(tray) if tray is not None else None
         if kind == "size":
-            self._c.resize_to(data.get("width"), data.get("height"), tray)
+            self._c.resize_to(data.get("width"), data.get("height"), tray, data.get("x", 0))
         elif kind == "tray":  # per-frame while the fisheye is live: glass only
             self._c.set_tray(tray)
         elif kind == "resize":  # separator drag started / ended
@@ -315,11 +429,12 @@ class DockController:
         self._loaded = False
         self._monitor = None
         self._size = INITIAL_SIZE
+        self._rx = 0.0  # the region's left edge in canvas (page) coordinates
+        self._applied = None  # (rx, w, h) the panel frame was last set for
         self._tray = None  # (x, y, w, h) in page coordinates, top-left origin
         self._resizing = False  # separator drag in progress (resize cursor held)
         self._closing = False  # dismiss animation running (panel still ordered in)
-        self._animating_in = False  # appear animation running: _place must not snap
-        self._anim_gen = 0  # bumps on every show/close; stale completions bail
+        self._animating_in = False  # appear animation running: _place retargets, never snaps
         self._build_panel()
         self._take_over_status_item()
 
@@ -353,50 +468,52 @@ class DockController:
             self._monitor = None
         if not self._panel.isVisible() or self._closing:
             return
-        self._anim_gen += 1
-        gen = self._anim_gen
+        self._slide.cancel()
         self._animating_in = False
         if _reduce_motion():
             self._panel.orderOut_(None)
             return
         self._closing = True
-        frame = self._panel.frame()
-        target = NSMakeRect(frame.origin.x, frame.origin.y + DISMISS_OFFSET,
-                            frame.size.width, frame.size.height)
+        # Dismiss toward "rest, tucked up": from wherever the panel is (it
+        # may still be dropping in).
+        rest = self._rest_frame()
+        target = (rest.origin.x, rest.origin.y + DISMISS_OFFSET)
 
         def done():
-            if gen != self._anim_gen:
-                return  # re-shown mid-fade: leave it up
             self._closing = False
             self._panel.orderOut_(None)
             self._panel.setAlphaValue_(1.0)
 
-        self._animate(target, DISMISS_DURATION, EASE_IN, 0.0, DISMISS_FADE, done)
+        self._slide.start(target, DISMISS_DURATION, ease_in_cubic, 0.0, DISMISS_FADE, done)
 
     def show_popover(self) -> None:
         if not self._loaded:
             self._load()
-        self._anim_gen += 1
-        gen = self._anim_gen
+        reversing = self._closing and bool(self._panel.isVisible())
+        self._slide.cancel()
         self._closing = False
-        self._place()
+        rest = self._rest_frame()
         if _reduce_motion():
+            self._panel.setFrame_display_(rest, False)
             self._panel.setAlphaValue_(1.0)
             self._panel.makeKeyAndOrderFront_(None)
         else:
-            rest = self._panel.frame()
-            start = NSMakeRect(rest.origin.x, rest.origin.y + APPEAR_OFFSET,
-                               rest.size.width, rest.size.height)
-            self._panel.setFrame_display_(start, False)
-            self._panel.setAlphaValue_(0.0)
+            if not reversing:
+                # Fresh appear: tucked up under the menu bar, transparent.
+                start = NSMakeRect(rest.origin.x, rest.origin.y + APPEAR_OFFSET,
+                                   rest.size.width, rest.size.height)
+                self._panel.setFrame_display_(start, False)
+                self._panel.setAlphaValue_(0.0)
+            # else: mid-dismiss — slide back from where it is, at its alpha.
             self._panel.makeKeyAndOrderFront_(None)
             self._animating_in = True
 
             def done():
-                if gen == self._anim_gen:
-                    self._animating_in = False
+                self._animating_in = False
 
-            self._animate(rest, APPEAR_DURATION, EASE_SPRING, 1.0, APPEAR_FADE, done)
+            self._slide.start((rest.origin.x, rest.origin.y), APPEAR_DURATION,
+                              ease_out_expo, 1.0, APPEAR_FADE, done)
+        self._send_anchor()
         # A click anywhere outside the panel — in another app, on the desktop,
         # on the menu bar — dismisses it, like the Dock's own menus. The
         # non-activating panel does not make us the active app, so
@@ -408,24 +525,6 @@ class DockController:
                 mask, lambda _e: self.close())
         self._webview.evaluateJavaScript_completionHandler_(
             "window.dockShown && window.dockShown();", None)
-
-    def _animate(self, frame, duration, ease, alpha, fade, completion) -> None:
-        """Slide the panel to ``frame`` over ``duration`` and fade it to
-        ``alpha`` over ``fade`` — two groups, so the fade can be short while
-        the slide is long. ``completion`` runs when the slide ends."""
-        def group(secs, curve, done, apply):
-            NSAnimationContext.beginGrouping()
-            ctx = NSAnimationContext.currentContext()
-            ctx.setDuration_(secs)
-            ctx.setTimingFunction_(CAMediaTimingFunction.functionWithControlPoints____(*curve))
-            if done is not None:
-                ctx.setCompletionHandler_(done)
-            apply()
-            NSAnimationContext.endGrouping()
-
-        group(fade, EASE_LINEAR, None, lambda: self._panel.animator().setAlphaValue_(alpha))
-        group(duration, ease, completion,
-              lambda: self._panel.animator().setFrame_display_(frame, True))
 
     def set_tray(self, tray: dict | None) -> None:
         """Move the glass to a new tray rect without touching the panel."""
@@ -459,30 +558,36 @@ class DockController:
             return
         _w, h = self._size
         tx, ty, tw, th = self._tray
-        self._glass.setFrame_(NSMakeRect(tx, h - ty - th, tw, th))
+        # Page coordinates are canvas coordinates; the panel shows the canvas
+        # from (rx, 0), so shift by rx and flip.
+        self._glass.setFrame_(NSMakeRect(tx - self._rx, h - ty - th, tw, th))
         self._glass.setHidden_(False)
 
-    def resize_to(self, width, height, tray: dict | None = None) -> None:
+    def resize_to(self, width, height, tray: dict | None = None, x=0) -> None:
+        """The page reports the canvas region it occupies: ``x`` (its left
+        edge in canvas px; top is always 0) and its size."""
         try:
             w = float(width)
             h = float(height)
+            rx = float(x or 0)
         except (TypeError, ValueError):
             return
-        if not (math.isfinite(w) and math.isfinite(h)):
+        if not (math.isfinite(w) and math.isfinite(h) and math.isfinite(rx)):
             return
         w = min(max(math.ceil(w), MIN_SIZE[0]), MAX_SIZE[0])
         h = min(max(math.ceil(h), MIN_SIZE[1]), MAX_SIZE[1])
         self._size = (w, h)
+        self._rx = float(min(max(math.floor(rx), 0), CANVAS[0] - w))
         if tray:
             try:
                 self._tray = tuple(float(tray[k]) for k in ("x", "y", "w", "h"))
             except (KeyError, TypeError, ValueError):
                 self._tray = None
         self._layout()
-        # Not while dropping in: _place would snap the panel to rest and cut
-        # the slide short (dockShown → refresh → report lands right here).
-        if self.is_shown() and not self._animating_in:
-            self._place()
+        # The page always has a fresh anchor after a report — including its
+        # first, hidden one, so the first show lands right. It re-reports only
+        # when the anchor changed, so this does not loop.
+        self._send_anchor()
         if self._resizing:  # frame changes reset the cursor: see set_resizing
             AppKit.NSCursor.resizeUpDownCursor().set()
 
@@ -652,7 +757,7 @@ class DockController:
             pass
 
         self._webview = WKWebView.alloc().initWithFrame_configuration_(
-            NSMakeRect(0, 0, w, h), config)
+            NSMakeRect(0, h - CANVAS[1], CANVAS[0], CANVAS[1]), config)
         # Transparent: only the tiles paint; the glass beneath is native.
         try:
             self._webview.setValue_forKey_(False, "drawsBackground")
@@ -668,39 +773,120 @@ class DockController:
 
         panel.setContentView_(root)
         self._panel = panel
+        self._slide = _Slide.alloc().initWithWindow_(panel)
         self._layout()
 
     def _layout(self) -> None:
-        """Panel = page size; glass = the tray rect (flipped into AppKit's
-        bottom-left coordinates); webview = whole panel."""
+        """Panel = the reported canvas region, placed so the canvas stays put
+        on screen; webview = the whole canvas, offset so the region sits at
+        the panel's top-left; glass = the tray rect (flipped into AppKit's
+        bottom-left coordinates). One frame write per region change. While
+        the panel is sliding, the slide is retargeted to the new rest spot
+        instead of snapped (the page reports right after ``dockShown``)."""
         w, h = self._size
         frame = self._panel.frame()
-        if (w, h) != (frame.size.width, frame.size.height):
-            # A direct setFrame cancels a running animator slide where it
-            # stands. Only touch the frame when the size really changed —
-            # the page reports its (unchanged) size on every show.
-            self._animating_in = False
-            self._panel.setFrame_display_(
-                NSMakeRect(frame.origin.x, frame.origin.y + frame.size.height - h, w, h), True)
-        self._panel.contentView().setFrame_(NSMakeRect(0, 0, w, h))
-        self._webview.setFrame_(NSMakeRect(0, 0, w, h))
+        key = (self._rx, w, h)
+        # Views first, window frame second, and no forced display: the web
+        # view's offset (canvas (rx, 0) → panel top-left) and the glass must
+        # be in place before the panel shows its new region, and all of it
+        # commits in the one Core Animation transaction at the end of this
+        # run-loop pass. A display:YES here would paint the new viewport over
+        # the old canvas slice — exactly the sideways flash this avoids.
+        self._webview.setFrame_(NSMakeRect(-self._rx, h - CANVAS[1], CANVAS[0], CANVAS[1]))
         self._layout_glass()
+        if not self._panel.isVisible():
+            if key != self._applied:
+                self._panel.setFrame_display_(self._rest_frame(), False)
+        elif key != self._applied:
+            rest = self._rest_frame()
+            if self._slide.running():
+                # Resize in place: keep the panel's current offset from its
+                # destination, then bend the slide to the new destination.
+                lift = 0.0 if self._animating_in else DISMISS_OFFSET
+                old_to = self._slide.target()
+                dx, dy = frame.origin.x - old_to[0], frame.origin.y - old_to[1]
+                self._panel.setFrame_display_(
+                    NSMakeRect(rest.origin.x + dx, rest.origin.y + lift + dy, w, h), False)
+                self._slide.retarget((rest.origin.x, rest.origin.y + lift))
+            else:
+                self._panel.setFrame_display_(rest, False)
+            self._send_anchor()
+        elif not self._slide.running():
+            self._place()  # same region, but the status item may have moved
+        self._applied = key
+        self._panel.contentView().setFrame_(NSMakeRect(0, 0, w, h))
 
-    def _place(self) -> None:
-        """Centered under the status item, hanging from the menu bar."""
+    def _anchor(self):
+        """Status-item centre x, menu-bar bottom y, and the screen's usable
+        x-range (screen points, 4px margins in); None before the status item
+        is in a window."""
         button = self._statusitem.button()
         bwin = button.window()
         if bwin is None:
-            return
+            return None
         brect = bwin.convertRectToScreen_(button.convertRect_toView_(button.bounds(), None))
-        w, h = self._size
-        x = brect.origin.x + brect.size.width / 2 - w / 2
-        y = brect.origin.y - GAP_BELOW_MENU_BAR - h
+        cx = brect.origin.x + brect.size.width / 2
+        top = brect.origin.y
         screen = bwin.screen()
-        if screen is not None:
-            vis = screen.visibleFrame()
-            x = max(vis.origin.x + 4, min(x, vis.origin.x + vis.size.width - w - 4))
-        self._panel.setFrameOrigin_((x, y))
+        if screen is None:
+            return cx, top, -math.inf, math.inf
+        vis = screen.visibleFrame()
+        return cx, top, vis.origin.x + 4, vis.origin.x + vis.size.width - 4
+
+    def _canvas_x(self, cx: float, left: float, right: float) -> float:
+        """Screen x of the canvas's left edge: centred under the status item,
+        then pushed onto the screen (right edge first, then left) so the
+        canvas — and with it the room the tray may grow into — covers as much
+        of the screen as it can. On a screen narrower than the canvas it
+        starts at the left edge and overhangs the right; the anchor's range
+        then spans the whole screen."""
+        ox = cx - CANVAS[0] / 2
+        if math.isfinite(right):
+            ox = min(ox, right - CANVAS[0])
+        if math.isfinite(left):
+            ox = max(ox, left)
+        return ox
+
+    def _rest_frame(self):
+        """Where the panel rests: the reported region of the canvas, the
+        canvas centred under the status item and hanging from the menu bar.
+        Keeping the tray on screen is the page's job (see ``_send_anchor``)."""
+        w, h = self._size
+        a = self._anchor()
+        if a is None:
+            f = self._panel.frame()
+            return NSMakeRect(f.origin.x, f.origin.y + f.size.height - h, w, h)
+        cx, top, left, right = a
+        x = self._canvas_x(cx, left, right) + self._rx
+        y = top - GAP_BELOW_MENU_BAR - h
+        return NSMakeRect(x, y, w, h)
+
+    def _place(self) -> None:
+        """Centered under the status item, hanging from the menu bar."""
+        rest = self._rest_frame()
+        if self._slide.running() and self._animating_in:
+            self._slide.retarget((rest.origin.x, rest.origin.y))
+        else:
+            self._panel.setFrameOrigin_((rest.origin.x, rest.origin.y))
+        self._send_anchor()
+
+    def _send_anchor(self) -> None:
+        """Tell the page, in canvas (page) coordinates, where the status
+        item's centre is and the leftmost/rightmost x the tray may occupy
+        (screen edges, 4px in, clipped to the canvas). The page centres the
+        tray under the icon and clamps it to that range; the panel just
+        frames whatever region the page reports. Screen points are CSS px.
+        The page re-reports when the anchor changes, so this is idempotent."""
+        a = self._anchor()
+        if a is None:
+            return
+        cx, _top, left, right = a
+        ox = self._canvas_x(cx, left, right)
+        left = max(0.0, left - ox) if math.isfinite(left) else 0.0
+        right = min(float(CANVAS[0]), right - ox) if math.isfinite(right) else float(CANVAS[0])
+        self._webview.evaluateJavaScript_completionHandler_(
+            "window.dockAnchor && window.dockAnchor({icon:%r,left:%r,right:%r});"
+            % (float(cx - ox), float(left), float(right)), None)
 
     def _url(self) -> str:
         return f"http://127.0.0.1:{self._port}/dock"
