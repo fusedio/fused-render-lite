@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.10 | 42.55 MB (42,550,462 B) | −0.00 MB | 98 MB | icon.png dock fallback; CDN upload landed (PR #18) then reverted (PR #19) pending AWS OIDC role fix, bump-homebrew disabled; no packaging change |
 | 0.8.9 | 42.55 MB (42,551,093 B) | +0.00 MB | 98 MB | dock icons follow system theme, dock appear/dismiss animation, dev iframe releases link removed; no packaging change |
 | 0.8.8 | 42.55 MB (42,547,067 B) | +0.05 MB | 98 MB | renamed to Render App: `RenderApp.app`, `RenderApp-<version>.dmg`, package `fused_render_app`, cask `render-app`; no packaging change |
 | 0.8.7 | 42.50 MB (42,496,603 B) | −0.00 MB | 98 MB | dock tray resize via separator drag (tilesize persisted), web view destroyed on window close; no packaging change |
@@ -60,13 +61,14 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ## 0.8.10
 
-Release DMG is now also uploaded to S3 (`fused-render` bucket,
-`render-app-dmgs/` prefix) and served from the same CloudFront distribution
-as fused-render at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/`
-(PR #18; IAM role `github_render_app_role`, fusedlabs/application#8016). The
-Homebrew cask `render-app` downloads from the CDN instead of GitHub Release
-assets (homebrew-tap #7). Dock accepts `icon.png` as a lower-priority
-fallback to `icon.svg` (PR #17). No packaging change.
+Dock accepts `icon.png` as a lower-priority fallback to `icon.svg` (PR #17).
+The release pipeline briefly uploaded the DMG to S3/CloudFront
+(`render-app-dmgs/`, PR #18) but the `github_render_app_role` OIDC assume
+failed (`Not authorized to perform sts:AssumeRoleWithWebIdentity`), so it was
+reverted (PR #19): DMG + wheel go to the GitHub Release only and the
+`bump-homebrew` job is disabled. The tap cask (homebrew-tap #7) still points
+at the CDN url and is broken until the CDN upload is re-landed. Tag was
+force-moved to the revert commit. No packaging change.
 
 ## 0.8.9
 
