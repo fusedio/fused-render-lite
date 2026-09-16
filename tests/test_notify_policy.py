@@ -62,9 +62,23 @@ def test_redownload_after_prior_done_is_start():
     assert b is not None and b.sound is False
 
 
-@pytest.mark.parametrize("prev_state", ["running", "waiting"])
-def test_start_not_repeated_from_non_terminal(prev_state):
-    assert np.decide(rec(MODEL, prev_state), rec(MODEL)) is None
+def test_start_not_repeated_while_running():
+    assert np.decide(rec(MODEL, "running"), rec(MODEL)) is None
+
+
+def test_resume_after_waiting_replaces_the_waiting_banner_silently():
+    # Bugbot on PR #21: the "approve compiling numpy" banner must not keep
+    # asking for the rest of a multi-minute build once the user answered.
+    b = np.decide(rec(INSTALL, "waiting", message="approve numpy"),
+                  rec(INSTALL, "running", detail="Installing numpy…"))
+    assert b is not None and b.sound is False
+    assert b.body == "Installing numpy…"
+    assert b.identifier == np.decide(rec(INSTALL), rec(INSTALL, "waiting", message="m")).identifier
+
+
+def test_resume_after_waiting_ignores_the_start_tier_gate():
+    # A silent-tier row that had to wait still needs its waiting banner taken down.
+    assert np.decide(rec("sys:ai-text:1", "waiting"), rec("sys:ai-text:1", tier="silent")) is not None
 
 
 @pytest.mark.parametrize("jid", ["sys:ai-image:1", "sys:ai-text:1", "sys:ai-claude:1"])
@@ -124,9 +138,29 @@ def test_cancelled_body():
     assert np.decide(rec(MODEL), rec(MODEL, "cancelled", message="x")).body == "Cancelled"
 
 
-def test_env_install_error_multiline_message_first_line():
-    b = np.decide(rec(INSTALL), rec(INSTALL, "error", message="\n\n  pip   failed \nTraceback:\n  x"))
-    assert b.body == "pip failed"
+def test_error_message_prefers_the_exception_line():
+    tail = ("  8, in _inner_fn\n    raise x\n\n"
+            "RepositoryNotFoundError: 404 Client Error. (Request ID: abc)\n\n"
+            "Repository Not Found for url: https://x\n"
+            "For more details, see https://huggingface.co/docs")
+    b = np.decide(rec(MODEL), rec(MODEL, "error", message=tail))
+    assert b.body == "RepositoryNotFoundError: 404 Client Error. (Request ID: abc)"
+
+
+def test_error_message_uv_style_error_line():
+    msg = "Resolved 3 packages\n  × Failed to build numpy\nerror: no matching wheel for cp312"
+    assert np.decide(rec(INSTALL), rec(INSTALL, "error", message=msg)).body == \
+        "error: no matching wheel for cp312"
+
+
+def test_error_message_without_marker_uses_last_line():
+    b = np.decide(rec(INSTALL), rec(INSTALL, "error", message="\n\n  pip   failed \nsecond   line\n\n"))
+    assert b.body == "second line"
+
+
+def test_error_message_single_line_unchanged():
+    assert np.decide(rec(INSTALL), rec(INSTALL, "error", message="the install was cancelled")).body \
+        == "the install was cancelled"
 
 
 def test_error_body_falls_back_to_detail():

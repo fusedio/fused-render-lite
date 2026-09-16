@@ -79,8 +79,9 @@ def test_install_silent_load_posts_nothing_on_success(monkeypatch):
     jobs.upsert({"id": job, "state": "done", "detail": "Model loaded"}, server=True)
     assert posted == []
     jobs.upsert({"id": job, "state": "running", "tier": "silent"}, server=True)
-    jobs.upsert({"id": job, "state": "error", "message": "boom\nmore"}, server=True)
-    assert len(posted) == 1 and posted[0][2] == "boom"
+    jobs.upsert({"id": job, "state": "error",
+                 "message": "Traceback:\n  x\nValueError: boom\nsee docs"}, server=True)
+    assert len(posted) == 1 and posted[0][2] == "ValueError: boom"
 
 
 class _Win:

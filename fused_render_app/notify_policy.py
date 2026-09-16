@@ -38,9 +38,16 @@ handler to find which row a banner belonged to.
 families that regularly do (a weights download, an environment install).
 A chime there would train the user to ignore chimes; only a banner that
 needs them (a question waiting for an answer, a terminal outcome) sounds.
+The same silent treatment applies when a row that was WAITING runs again:
+the question was answered, so its banner is replaced, not left asking.
+
+**An error banner shows the line that names the failure.** Producers store
+what they have — a worker's stderr tail, uv's whole output — and the first
+line of that is rarely the sentence a user needs (see `_error_line`).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 #: UN identifier = IDENTIFIER_PREFIX + job id. Distinct from `webnotify`'s
@@ -133,6 +140,30 @@ def _first_line(text: object) -> str:
     return ""
 
 
+#: A line that names the failure: a Python exception (`RepositoryNotFoundError:
+#: 404 …`, `fused_render_app.x.Error: …`) or uv/pip's own `error: …`.
+_ERROR_LINE = re.compile(r"^(?:[\w.]*(?:Error|Exception)\b.*:|error:)", re.IGNORECASE)
+
+
+def _error_line(text: object) -> str:
+    """The one line of an error `message` worth 150 characters of banner.
+
+    Producers store what they have: a worker's stderr TAIL (so the first
+    line is the middle of a traceback — `8, in _inner_fn` was the first
+    banner this shipped), uv's whole stderr, or one clean sentence. Tried
+    in order: the first line that names an exception or reads `error: …`;
+    else the LAST non-empty line, where a traceback and uv both end with
+    the sentence that matters; "" when there is nothing."""
+    if not isinstance(text, str):
+        return ""
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    for line in lines:
+        if _ERROR_LINE.match(line):
+            return line
+    return lines[-1] if lines else ""
+
+
 def _cap(text: str, limit: int) -> str:
     """Cap to `limit` characters INCLUDING the ellipsis, so the result is
     never longer than the limit UN is given."""
@@ -164,13 +195,22 @@ def decide(prev: dict | None, after: dict) -> Banner | None:
     message = _first_line(after.get("message"))
 
     if state == "running":
-        # START. The tier gate is what separates a weights download (trail)
-        # from a resident load (silent) on the SAME `sys:ai-model:` id.
-        if family not in START_FAMILIES or tier == "silent":
-            return None
-        if prev is not None and not prev_terminal:
-            return None  # waiting→running, running→running: already announced
-        body, sound = detail or "Starting…", False
+        if prev_state == "waiting":
+            # RESUMED. The waiting banner carried a call to action ("approve
+            # compiling numpy"); the user answered, and the build it unblocked
+            # can run for minutes. Left alone, that banner keeps asking. A
+            # silent replacement under the same identifier takes it down
+            # without a new chime for what is, to the user, old news.
+            body, sound = detail or "Continuing…", False
+        else:
+            # START. The tier gate is what separates a weights download
+            # (trail) from a resident load (silent) on the SAME
+            # `sys:ai-model:` id.
+            if family not in START_FAMILIES or tier == "silent":
+                return None
+            if prev is not None and not prev_terminal:
+                return None  # running→running: already announced
+            body, sound = detail or "Starting…", False
     elif state == "waiting":
         if prev_state == "waiting":
             return None
@@ -179,7 +219,7 @@ def decide(prev: dict | None, after: dict) -> Banner | None:
         if prev_terminal:
             return None  # done→error on a reused id is bookkeeping, not an event
         if state == "error":
-            body = message or detail or "Failed"
+            body = _error_line(after.get("message")) or detail or "Failed"
         elif state == "cancelled":
             body = "Cancelled"
         else:
