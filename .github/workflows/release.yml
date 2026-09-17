@@ -250,6 +250,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$RELEASE_TAG" "$DMG_PATH" dist/*.whl --clobber
 
+      - name: Link the CDN copy from the Release notes
+        # Release assets can only be bytes GitHub hosts (no redirects), so the
+        # fast CloudFront download is offered as the first line of the notes
+        # instead; the attached DMG stays as a fallback. Runs after both the
+        # S3 upload and the asset upload so the notes never point at a DMG
+        # that isn't there. Idempotent: a rebuild of an existing tag
+        # (workflow_dispatch --ref <tag>) doesn't add a second line.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DMG_URL: ${{ steps.artifacts.outputs.dmg_url }}
+        run: |
+          set -euo pipefail
+          BODY="$(gh release view "$RELEASE_TAG" --json body -q .body)"
+          if grep -qF "$DMG_URL" <<<"$BODY"; then
+            echo "Release notes already link $DMG_URL — nothing to do."
+            exit 0
+          fi
+          DMG_NAME="$(basename "$DMG_PATH")"
+          {
+            printf '**Download (CDN, fastest):** [%s](%s)\n\n' "$DMG_NAME" "$DMG_URL"
+            printf 'Same signed and notarized DMG as the asset below, served from CloudFront. Or `brew install --cask fusedio/tap/render-app`.\n\n---\n\n'
+            printf '%s\n' "$BODY"
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+
   bump-homebrew:
     # Separate job so a tap-push failure can't fail the DMG job after the
     # Release already published.
