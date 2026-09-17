@@ -252,6 +252,39 @@ def test_install_runs_the_dmg_path_and_reports_errors(manager, monkeypatch):
     assert manager.status()["state"] == "available"
 
 
+def test_swap_survives_a_detach_failure(manager, monkeypatch, tmp_path):
+    """Cleanup after the swap is best-effort: a hung `hdiutil detach` must not
+    report a finished install as an error (bugbot, PR #26)."""
+    import shutil
+    import subprocess
+
+    _point(monkeypatch, _manifest(version="0.8.14"))
+    manager.check(force=True)
+    mount = tmp_path / "mount"
+    source = _bundle(mount, version="0.8.14")
+    dmg = tmp_path / "dl.dmg"
+    dmg.write_bytes(b"x")
+    monkeypatch.setattr(common, "download_verified", lambda *a, **k: str(dmg))
+    monkeypatch.setattr(manager, "_check_disk_space", lambda updates: None)
+    monkeypatch.setattr(manager, "_attach", lambda d: str(mount))
+    ran = []
+
+    def fake_run(argv, **kw):
+        ran.append(argv[1])
+        if argv[1] == "detach":
+            raise subprocess.TimeoutExpired(argv, 60)
+        assert argv[0] == "/usr/bin/ditto"
+        shutil.copytree(argv[1], argv[2])
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(mac_update.subprocess, "run", fake_run)
+
+    manager.install(expected_version="0.8.14")
+    manager._install_thread.join(5)
+    assert manager.status()["state"] == "installed"
+    assert manager._disk_version() == "0.8.14"
+    assert "detach" in ran and not dmg.exists()
+
+
 def test_verify_app_checks_version_and_bundle_id(manager, tmp_path):
     manager._verify_app(_bundle(tmp_path / "ok", version="0.8.14"), "0.8.14")
     with pytest.raises(RuntimeError, match="contains version 0.8.13"):

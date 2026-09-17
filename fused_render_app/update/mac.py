@@ -450,9 +450,15 @@ class UpdateManager:
                 os.rename(old, bundle)  # roll back — never leave no app at all
                 raise
         finally:
+            # Cleanup is best-effort and must not turn a finished swap into
+            # an "error": a detach that hangs (TimeoutExpired) or fails is a
+            # stale mount to tidy later, not a failed update (bugbot, PR #26).
             if mount is not None:
-                subprocess.run(["/usr/bin/hdiutil", "detach", mount, "-quiet"],
-                               check=False, capture_output=True, timeout=60)
+                try:
+                    subprocess.run(["/usr/bin/hdiutil", "detach", mount, "-quiet"],
+                                   check=False, capture_output=True, timeout=60)
+                except (OSError, subprocess.SubprocessError):
+                    logger.warning("could not detach update image %s", mount, exc_info=True)
             common.discard(dmg)
             if os.path.exists(swap_in):
                 shutil.rmtree(swap_in, ignore_errors=True)

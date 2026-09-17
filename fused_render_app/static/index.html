@@ -455,6 +455,9 @@
         upd.fill.style.width = Math.min(100, (100 * s.progress) / s.progress_total) + "%";
         upd.sub.textContent = fmtMB(s.progress) + " of " + fmtMB(s.progress_total);
       } else {
+        // Clear the inline width from the download phase, or it overrides
+        // the indeterminate animation's own 30% and the bar sits stuck.
+        upd.fill.style.width = "";
         upd.bar.classList.add("indeterminate");
         if (dl && s.progress != null) upd.sub.textContent = fmtMB(s.progress);
       }
