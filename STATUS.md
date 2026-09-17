@@ -65,6 +65,16 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.9.0
+
+Minor bump: first showcase entry, no packaging change.
+
+Add OpenMail as the first showcase item (`fused_render_app/showcase/00_OpenMail.fused`,
+listed in `showcase.json`): a local-first multi-account Gmail client with
+thread list, reading pane, compose, labels, Gmail search, catch-up briefings,
+thread summaries and an approval-gated triage board. The bundled `.fused`
+adds ~166 KB to the wheel and DMG.
+
 ## 0.8.16
 
 One appfile change, no packaging change.
