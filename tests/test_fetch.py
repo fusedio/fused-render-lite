@@ -171,10 +171,10 @@ def test_open_page_accepts_url(client):
     assert status == 200
     text = body.decode()
     assert '"https://example.com/a.fused"' in text and "/api/fetch" in text
-    # A URL open is gated behind a click (any page can point the browser
-    # here) and, once downloaded, opens by a real navigation to /open?_file=
-    # so the native window learns which .fused it shows.
-    assert 'go.id = "confirm"' in text and "confirmDownload()" in text
+    # A URL open downloads at once (no confirmation step) and, once
+    # downloaded, opens by a real navigation to /open?_file= so the native
+    # window learns which .fused it shows.
+    assert "confirmDownload" not in text and "return download();" in text
     assert 'location.replace("/open?_file="' in text and "replaceState" not in text
     # A query value must not be able to close the inline <script> block.
     evil = "https://x/</script><script>alert(1)</script>"
