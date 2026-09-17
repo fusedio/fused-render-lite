@@ -176,6 +176,15 @@ brew install --cask fusedio/tap/render-app
 Installs `RenderApp.app` (macOS 12+), signed + notarized. `brew update &&
 brew upgrade --cask render-app` upgrades.
 
+The app also updates itself: it checks a signed manifest on the CDN every
+five minutes and, when a newer version is out, the launcher page (Home) shows
+a banner with an **Update** button — download, verify, swap the bundle in
+place, then **Restart Render App**. Only the launcher shows it; an open
+`.fused` app's window is never interrupted. Nothing runs `brew`.
+`FUSED_RENDER_APP_NO_AUTO_UPDATE=1` disables the background check;
+`FUSED_RENDER_APP_UPDATE_DEV_MANAGER=1` lets a source run show the banner
+(check-only, no bundle to swap).
+
 ## Build the macOS app
 
 ```
@@ -192,7 +201,7 @@ keychain profile) additionally notarizes and staples.
 ### Release pipeline (GitHub Actions)
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
-macOS release job step for step (no update manifest or Windows/Linux builds):
+macOS release job step for step (no Windows/Linux builds):
 `prepare-release` creates the GitHub Release, then on `macos-26` an ephemeral
 keychain gets the Developer ID cert and an App Store Connect API key,
 `build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified, the
@@ -200,6 +209,9 @@ DMG is uploaded to the `fused-render` S3 bucket under `render-app-dmgs/` (served
 by the same CloudFront distribution as fused-render, at
 `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg`; the
 CI assumes `github_render_app_role` via OIDC, which can only write that prefix),
+the signed update manifest `render-app-dmgs/latest.json` is published next to
+it (`scripts/generate_update_manifest.py`, key in the
+`FUSED_RENDER_UPDATE_SIGNING_KEY` secret — skipped with a warning when unset),
 and the DMG + wheel land on the Release. `bump-homebrew` then rewrites
 `Casks/render-app.rb` of [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap)
 to point at the CDN copy and pushes, so `brew upgrade --cask render-app` picks

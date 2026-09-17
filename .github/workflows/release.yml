@@ -199,9 +199,36 @@ jobs:
           echo "dmg_url=https://${CDN_DOMAIN}/${S3_PREFIX}/$(basename "$DMG_PATH")" >> "$GITHUB_OUTPUT"
           echo "cdn_host=${CDN_DOMAIN}" >> "$GITHUB_OUTPUT"
 
+      - name: Publish signed update manifest
+        # The in-app updater (fused_render_app/update/mac.py) polls this fixed
+        # name and shows the launcher page's update banner when it names a
+        # newer version. Same scheme as fused-render's macOS manifest, signed
+        # with the same FUSED_RENDER_UPDATE_SIGNING_KEY secret (copy it from
+        # that repo) under Render App's own signing context. It lives under
+        # S3_PREFIX because that is the only prefix the role can write. Runs
+        # strictly after the DMG upload above, since it points at that DMG.
+        # Skipped with a warning while the secret is missing, so a release is
+        # never blocked on it — the app then simply keeps saying "up to date".
+        env:
+          FUSED_RENDER_UPDATE_SIGNING_KEY: ${{ secrets.FUSED_RENDER_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FUSED_RENDER_UPDATE_SIGNING_KEY:-}" ]; then
+            echo "::warning::FUSED_RENDER_UPDATE_SIGNING_KEY is not set — no update manifest published; in-app updates will not see this release"
+            exit 0
+          fi
+          VERSION="$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')"
+          python3 scripts/generate_update_manifest.py \
+            "$VERSION" "$DMG_PATH" "https://${CDN_DOMAIN}/${S3_PREFIX}" dist/latest.json
+          # no-cache: the updater polls this fixed name; a stale CDN copy
+          # would mask a release. The invalidation below covers it too.
+          aws s3 cp dist/latest.json "s3://${S3_BUCKET}/${S3_PREFIX}/latest.json" \
+            --cache-control no-cache
+
       - name: Invalidate CloudFront
         # Filenames are versioned, so this only matters when an existing tag
-        # is rebuilt (workflow_dispatch --ref <tag>) and the object replaced.
+        # is rebuilt (workflow_dispatch --ref <tag>) and the object replaced —
+        # and for latest.json, which is not versioned.
         run: |
           set -euo pipefail
           aws cloudfront create-invalidation \
