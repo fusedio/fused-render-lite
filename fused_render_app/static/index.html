@@ -158,10 +158,10 @@
 <div class="zone" id="zone">
   <div class="drop-copy">
     <h1>Drop a <code>.fused</code> app here</h1>
-    <p>or double-click one in Finder, or paste its path.</p>
+    <p>or double-click one in Finder, or paste its path or a public URL.</p>
     <div class="or">or</div>
     <form id="form">
-      <input type="text" id="path" placeholder="/absolute/path/to/app.fused" autocomplete="off" spellcheck="false" />
+      <input type="text" id="path" placeholder="/absolute/path/to/app.fused or https://…/app.fused" autocomplete="off" spellcheck="false" />
       <button type="submit">Open</button>
       <label class="pick">Choose file…<input type="file" id="file" accept=".fused" /></label>
     </form>
@@ -202,6 +202,25 @@
     location.href = "/open?_file=" + encodeURIComponent(file);
   }
 
+  // Typed here, the URL is the user's own click: download it now (into the
+  // managed downloads/ dir) and open the saved file like any other. A link
+  // that lands on /open?_url= instead gets a confirmation step first.
+  async function openUrl(url) {
+    say("Downloading " + url + "…");
+    try {
+      const res = await fetch("/api/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Fused": "1" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) return say(data.error || ("HTTP " + res.status), true);
+      openPath(data.file);
+    } catch (e) {
+      say("Download failed: " + e, true);
+    }
+  }
+
   async function upload(file) {
     if (!file) return;
     if (!/\.fused$/i.test(file.name)) return say("Only .fused files can be opened here.", true);
@@ -225,7 +244,8 @@
     e.preventDefault();
     const p = document.getElementById("path").value.trim();
     if (!p) return;
-    if (!p.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(p)) return say("Enter an absolute path.", true);
+    if (/^https?:\/\//i.test(p)) return openUrl(p);
+    if (!p.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(p)) return say("Enter an absolute path or an http(s) URL.", true);
     openPath(p);
   });
   document.getElementById("file").addEventListener("change", (e) => upload(e.target.files[0]));

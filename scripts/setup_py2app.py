@@ -117,6 +117,16 @@ OPTIONS = {
                 "LSItemContentTypes": ["io.fused.render.app"],
             }
         ],
+        # "Open in Render App" web links: render-app://open?url=<http(s) link
+        # to a .fused>. Delivered to application:openURLs: (macapp.py), which
+        # hands the http(s) target to the open page; fetch.py downloads it.
+        "CFBundleURLTypes": [
+            {
+                "CFBundleURLName": "Render App link",
+                "CFBundleURLSchemes": ["render-app"],
+                "CFBundleTypeRole": "Viewer",
+            }
+        ],
         # The .fused UTI, exported here so the Owner rank binds reliably.
         # Same identifier as full fused-render: they describe one format.
         "UTExportedTypeDeclarations": [

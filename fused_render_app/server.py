@@ -3,12 +3,14 @@
 Pages
   GET  /                    placeholder: drop a .fused here / open one
   GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
+  GET  /open?_url=<http(s)> asks to confirm, downloads (POST /api/fetch), then navigates to _file
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
 
 API (the six supported fused.* calls, plus what the shell needs)
-  POST /api/open            {file}            -> {dir, entry, name, view}
+  POST /api/open            {file}            -> {dir, entry, name, app_id, view}
   GET  /api/open/status?file=<abs>            -> {status, lines, error}
   POST /api/drop            raw bytes + X-Filename -> {file}
+  POST /api/fetch           {url}             -> {file}   (fetch.py; downloads/<app_id>.fused)
   POST /api/run             {py, html, params} -> runPython envelope
   GET  /api/fs/raw?path=&base=                 bytes (Range honoured)
   GET  /api/fs/stat?path=                      {path,name,is_dir,size,mtime,writable}
@@ -61,7 +63,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, icon_color, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, icon_color, showcase, jobs, paths
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
 
@@ -87,6 +89,13 @@ native_hooks: dict = {}
 mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("application/geo+json", ".geojson")
+
+
+def _js(value: str) -> str:
+    """A JS string literal safe inside an inline <script>: json.dumps leaves
+    ``<``/``>`` alone, so a query value carrying ``</script>`` would end the
+    block. Escape them."""
+    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 def app_dir_for(path: str) -> str | None:
@@ -211,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/open":
                 return self._api_open()
+            if route == "/api/fetch":
+                return self._api_fetch()
             if route == "/api/drop":
                 return self._api_drop()
             if route == "/api/run":
@@ -262,11 +273,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _open_page(self, q: dict) -> None:
         file = q.get("_file") or q.get("file") or ""
-        if not file:
+        url = q.get("_url") or q.get("url") or ""
+        if not file and not url:
             return self._static("index.html")
         with open(os.path.join(STATIC_DIR, "open.html"), "r", encoding="utf-8") as f:
             page = f.read()
-        self._html(page.replace("__FILE_JSON__", json.dumps(file)))
+        # A URL open renders a confirm step; the transfer happens only on the
+        # user's click (POST /api/fetch), never from this GET — any web page
+        # can point the browser here, and opening a .fused runs its Python.
+        page = page.replace("__FILE_JSON__", _js(file)).replace("__URL_JSON__", _js(url))
+        self._html(page)
 
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
@@ -319,6 +335,20 @@ class Handler(BaseHTTPRequestHandler):
         except appfile.AppFileError as exc:
             return self._error(str(exc))
         self._json(env.status(result["dir"]))
+
+    def _api_fetch(self) -> None:
+        if not self._guarded():
+            return
+        body = self._json_body()
+        url = str((body or {}).get("url") or "").strip()
+        if not fetch.is_url(url):
+            return self._error("url must be an http:// or https:// link to a .fused file")
+        try:
+            file = fetch.download_app_file(url)
+        except fetch.FetchError as exc:
+            return self._error(str(exc))
+        logger.info("fetched %s -> %s", url, file)
+        self._json({"file": file})
 
     def _api_drop(self) -> None:
         if not self._guarded():

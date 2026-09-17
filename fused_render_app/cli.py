@@ -1,4 +1,4 @@
-"""``fused-render-app [FILE.fused] [--port N] [--no-browser]``
+"""``fused-render-app [FILE.fused | https://…/app.fused] [--port N] [--no-browser]``
 
 Runs the server in the foreground (dev, Linux/Windows). The macOS .app uses
 ``macapp.py`` instead, which owns a run loop for Finder open events.
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -18,9 +19,13 @@ from fused_render_app import __version__, paths, server
 
 
 def open_url(port: int, file: str | None) -> str:
+    """The page that opens ``file``: a local path, or an ``http(s)://`` link
+    to a .fused (downloaded into the managed dir first, see fetch.py)."""
     base = f"http://127.0.0.1:{port}"
     if not file:
         return base + "/"
+    if re.match(r"^https?://", file, re.I):
+        return base + "/open?_url=" + urllib.parse.quote(file, safe="")
     return base + "/open?_file=" + urllib.parse.quote(os.path.abspath(file), safe="/")
 
 
@@ -35,7 +40,7 @@ def setup_logging(to_file: bool) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="fused-render-app",
                                  description="Open a .fused single-file app.")
-    ap.add_argument("file", nargs="?", help="a .fused file to open")
+    ap.add_argument("file", nargs="?", help="a .fused file to open, or an http(s) URL to one")
     ap.add_argument("--port", type=int, default=int(os.environ.get("FUSED_RENDER_APP_PORT", "2777")))
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--version", action="version", version=__version__)
