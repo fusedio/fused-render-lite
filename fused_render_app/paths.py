@@ -28,6 +28,12 @@ def dropped_dir() -> str:
     return _sub("dropped")
 
 
+def downloads_dir() -> str:
+    """.fused files fetched from a public URL (``POST /api/fetch``), one
+    stable path per URL so re-opening the same link updates in place."""
+    return _sub("downloads")
+
+
 def bin_dir() -> str:
     """Tools fetched on demand (uv)."""
     return _sub("bin")

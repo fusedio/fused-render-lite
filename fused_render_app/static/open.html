@@ -22,7 +22,8 @@
 <body>
 <div class="state" id="state"><span class="muted">Opening app…</span></div>
 <script>
-  const FILE = __FILE_JSON__;
+  let FILE = __FILE_JSON__;
+  const URL_ = __URL_JSON__;
   const state = document.getElementById("state");
 
   const started = Date.now();
@@ -67,7 +68,29 @@
     }
   }
 
+  async function download() {
+    render("Downloading app…", URL_);
+    let res, data;
+    try {
+      res = await fetch("/api/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Fused": "1" },
+        body: JSON.stringify({ url: URL_ }),
+      });
+      data = await res.json();
+    } catch (e) {
+      render("Could not download app", "Download request failed: " + e, null, true);
+      return false;
+    }
+    if (!res.ok) { render("Could not download app", data.error || ("HTTP " + res.status), null, true); return false; }
+    FILE = data.file;
+    // The saved file is the thing to bookmark / reload, not the download.
+    history.replaceState(null, "", "/open?_file=" + encodeURIComponent(FILE));
+    return true;
+  }
+
   async function open() {
+    if (!FILE && URL_ && !(await download())) return;
     if (!FILE) return render("Could not open app", "No .fused file given.", null, true);
     let res, data;
     try {
