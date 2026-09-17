@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.14 | 42.56 MB (42,555,876 B) | +0.01 MB | 98 MB | in-app update banner, open .fused from URL, home page ordering (PRs #25, #26, #27); no packaging change |
 | 0.8.13 | 42.54 MB (42,543,618 B) | +0.03 MB | 98 MB | menu-bar dock: own slide driver, fixed web view canvas, preview.png in hover bubble (PRs #22, #23); no packaging change |
 | 0.8.12 | 42.52 MB (42,517,525 B) | −0.02 MB | 98 MB | native macOS notifications for model downloads, env installs and AI jobs (PR #21); no packaging change |
 | 0.8.11 | 42.54 MB (42,538,988 B) | −0.01 MB | 98 MB | browser parity in windows: pointer lock, geolocation, notifications, popups (PR #20); no packaging change |
@@ -61,6 +62,30 @@ only in the `[app]` extra); no bundled data packages (each app's
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
+
+## 0.8.15
+
+Release plumbing and one launcher change, no packaging change.
+
+Open .fused from a URL without the confirmation step (PR #30). A
+`render-app://open?url=` link or an argv URL is already the user's gesture,
+so the page shows "Downloading app…" at once, navigates to `/open?_file=`,
+runs the environment-install poll, then opens the app. `confirmDownload()`
+is gone from `open.html`. Trade-off: the port is fixed, so a web page can
+point the browser at `/open?_url=` and have the app downloaded and run
+without a click; a per-process nonce on the native deep-link handler would
+close this.
+
+Release notes link the CloudFront DMG first (PR #29). After the S3 and
+asset uploads succeed the job prepends a "Download (CDN, fastest)" line to
+the Release notes; the attached DMG stays as fallback. Idempotent on tag
+rebuilds.
+
+Non-macOS CI and platform branches dropped (PR #28). `env.py` always fetches
+the darwin uv tarball; Windows paths and the `.cmd`-shim spawn path in
+`claude_health.py` / `ai_relay.py` removed; `/api/dock/reveal` no longer
+guards on `sys.platform`. `test-python` runs on `ubuntu-latest`,
+`macos-desktop` is the native check.
 
 ## 0.8.14
 
