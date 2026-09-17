@@ -11,11 +11,10 @@ a version or point the client at different bytes. The artifact URL itself is
 not signed — its content is pinned by the signed sha256 — so downloads
 additionally require HTTPS end to end.
 
-The signing context is Render App's OWN (`render-app-update`, not
-fused-render's `fused-render-update`): the release key may well be shared
-with fused-render, and without a distinct context a FusedRender manifest
-replayed at this app's manifest URL would verify. Version downgrade replays
-are rejected by is_newer().
+The signing key and context are Render App's OWN (`render-app-update`, not
+fused-render's `fused-render-update`), so a FusedRender manifest replayed at
+this app's manifest URL cannot verify even if the keys were ever shared.
+Version downgrade replays are rejected by is_newer().
 """
 from __future__ import annotations
 
@@ -29,10 +28,12 @@ import urllib.request
 
 from fused_render_app.update import ed25519
 
-# Same key as fused-render's macOS/Windows updaters: release CI signs with the
-# FUSED_RENDER_UPDATE_SIGNING_KEY secret copied from that repo. Distinct
-# signing context (above), so sharing the key shares no manifests.
-PUBLIC_KEY = base64.b64decode("u4eiDvccdWmsVCN0nifCEXqmU+xVGIDPe8LP5KRlDns=")
+# Render App's OWN key (generated 2026-09-17 with
+# `scripts/generate_update_manifest.py keygen`), not fused-render's: release CI
+# signs with this repo's FUSED_RENDER_UPDATE_SIGNING_KEY secret. Rotating it
+# means a new seed in that secret AND a new value here, shipped in a release
+# that the old key still signs.
+PUBLIC_KEY = base64.b64decode("fmrKVBJRU4X/P/Eh1cEVgkM0AfxoxETX3YkH03BdunU=")
 SIGNING_CONTEXT = "render-app-update"
 FETCH_TIMEOUT_S = 15.0
 DOWNLOAD_TIMEOUT_S = 300.0

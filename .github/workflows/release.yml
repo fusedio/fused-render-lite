@@ -203,8 +203,9 @@ jobs:
         # The in-app updater (fused_render_app/update/mac.py) polls this fixed
         # name and shows the launcher page's update banner when it names a
         # newer version. Same scheme as fused-render's macOS manifest, signed
-        # with the same FUSED_RENDER_UPDATE_SIGNING_KEY secret (copy it from
-        # that repo) under Render App's own signing context. It lives under
+        # with this repo's own FUSED_RENDER_UPDATE_SIGNING_KEY (a Render App
+        # key, not fused-render's; its public half is pinned in
+        # fused_render_app/update/common.py). It lives under
         # S3_PREFIX because that is the only prefix the role can write. Runs
         # strictly after the DMG upload above, since it points at that DMG.
         # Skipped with a warning while the secret is missing, so a release is

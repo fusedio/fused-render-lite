@@ -5,11 +5,11 @@
 
 Run from release CI (.github/workflows/release.yml) after the DMG is on S3.
 The ed25519 private key (base64 raw 32-byte seed) comes from the
-FUSED_RENDER_UPDATE_SIGNING_KEY env var — the same secret fused-render's
-release signs with; the matching public key is pinned in
+FUSED_RENDER_UPDATE_SIGNING_KEY env var — Render App's own key, not
+fused-render's; the matching public key is pinned in
 fused_render_app/update/common.py. The signature covers a domain-separated
 `version\\nsha256` line (context `render-app-update`, distinct from
-fused-render's so a shared key shares no manifests), so a CDN/bucket
+fused-render's), so a CDN/bucket
 compromise cannot forge a manifest pointing the updater at a different DMG.
 
 Stdlib only: the signing primitive is fused_render_app.update.ed25519, so the

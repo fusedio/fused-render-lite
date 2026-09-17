@@ -90,12 +90,15 @@ The packaged app polls `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/la
 (`fused_render_app/update/mac.py`) and shows the launcher page's update
 banner when it names a newer version. The release job's "Publish signed
 update manifest" step writes it (`scripts/generate_update_manifest.py`, signed
-with the **8th secret** `FUSED_RENDER_UPDATE_SIGNING_KEY` — the same key as
-fused-render's updater, copied from that repo; the public key is pinned in
+with the **8th secret** `FUSED_RENDER_UPDATE_SIGNING_KEY` — Render App's own
+Ed25519 key, NOT fused-render's; the public half is pinned in
 `fused_render_app/update/common.py`). Without the secret the step logs a
 warning and skips: the release still ships, but installed apps never learn
-about it. To use a fresh key instead: `python3 scripts/generate_update_manifest.py keygen`,
-paste the seed into the secret and the public key into `common.PUBLIC_KEY`.
+about it. GitHub secrets are write-only, so the seed must also live in the
+team password manager. To rotate: `python3 scripts/generate_update_manifest.py keygen`,
+paste the seed into the secret and the public key into `common.PUBLIC_KEY`,
+and ship that in a release the OLD key still signs (installed apps verify
+with the key they were built with).
 Check after a release: `curl -s https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json`.
 
 ## Quick Reference

@@ -488,8 +488,8 @@ class UpdateManager:
     def _verify_app(self, app: str, version: str) -> None:
         """The DMG's integrity is already pinned by the signed sha256; this
         guards against a mispublished manifest (right signature, wrong file)
-        swapping in an unexpected version — or, since the signing key may be
-        shared with fused-render, a different app altogether."""
+        swapping in an unexpected version — or a different app altogether
+        (a FusedRender DMG published under this manifest by mistake)."""
         try:
             with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
                 info = plistlib.load(f)
