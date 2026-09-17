@@ -212,7 +212,10 @@ CI assumes `github_render_app_role` via OIDC, which can only write that prefix),
 the signed update manifest `render-app-dmgs/latest.json` is published next to
 it (`scripts/generate_update_manifest.py`, key in the
 `FUSED_RENDER_UPDATE_SIGNING_KEY` secret — skipped with a warning when unset),
-and the DMG + wheel land on the Release. `bump-homebrew` then rewrites
+the DMG + wheel land on the Release, and the Release notes get the CDN
+download link as their first line (assets can't redirect, so the fast
+CloudFront copy is linked from the notes; the attached DMG is the fallback).
+`bump-homebrew` then rewrites
 `Casks/render-app.rb` of [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap)
 to point at the CDN copy and pushes, so `brew upgrade --cask render-app` picks
 the release up. To rebuild an existing tag:

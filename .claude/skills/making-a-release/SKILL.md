@@ -109,7 +109,7 @@ Check after a release: `curl -s https://d2ic19jpchjovp.cloudfront.net/render-app
 | Tag format | `vX.Y.Z` (== `__version__`, commit on main) |
 | Remote | `origin` = fusedio/fused-render-lite |
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
-| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`) |
+| Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`), linked as the first line of the Release notes |
 | Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb` (url = CDN copy); check `brew update && brew info --cask fusedio/tap/render-app` |
 | Update manifest | `render-app-dmgs/latest.json` on the CDN, signed with `FUSED_RENDER_UPDATE_SIGNING_KEY` (skipped with a warning if unset) |
 | After release | size row in `STATUS.md` |
