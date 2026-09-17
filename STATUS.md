@@ -62,6 +62,34 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.14
+
+Three launcher features, no packaging change.
+
+In-app update banner (PR #26). A background loop fetches the signed
+`render-app-dmgs/latest.json` manifest every 5 min; when it names a newer
+version the launcher page shows a pill with an Update button that downloads
+the DMG, verifies it (Ed25519 manifest signature + sha256 + bundle
+version/id), swaps the .app in place and offers Restart. Only the launcher
+shows it; open .fused windows are never interrupted. Ed25519 is a stdlib-only
+implementation (RFC 8032 vectors tested) since the app ships zero runtime
+deps. Render App pins its own public key (`update/common.py`); the seed is
+the `FUSED_RENDER_UPDATE_SIGNING_KEY` secret and the release job publishes
+the manifest, refusing to move `latest.json` backwards unless the live one
+fails validation. Install errors hold through re-checks; `hdiutil` detach
+failures are best-effort and attach failures always clean up their mount.
+
+Open a .fused app from a public URL (PR #27). Paste an http(s) link on the
+home page, load `/open?_url=`, pass it on argv, or click a
+`render-app://open?url=` link. `fetch.py` streams into
+`~/.fused-render-app/downloads/<app_id>.fused` keyed on the app's stable
+`fused-app-id`, so repeat links update one file and one dock row. Non-http(s)
+redirects refused, 1 GB cap, `/open` waits for a click before fetching so a
+web page cannot trigger a download against the predictable localhost port.
+
+Home page (PR #25): recent apps first, then unopened showcase; deleted files
+leave the dock.
+
 ## 0.8.13
 
 Menu-bar dock fixes (PRs #22, #23). The appear/dismiss slide is driven by
