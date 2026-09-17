@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.8.15 | 42.55 MB (42,553,006 B) | −0.00 MB | 98 MB | open .fused from URL without confirm, CDN link first in release notes, non-macOS code paths dropped (PRs #28, #29, #30); no packaging change |
 | 0.8.14 | 42.56 MB (42,555,876 B) | +0.01 MB | 98 MB | in-app update banner, open .fused from URL, home page ordering (PRs #25, #26, #27); no packaging change |
 | 0.8.13 | 42.54 MB (42,543,618 B) | +0.03 MB | 98 MB | menu-bar dock: own slide driver, fixed web view canvas, preview.png in hover bubble (PRs #22, #23); no packaging change |
 | 0.8.12 | 42.52 MB (42,517,525 B) | −0.02 MB | 98 MB | native macOS notifications for model downloads, env installs and AI jobs (PR #21); no packaging change |
