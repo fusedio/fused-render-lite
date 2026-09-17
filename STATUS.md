@@ -64,6 +64,24 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.8.16
+
+One appfile change, no packaging change.
+
+Share .fused state across every extract of one app (PR #32). An app's
+`.fused/` (data, cache, meta.json) lived inside each extract dir, so every
+re-export (new bytes, new `<slug>-<hash>` dir) started from empty state and
+two versions of one app opened side by side could not see each other's
+data. For a file stamped with `fused-app-id`, `.fused` is now a symlink to
+`~/.fused-render-app/fused_data/<app_id>`; every iteration of the app reads
+and writes that one dir. Id-less files keep a local `.fused` as before.
+
+Migration on next open: an extract holding a real `.fused` seeds the shared
+dir when it is empty or holds only a scaffold (empty data/cache +
+meta.json); otherwise the local copy is deleted and the shared state wins.
+A missing shared dir is recreated before the link is checked, so a swept
+dir never leaves a dangling link.
+
 ## 0.8.15
 
 Release plumbing and one launcher change, no packaging change.
