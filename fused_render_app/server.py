@@ -3,7 +3,7 @@
 Pages
   GET  /                    placeholder: drop a .fused here / open one
   GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
-  GET  /open?_url=<http(s)> downloads the .fused (POST /api/fetch), then the same as _file
+  GET  /open?_url=<http(s)> asks to confirm, downloads (POST /api/fetch), then navigates to _file
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
 
 API (the six supported fused.* calls, plus what the shell needs)
@@ -276,8 +276,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         with open(os.path.join(STATIC_DIR, "open.html"), "r", encoding="utf-8") as f:
             page = f.read()
-        # The page downloads first (POST /api/fetch, guarded) and only then
-        # opens: a GET must not trigger the transfer itself.
+        # A URL open renders a confirm step; the transfer happens only on the
+        # user's click (POST /api/fetch), never from this GET — any web page
+        # can point the browser here, and opening a .fused runs its Python.
         page = page.replace("__FILE_JSON__", _js(file)).replace("__URL_JSON__", _js(url))
         self._html(page)
 

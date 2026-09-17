@@ -202,10 +202,23 @@
     location.href = "/open?_file=" + encodeURIComponent(file);
   }
 
-  // The open page downloads the URL into the managed downloads/ dir, then
-  // opens the saved file like any other.
-  function openUrl(url) {
-    location.href = "/open?_url=" + encodeURIComponent(url);
+  // Typed here, the URL is the user's own click: download it now (into the
+  // managed downloads/ dir) and open the saved file like any other. A link
+  // that lands on /open?_url= instead gets a confirmation step first.
+  async function openUrl(url) {
+    say("Downloading " + url + "…");
+    try {
+      const res = await fetch("/api/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Fused": "1" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) return say(data.error || ("HTTP " + res.status), true);
+      openPath(data.file);
+    } catch (e) {
+      say("Download failed: " + e, true);
+    }
   }
 
   async function upload(file) {
