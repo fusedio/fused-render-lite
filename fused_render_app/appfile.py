@@ -8,6 +8,9 @@ page). Opening is extract-then-serve: the payload lands in
 bytes, so re-opening the same file re-uses the extract and a changed file
 gets a fresh dir. The extract is WRITABLE — ``fused.writeFile`` is a
 supported API here, and an app that saves state next to itself is the point.
+That state (``<app>/.fused``) is shared across every extract of one app: for
+a file carrying a stable app id, ``.fused`` is a symlink to
+``~/.fused-render-app/fused_data/<app_id>`` (`ensure_dot_fused`).
 
 No trust gate: opening a .fused runs its Python. Same posture as opening any
 folder of pages someone sent you.
@@ -237,16 +240,75 @@ def extract_dir_for(fused_path: str) -> str | None:
         return None
 
 
-def ensure_dot_fused(app_dir: str) -> bool:
+def shared_dot_fused_dir(app_id: str) -> str:
+    """Where an app id's shared ``.fused`` state lives (whether or not it
+    exists yet): ``<home>/fused_data/<app_id>``. ``app_id`` must have passed
+    `is_app_id` — the regex admits nothing but ``[a-z0-9-]``, so it is safe
+    as a path segment."""
+    return os.path.join(paths.fused_data_dir(), app_id)
+
+
+def _link_dot_fused(app_dir: str, app_id: str) -> str:
+    """Point ``<app>/.fused`` at the shared per-app-id dir and answer the
+    path the state should be materialised under. Raises OSError.
+
+    Every extract of one app (a re-export changes the file's bytes, so it
+    lands in a fresh ``<slug>-<hash>`` dir) shares ``fused_data/<app_id>``:
+    the state an app saved next to itself follows the app across updates.
+
+    An extract that already holds a REAL ``.fused`` dir (made before this
+    linking existed) is migrated: its contents move into the shared dir when
+    that is still empty, else the local dir is deleted (the shared state
+    wins), and the link goes in its place either way.
+    """
+    target = shared_dot_fused_dir(app_id)
+    os.makedirs(target, exist_ok=True)
+    dot = os.path.join(app_dir, ".fused")
+    if os.path.islink(dot):
+        if os.readlink(dot) == target:
+            return target
+        os.unlink(dot)
+    elif os.path.isdir(dot):
+        if not os.listdir(target):
+            for name in os.listdir(dot):
+                shutil.move(os.path.join(dot, name), os.path.join(target, name))
+            os.rmdir(dot)
+        else:
+            shutil.rmtree(dot)  # the shared state wins; the local copy goes
+    elif os.path.lexists(dot):
+        os.unlink(dot)  # a stray file or dangling link
+    try:
+        os.symlink(target, dot)
+    except FileExistsError:
+        # a concurrent open of the same extract won the race
+        if not (os.path.islink(dot) and os.readlink(dot) == target):
+            raise
+    return target
+
+
+def ensure_dot_fused(app_dir: str, app_id: str | None = None) -> bool:
     """Materialise ``<app>/.fused/data``, ``.fused/cache`` and ``meta.json``.
 
     Same convention as fused-render's ``app_fused_dir.ensure``: the server
     creates the folders when an app is opened, so an app never has to
     ``mkdir`` before its first ``writeFile`` into ``.fused/data``. Best-effort:
     a failure here must not stop the app from opening.
+
+    With an ``app_id`` (`is_app_id`) the ``.fused`` dir is a symlink to the
+    shared ``fused_data/<app_id>`` (`_link_dot_fused`), so every extract of
+    that app reads and writes one state dir. Without one (a file that
+    predates ids) the state stays local to the extract, as before.
+    ``meta.json`` is created once and never rewritten (apps may record
+    ``migrations`` in it), so a shared one names the FIRST extract it was
+    made for in ``app_dir``.
     """
     try:
         dot = os.path.join(app_dir, ".fused")
+        if app_id is not None and is_app_id(app_id):
+            try:
+                _link_dot_fused(app_dir, app_id)
+            except OSError:
+                pass  # fall back to a local .fused dir rather than none at all
         os.makedirs(os.path.join(dot, "data"), exist_ok=True)
         os.makedirs(os.path.join(dot, "cache"), exist_ok=True)
         meta = os.path.join(dot, "meta.json")
@@ -275,12 +337,13 @@ def open_app_file(fused_path: str) -> dict:
     dest = os.path.join(root, _file_key(fused_path, name))
     entry_rel = manifest["entry"]
     entry_abs = os.path.join(dest, *entry_rel.split("/"))
+    app_id = app_id_of(fused_path, manifest)
 
     if os.path.isdir(dest):
         if os.path.isfile(entry_abs) and has_fused_meta(entry_abs):
-            ensure_dot_fused(dest)
+            ensure_dot_fused(dest, app_id)
             return {"dir": dest, "entry": entry_abs, "name": name, "reused": True,
-                    "app_id": app_id_of(fused_path, manifest)}
+                    "app_id": app_id}
         shutil.rmtree(dest, ignore_errors=True)  # half-extracted: rebuild
 
     staging = tempfile.mkdtemp(prefix="open-", dir=root)
@@ -319,9 +382,9 @@ def open_app_file(fused_path: str) -> dict:
                 raise AppFileError(f"could not place the extracted app at {dest}")
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    ensure_dot_fused(dest)
+    ensure_dot_fused(dest, app_id)
     return {"dir": dest, "entry": entry_abs, "name": name, "reused": False,
-            "app_id": app_id_of(fused_path, manifest)}
+            "app_id": app_id}
 
 
 # ---- icon --------------------------------------------------------------------

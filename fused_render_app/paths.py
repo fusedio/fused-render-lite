@@ -18,6 +18,13 @@ def apps_dir() -> str:
     return _sub("apps")
 
 
+def fused_data_dir() -> str:
+    """Per-app ``.fused`` state (``data/``, ``cache/``, ``meta.json``), one
+    dir per stable app id. Every extract of an app with that id gets its
+    ``.fused`` symlinked here, so state survives re-exports of the app."""
+    return _sub("fused_data")
+
+
 def venvs_dir() -> str:
     """Per-app venvs built by ``uv sync`` from the app's pyproject.toml."""
     return _sub("venvs")
