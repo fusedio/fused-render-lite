@@ -25,7 +25,7 @@ import threading
 import urllib.request
 import webbrowser
 
-from fused_render_app import __version__, paths, server
+from fused_render_app import __version__, fetch, paths, server
 from fused_render_app.cli import open_url
 from fused_render_app.update import mac as mac_update
 
@@ -130,7 +130,10 @@ def main() -> None:
     )
     logger.info("fused-render-app %s starting (pid %s)", __version__, os.getpid())
 
-    # Files handed on argv (open -a … file, or a CLI-style launch).
+    # Files handed on argv (open -a … file, or a CLI-style launch), plus
+    # http(s) or render-app:// links to a .fused (downloaded by the open
+    # page, fetch.py).
+    argv_urls = [u for u in (fetch.url_from_link(a) for a in sys.argv[1:]) if u]
     argv_files = [a for a in sys.argv[1:] if a.lower().endswith(".fused") and os.path.isfile(a)]
 
     existing = find_running_server()
@@ -152,6 +155,9 @@ def main() -> None:
         if handed is None or handed.returncode != 0:
             for f in argv_files or [None]:
                 webbrowser.open(open_url(existing, f))
+        # `open -b` only carries files; a URL goes to the live port directly.
+        for u in argv_urls:
+            webbrowser.open(open_url(existing, u))
         return
 
     import rumps  # macOS only
@@ -207,13 +213,23 @@ def main() -> None:
 
     rumps.rumps.NSApp.application_openFiles_ = application_openFiles_
 
+    # URL scheme (render-app://open?url=…, "Open in Render App" web links),
+    # a bare http(s) link, or a file:// URL. The http(s) target is downloaded
+    # by the open page (fetch.py); nothing is fetched here.
     def application_openURLs_(self, _app, urls):
         for u in urls:
             raw = str(u.absoluteString())
+            logger.info("open-URLs event: %s", raw)
             if raw.startswith("file://"):
                 import urllib.parse
 
                 open_file(urllib.parse.unquote(urllib.parse.urlsplit(raw).path))
+                continue
+            link = fetch.url_from_link(raw)
+            if link:
+                open_file(link)
+            else:
+                logger.warning("ignoring URL %s", raw)
 
     rumps.rumps.NSApp.application_openURLs_ = application_openURLs_
 
@@ -252,7 +268,7 @@ def main() -> None:
             state["dock"].set_port(actual)
         # argv files join the queue BEFORE the ready flip so they dedupe
         # against the openFiles event AppKit already delivered for them.
-        for f in argv_files:
+        for f in argv_files + argv_urls:
             open_file(f)
         state["ready"] = True
         logger.info("server ready on port %s", actual)

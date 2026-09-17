@@ -17,12 +17,14 @@
   pre { margin: 16px 0 0; padding: 12px; max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px;
         font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
   a { color: inherit; }
+  button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--fg); color: var(--bg); cursor: pointer; }
 </style>
 </head>
 <body>
 <div class="state" id="state"><span class="muted">Opening app…</span></div>
 <script>
   const FILE = __FILE_JSON__;
+  const URL_ = __URL_JSON__;
   const state = document.getElementById("state");
 
   const started = Date.now();
@@ -67,7 +69,46 @@
     }
   }
 
+  // A link is not a click: any web page can point this browser at
+  // /open?_url=…, and opening a .fused runs its Python. So a URL open waits
+  // for the user to confirm; only then does the page POST /api/fetch. The
+  // saved file is then opened by a REAL navigation to /open?_file=…, which
+  // is what the native window keys its identity on (dock running dot,
+  // focus-or-open, Home detection).
+  function confirmDownload() {
+    state.innerHTML = "";
+    const h = document.createElement("h1"); h.textContent = "Open app from link?";
+    const p = document.createElement("div"); p.className = "muted";
+    p.textContent = "Render App will download this .fused file and run the Python it contains, like opening a file someone sent you.";
+    const u = document.createElement("pre"); u.textContent = URL_;
+    const row = document.createElement("p");
+    const go = document.createElement("button"); go.id = "confirm"; go.textContent = "Download and open";
+    go.addEventListener("click", download);
+    const no = document.createElement("a"); no.href = "/"; no.textContent = "Cancel"; no.style.marginLeft = "16px";
+    row.append(go, no);
+    state.append(h, p, u, row);
+    go.focus();
+  }
+
+  async function download() {
+    render("Downloading app…", URL_);
+    let res, data;
+    try {
+      res = await fetch("/api/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Fused": "1" },
+        body: JSON.stringify({ url: URL_ }),
+      });
+      data = await res.json();
+    } catch (e) {
+      return render("Could not download app", "Download request failed: " + e, null, true);
+    }
+    if (!res.ok) return render("Could not download app", data.error || ("HTTP " + res.status), null, true);
+    location.replace("/open?_file=" + encodeURIComponent(data.file));
+  }
+
   async function open() {
+    if (!FILE && URL_) return confirmDownload();
     if (!FILE) return render("Could not open app", "No .fused file given.", null, true);
     let res, data;
     try {

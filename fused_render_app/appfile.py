@@ -36,6 +36,66 @@ _MANIFEST_CAP = 256 * 1024
 
 _META_RE = re.compile(r"<meta\s[^>]*name\s*=\s*[\"']fused-app[\"']", re.I)
 
+# ---- stable app identity (fused-render's app_id.py, D884) --------------------
+#
+# ``<meta name="fused-app-id" content="my-app-82de2580">`` in the entry page,
+# minted once by fused-render on the app's first export and copied into the
+# container index as ``app_id``. Same id across updates of one app, different
+# ids for two apps that share a name. The value comes out of an untrusted
+# file: it is validated by ``APP_ID_RE`` on every read and treated as absent
+# when malformed. It IS used as a filename segment here (downloads keyed on
+# it) — safe only because the regex admits nothing but ``[a-z0-9-]``.
+APP_ID_META = "fused-app-id"
+APP_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,47})-[0-9a-f]{8}$")
+_APP_ID_SCAN_BYTES = 4096
+_APP_ID_TAG_RE = re.compile(
+    rb"<meta\s[^>]*name\s*=\s*[\"']?fused-app-id[\"']?[^>]*>", re.I)
+_APP_ID_CONTENT_RE = re.compile(rb"content\s*=\s*[\"']([^\"']*)[\"']", re.I)
+
+
+def is_app_id(value: object) -> bool:
+    return isinstance(value, str) and APP_ID_RE.match(value) is not None
+
+
+def app_id_from_text(head: bytes | str) -> str | None:
+    """The declared app id in a page's head bytes, None when the tag is
+    absent or malformed. Same two-step read as fused-render (find the tag,
+    then its ``content``) so attribute order does not matter."""
+    if isinstance(head, str):
+        head = head.encode("utf-8", "ignore")
+    tag = _APP_ID_TAG_RE.search(head[:_APP_ID_SCAN_BYTES])
+    if not tag:
+        return None
+    m = _APP_ID_CONTENT_RE.search(tag.group(0))
+    if not m:
+        return None
+    value = m.group(1).decode("utf-8", "ignore").strip()
+    return value if is_app_id(value) else None
+
+
+def app_id_of(fused_path: str, manifest: dict | None = None) -> str | None:
+    """The .fused file's stable app id, or None for a file that predates it.
+
+    The manifest's ``app_id`` first (one bounded index read, nothing
+    extracted); else the entry page's head inside the container — an
+    exporter that stamped the page but not its index still identifies the
+    app. Never raises."""
+    try:
+        if manifest is None:
+            manifest = read_manifest(fused_path)
+        v = manifest.get("app_id")
+        if is_app_id(v):
+            return v
+        entry = manifest.get("entry")
+        if _entry_problem(entry):
+            return None
+        head = _shipped_member_bytes(fused_path, manifest, (entry,),
+                                     lambda _n: _APP_ID_SCAN_BYTES, allow_over=True)
+        return app_id_from_text(head) if head else None
+    except (AppFileError, container.ContainerError, OSError, KeyError, ValueError,
+            zipfile.BadZipFile):
+        return None
+
 
 class AppFileError(Exception):
     pass
@@ -204,7 +264,7 @@ def ensure_dot_fused(app_dir: str) -> bool:
 
 
 def open_app_file(fused_path: str) -> dict:
-    """Extract (or re-use) and answer ``{"dir", "entry", "name", "reused"}``
+    """Extract (or re-use) and answer ``{"dir", "entry", "name", "reused", "app_id"}``
     with absolute paths."""
     fused_path = os.path.abspath(fused_path)
     if not os.path.isfile(fused_path):
@@ -219,7 +279,8 @@ def open_app_file(fused_path: str) -> dict:
     if os.path.isdir(dest):
         if os.path.isfile(entry_abs) and has_fused_meta(entry_abs):
             ensure_dot_fused(dest)
-            return {"dir": dest, "entry": entry_abs, "name": name, "reused": True}
+            return {"dir": dest, "entry": entry_abs, "name": name, "reused": True,
+                    "app_id": app_id_of(fused_path, manifest)}
         shutil.rmtree(dest, ignore_errors=True)  # half-extracted: rebuild
 
     staging = tempfile.mkdtemp(prefix="open-", dir=root)
@@ -259,7 +320,8 @@ def open_app_file(fused_path: str) -> dict:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     ensure_dot_fused(dest)
-    return {"dir": dest, "entry": entry_abs, "name": name, "reused": False}
+    return {"dir": dest, "entry": entry_abs, "name": name, "reused": False,
+            "app_id": app_id_of(fused_path, manifest)}
 
 
 # ---- icon --------------------------------------------------------------------
@@ -305,10 +367,13 @@ def icon_override_paths(fused_path: str) -> list[str] | None:
         return None
 
 
-def _shipped_member_bytes(fused_path: str, manifest: dict, names, cap_for) -> bytes | None:
+def _shipped_member_bytes(fused_path: str, manifest: dict, names, cap_for, *,
+                          allow_over: bool = False) -> bytes | None:
     """The first of ``names`` packed inside the .fused itself (no extract
     lookup) that is there and within its cap (``cap_for(name)``). An
-    over-cap member does not hide the next name."""
+    over-cap member does not hide the next name. With ``allow_over`` the
+    first ``cap`` bytes of an over-cap member are answered instead (a head
+    read, e.g. the entry page's meta tags)."""
     v2 = manifest.get("fused_app_file") == container.VERSION
     for name in names:
         cap = cap_for(name)
@@ -321,8 +386,12 @@ def _shipped_member_bytes(fused_path: str, manifest: dict, names, cap_for) -> by
                         data = f.read(cap + 1)
                 except KeyError:
                     data = None
-        if data is not None and len(data) <= cap:
+        if data is None:
+            continue
+        if len(data) <= cap:
             return data
+        if allow_over:
+            return data[:cap]
     return None
 
 
