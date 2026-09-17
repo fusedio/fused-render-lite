@@ -38,12 +38,18 @@ _SCHEMA = 1
 
 
 def not_behind(version: str, live_text: str) -> bool:
-    """True unless `live_text` is a manifest naming a version newer than
-    `version`. Empty or unparsable live text means nothing to protect."""
+    """True unless `live_text` is a VERIFIED manifest naming a version newer
+    than `version`. Empty, unparsable, malformed or badly signed live text
+    means nothing to protect — a manifest the app itself would reject must
+    not be able to stop a real release from publishing (bugbot, PR #26)."""
     try:
-        live = json.loads(live_text).get("version")
-        return not (isinstance(live, str) and common.is_newer(live, version))
-    except (ValueError, AttributeError):
+        live = json.loads(live_text)
+        if not isinstance(live, dict) or live.get("schema") != _SCHEMA or not all(
+                isinstance(live.get(k), str) for k in ("version", "url", "sha256", "signature")):
+            return True
+        common.verify_signature(live["version"], live["sha256"], live["signature"])
+        return not common.is_newer(live["version"], version)
+    except (ValueError, TypeError):
         return True
 
 

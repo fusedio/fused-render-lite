@@ -367,11 +367,23 @@ def test_manifest_newer_than_guard():
         "gen", pathlib.Path(__file__).resolve().parent.parent / "scripts" / "generate_update_manifest.py")
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
-    assert gen.not_behind("0.8.14", "")                       # nothing live yet
-    assert gen.not_behind("0.8.14", "not json")
-    assert gen.not_behind("0.8.14", json.dumps({"version": "0.8.14"}))
-    assert gen.not_behind("0.8.14", json.dumps({"version": "0.8.13"}))
-    assert not gen.not_behind("0.8.13", json.dumps({"version": "0.8.14"}))  # a rebuilt old tag
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(common, "PUBLIC_KEY", PUBLIC)
+    try:
+        assert gen.not_behind("0.8.14", "")                       # nothing live yet
+        assert gen.not_behind("0.8.14", "not json")
+        assert gen.not_behind("0.8.14", json.dumps(_manifest(version="0.8.14")))
+        assert gen.not_behind("0.8.14", json.dumps(_manifest(version="0.8.13")))
+        assert not gen.not_behind("0.8.13", json.dumps(_manifest(version="0.8.14")))  # a rebuilt old tag
+        # A live manifest the app would reject cannot block a release: unsigned,
+        # signed by another key, or with a tampered version.
+        assert gen.not_behind("0.8.13", json.dumps({"version": "99.0.0"}))
+        assert gen.not_behind("0.8.13", json.dumps(_manifest(version="99.0.0", seed=bytes(32))))
+        tampered = _manifest(version="0.8.14")
+        tampered["version"] = "99.0.0"
+        assert gen.not_behind("0.8.13", json.dumps(tampered))
+    finally:
+        monkeypatch.undo()
 
 
 def test_verify_app_checks_version_and_bundle_id(manager, tmp_path):
