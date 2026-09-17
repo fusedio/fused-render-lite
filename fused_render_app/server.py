@@ -20,6 +20,11 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
+  Self-update (update/mac.py; packaged mac app only — the launcher page's banner):
+  GET  /api/update                             {update: null | {state, current_version, latest_version,
+                                                 progress, progress_total, phase, error, check_only, check_error}}
+  POST /api/update/check | /install {expected_version?} | /cancel | /relaunch
+                                               404 when no update manager runs (dev server, CLI)
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
   GET  /api/dock                               {apps:[{file,name,pinned,running,openedAt,
                                                  hasIcon,iconVersion,hasPreview,previewVersion}], tilesize}
@@ -64,6 +69,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, icon_color, showcase, jobs, paths
+from fused_render_app.update import mac as mac_update
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
 
@@ -82,6 +88,7 @@ _HEAD_RE = re.compile(r"<head[^>]*>", re.I)
 #:   "focus_or_open": (file) -> None   raise that window or open a new one (non-blocking)
 #:   "choose_file":   () -> None       the native open-file panel
 #:   "show_home":     () -> None       the placeholder window
+#:   "relaunch":      () -> None       quit and respawn from the bundle on disk (after an update)
 #: Absent (CLI run, tests) the routes answer `native: false` and the page
 #: navigates itself instead.
 native_hooks: dict = {}
@@ -180,6 +187,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_stat(q)
             if route == "/api/health":
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
+            if route == "/api/update":
+                manager = mac_update.manager()
+                return self._json({"update": manager.status() if manager else None})
             if route == "/api/jobs":
                 return self._json({"jobs": jobs.list_jobs(mark_read=True)})
             if route == "/api/showcase":
@@ -238,6 +248,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._dock(route[len("/api/dock/"):])
             if route == "/api/jobs/clear":
                 return self._guarded() and self._json({"cleared": jobs.clear_finished()})
+            if route.startswith("/api/update/"):
+                return self._update(route[len("/api/update/"):])
             m = re.match(r"^/api/jobs/([^/]+)/(cancel|dismiss)$", route)
             if m:
                 return self._jobs_action(urllib.parse.unquote(m.group(1)), m.group(2))
@@ -513,6 +525,43 @@ class Handler(BaseHTTPRequestHandler):
             row = jobs.request_cancel(job_id)
             return self._json(row) if row else self._error("no such job", 404)
         return self._json({"dismissed": jobs.dismiss(job_id)})
+
+    # ---- self-update (update/mac.py) -----------------------------------------
+
+    def _update(self, action: str) -> None:
+        """POST /api/update/check|install|cancel|relaunch. All mutate (network,
+        a bundle swap, a quit), so all carry the X-Fused guard; 404 when no
+        manager runs — a dev server or CLI run has nothing to swap."""
+        if action not in ("check", "install", "cancel", "relaunch"):
+            return self._error("not found", 404)
+        if not self._guarded():
+            return
+        manager = mac_update.manager()
+        if manager is None:
+            return self._error("self-update is not available here", 404)
+        if action == "check":
+            # Throttled (mac_update.MIN_CHECK_GAP_S): the launcher fires this
+            # when the app comes back to the front, and a run of focus flips
+            # must not become a run of CDN fetches.
+            return self._json(manager.check())
+        if action == "install":
+            body = self._json_body() or {}
+            expected = body.get("expected_version")
+            return self._json(manager.install(
+                expected_version=expected if isinstance(expected, str) else None))
+        if action == "cancel":
+            return self._json(manager.cancel())
+        # relaunch: only once the bundle on disk is the new version, and only
+        # with a native shell to do the quitting.
+        status = manager.status()
+        if status["state"] != "installed":
+            return self._error("no installed update to restart into", 409)
+        relaunch = native_hooks.get("relaunch")
+        if relaunch is None:
+            return self._error("relaunch needs the native app", 404)
+        # The reply goes out first; the hook quits on a delay.
+        self._json({"relaunching": True})
+        relaunch()
 
     # ---- fused.daemon (background_routes.py) --------------------------------
 

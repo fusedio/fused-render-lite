@@ -27,6 +27,7 @@ import webbrowser
 
 from fused_render_app import __version__, fetch, paths, server
 from fused_render_app.cli import open_url
+from fused_render_app.update import mac as mac_update
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +278,14 @@ def main() -> None:
             AppHelper.callAfter(state["dock"].server_ready)
             if os.environ.get("FUSED_RENDER_APP_DOCK_SHOW"):  # dev: screenshot the tray
                 AppHelper.callAfter(state["dock"].show_popover)
+        # The in-app updater (update/mac.py): a background manifest check
+        # whose only surface is the launcher page's banner. No-op outside a
+        # bundle, and guarded like everything else — no updates is a lesser
+        # outcome than no app.
+        try:
+            mac_update.start()
+        except Exception:  # noqa: BLE001
+            logger.exception("update manager unavailable")
         pending, state["pending"] = state["pending"], []
         for target in pending:
             show(target)
@@ -285,6 +294,28 @@ def main() -> None:
         # startup", whatever the surface is.
         if not state["docs"] and not os.environ.get("FUSED_RENDER_APP_NO_BROWSER"):
             show(open_url(actual, None))
+
+    def relaunch() -> None:
+        """POST /api/update/relaunch (HTTP thread): the bundle on disk is a
+        newer version than this process runs. Spawn a detached shell that
+        waits for this pid to exit and then opens the bundle by path, and quit
+        through the normal teardown a moment later — after the HTTP reply has
+        gone out and off the request thread, since close_all() wants the main
+        thread."""
+        bundle = mac_update.bundle_path()
+        if bundle is None:
+            logger.warning("relaunch requested outside a bundle; quitting only")
+        else:
+            logger.info("relaunching from %s", bundle)
+            subprocess.Popen(
+                ["/bin/sh", "-c", mac_update.relaunch_script(bundle, os.getpid())],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        from PyObjCTools import AppHelper
+
+        threading.Timer(0.3, lambda: AppHelper.callAfter(quit_app, None)).start()
+
+    server.native_hooks["relaunch"] = relaunch
 
     def quit_app(_sender) -> None:
         logger.info("quitting")

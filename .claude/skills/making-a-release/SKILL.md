@@ -84,6 +84,23 @@ originals, never from fused-render's repo via API. Check with
 `gh secret list -R fusedio/fused-render-lite`. With secrets present the job
 also verifies the stapled ticket (`stapler validate` + `spctl`).
 
+## In-app update manifest
+
+The packaged app polls `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json`
+(`fused_render_app/update/mac.py`) and shows the launcher page's update
+banner when it names a newer version. The release job's "Publish signed
+update manifest" step writes it (`scripts/generate_update_manifest.py`, signed
+with the **8th secret** `FUSED_RENDER_UPDATE_SIGNING_KEY` — Render App's own
+Ed25519 key, NOT fused-render's; the public half is pinned in
+`fused_render_app/update/common.py`). Without the secret the step logs a
+warning and skips: the release still ships, but installed apps never learn
+about it. GitHub secrets are write-only, so the seed must also live in the
+team password manager. To rotate: `python3 scripts/generate_update_manifest.py keygen`,
+paste the seed into the secret and the public key into `common.PUBLIC_KEY`,
+and ship that in a release the OLD key still signs (installed apps verify
+with the key they were built with).
+Check after a release: `curl -s https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json`.
+
 ## Quick Reference
 
 | Thing | Value |
@@ -94,6 +111,7 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 | Release trigger | tag push → `release.yml`; rebuild with `gh workflow run release --ref vX.Y.Z -f tag=vX.Y.Z` |
 | Artifacts | `RenderApp-X.Y.Z.dmg`, `fused_render_app-X.Y.Z-py3-none-any.whl` on the Release; DMG also at `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg` (S3 via OIDC role `github_render_app_role`) |
 | Homebrew | `bump-homebrew` job → fusedio/homebrew-tap `Casks/render-app.rb` (url = CDN copy); check `brew update && brew info --cask fusedio/tap/render-app` |
+| Update manifest | `render-app-dmgs/latest.json` on the CDN, signed with `FUSED_RENDER_UPDATE_SIGNING_KEY` (skipped with a warning if unset) |
 | After release | size row in `STATUS.md` |
 | Do NOT edit | `pyproject.toml` version |
 

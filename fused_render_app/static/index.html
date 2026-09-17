@@ -134,6 +134,40 @@
   .rail-nav:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
   .rail-nav.prev { left: -12px; }
   .rail-nav.next { right: -12px; }
+  /* Self-update banner (update/mac.py via /api/update). Launcher page ONLY —
+     a .fused app's own window never shows it. Hidden until there is news. */
+  .update {
+    display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
+    max-width: 100%; margin-top: -12px; padding: 5px 6px 5px 12px; border-radius: 999px;
+    font-size: 12px; color: var(--muted); text-align: left;
+    background: color-mix(in srgb, var(--fg) 5%, var(--card)); border: 1px solid var(--line);
+  }
+  .update[hidden] { display: none; }
+  .update .dot { width: 6px; height: 6px; border-radius: 99px; background: var(--accent); flex: 0 0 auto; }
+  .update.err .dot { background: var(--err); }
+  .update .msg { min-width: 0; }
+  .update .msg .sub { color: var(--muted); }
+  .update .msg .sub:not(:empty)::before { content: " · "; }
+  .update.err .msg .sub { color: var(--err); }
+  .update .actions { display: flex; gap: 4px; flex: 0 0 auto; }
+  .update button { padding: 3px 10px; border-radius: 999px; }
+  .update button.primary { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
+  .update button.primary:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+  .update button[disabled] { opacity: .5; cursor: default; }
+  .update .bar { flex: 1 0 100%; height: 2px; margin: 0 6px 2px 0; border-radius: 99px; overflow: hidden; background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .update .bar[hidden] { display: none; }
+  .update .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .update .bar.indeterminate > i { width: 30%; animation: update-slide 1.2s ease-in-out infinite alternate; }
+  @keyframes update-slide { from { margin-left: 0; } to { margin-left: 70%; } }
+  @media (prefers-reduced-motion: reduce) { .update .bar.indeterminate > i { animation: none; width: 100%; opacity: .5; } }
+  .version button.link {
+    padding: 0; border: 0; background: none; font: inherit; color: inherit; letter-spacing: inherit;
+    cursor: pointer; text-decoration: none;
+  }
+  .version button.link:hover { color: var(--fg); text-decoration: underline; }
+  .version button.link[disabled] { cursor: default; text-decoration: none; }
+  .version .check { display: inline-flex; align-items: center; gap: 6px; }
+  .version .check[hidden] { display: none; }
   @media (max-width: 480px) {
     body { padding: 12px; }
     .zone { padding: 32px 16px; }
@@ -155,6 +189,15 @@
   </svg>
   <div class="name">Render <span class="app">App</span></div>
 </header>
+<div class="update" id="update" role="status" aria-live="polite" hidden>
+  <span class="dot" aria-hidden="true"></span>
+  <span class="msg"><span id="update-msg"></span><span class="sub" id="update-sub"></span></span>
+  <span class="actions">
+    <button type="button" id="update-cancel" hidden>Cancel</button>
+    <button type="button" class="primary" id="update-action" hidden></button>
+  </span>
+  <span class="bar" id="update-bar" hidden><i id="update-fill"></i></span>
+</div>
 <div class="zone" id="zone">
   <div class="drop-copy">
     <h1>Drop a <code>.fused</code> app here</h1>
@@ -188,6 +231,8 @@
   <span class="line">
     <a href="https://github.com/fusedio/fused-render" target="_blank" rel="noopener" title="fused-render on GitHub" aria-label="fused-render on GitHub" class="gh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
     <a id="version-label" href="https://github.com/fusedio/fused-render-lite/releases" target="_blank" rel="noopener" title="Release notes"></a>
+    <span class="check" id="update-check-wrap" hidden><span aria-hidden="true">&middot;</span>
+    <button type="button" class="link" id="update-check" title="Check for updates now">Check for updates</button></span>
     <span aria-hidden="true">&middot;</span>
     <a href="https://render.fused.io/" target="_blank" rel="noopener" title="Fused Render"><svg viewBox="0 0 64 64" aria-hidden="true"><path fill-rule="evenodd" d="M32 6 C34.5 23 41 29.5 58 32 C41 34.5 34.5 41 32 58 C29.5 41 23 34.5 6 32 C23 29.5 29.5 23 32 6 Z M32 27 a5 5 0 1 0 0 10 a5 5 0 1 0 0-10 Z"/></svg>Render</a>
   </span>
@@ -396,6 +441,165 @@
       document.getElementById("version").hidden = false;
     }
   }).catch(() => {});
+
+  // ---- Self-update banner (update/mac.py; fused-render's UpdateBadge, on the
+  // launcher page only). GET /api/update answers {update: null} when no updater
+  // runs (dev server, CLI), and the banner + footer link stay hidden. Poll:
+  // hot for the first 20s (the server's first manifest check lands ~1s after
+  // boot), warm to 2 min, then a slow idle tick; busy while a check or install
+  // is in flight. Coming back to the front asks for one check, 30 min apart.
+  const upd = {
+    el: document.getElementById("update"), msg: document.getElementById("update-msg"),
+    sub: document.getElementById("update-sub"), action: document.getElementById("update-action"),
+    cancel: document.getElementById("update-cancel"), bar: document.getElementById("update-bar"),
+    fill: document.getElementById("update-fill"), checkWrap: document.getElementById("update-check-wrap"),
+    check: document.getElementById("update-check"),
+  };
+  const UPD_HOT_MS = 2000, UPD_HOT_WINDOW_MS = 20000, UPD_WARM_MS = 15000, UPD_WARM_WINDOW_MS = 120000;
+  const UPD_IDLE_MS = 60000, UPD_BUSY_MS = 1000, UPD_RETURN_GAP_MS = 30 * 60000, UPD_HOLD_MS = 4000;
+  const UPD_RELEVANT = ["available", "installing", "installed", "error"];
+  const updStarted = Date.now();
+  let updStatus = null, updTimer = null, updGen = 0, updLastCheckAt = Date.now(), updHold = null;
+  let updNote = null; // transient footer text after a manual check ("Up to date", "Couldn't check")
+
+  const fmtMB = (b) => (b / (1024 * 1024)).toFixed(b < 10 * 1024 * 1024 ? 1 : 0) + " MB";
+  const postUpdate = async (action, body) => {
+    const res = await fetch("/api/update/" + action, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Fused": "1" },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.json();
+  };
+
+  function renderUpdate() {
+    const s = updStatus;
+    upd.checkWrap.hidden = s === null;
+    if (updNote !== null) upd.check.textContent = updNote;
+    else upd.check.textContent = s && s.state === "checking" ? "Checking…" : "Check for updates";
+    upd.check.disabled = !!(s && s.state === "checking");
+    const relevant = !!s && UPD_RELEVANT.includes(s.state);
+    upd.el.hidden = !relevant;
+    if (!relevant) return;
+    upd.el.classList.toggle("err", s.state === "error");
+    upd.action.hidden = true; upd.cancel.hidden = true; upd.bar.hidden = true; upd.sub.textContent = "";
+    upd.bar.classList.remove("indeterminate");
+    const v = s.latest_version ? "v" + s.latest_version : "a new version";
+    if (s.state === "available") {
+      upd.msg.textContent = v + " available";
+      if (s.check_only) {
+        upd.sub.textContent = "This dev run has no bundle to update — install from the packaged app.";
+      } else {
+        upd.action.textContent = "Update"; upd.action.hidden = false; upd.action.disabled = false;
+      }
+    } else if (s.state === "installing") {
+      const dl = s.phase !== "installing";
+      upd.msg.textContent = dl ? "Downloading " + v : "Installing " + v;
+      upd.bar.hidden = false;
+      if (dl && s.progress != null && s.progress_total) {
+        upd.fill.style.width = Math.min(100, (100 * s.progress) / s.progress_total) + "%";
+        upd.sub.textContent = fmtMB(s.progress) + " of " + fmtMB(s.progress_total);
+      } else {
+        // Clear the inline width from the download phase, or it overrides
+        // the indeterminate animation's own 30% and the bar sits stuck.
+        upd.fill.style.width = "";
+        upd.bar.classList.add("indeterminate");
+        if (dl && s.progress != null) upd.sub.textContent = fmtMB(s.progress);
+      }
+      upd.cancel.hidden = !dl; upd.cancel.disabled = false;
+    } else if (s.state === "installed") {
+      upd.msg.textContent = v + " installed";
+      upd.sub.textContent = "restart to finish";
+      upd.action.textContent = "Restart"; upd.action.hidden = false; upd.action.disabled = false;
+    } else if (s.state === "error") {
+      upd.msg.textContent = "Update failed";
+      upd.sub.textContent = s.error || "unknown error";
+      upd.action.textContent = "Try again"; upd.action.hidden = false; upd.action.disabled = false;
+    }
+  }
+
+  function setUpdate(next) {
+    if (JSON.stringify(next) === JSON.stringify(updStatus)) return;
+    updStatus = next;
+    renderUpdate();
+  }
+
+  function updDelay(s) {
+    if (s && (s.state === "installing" || s.state === "checking")) return UPD_BUSY_MS;
+    const since = Date.now() - updStarted;
+    if (s && s.state === "idle" && since < UPD_HOT_WINDOW_MS) return UPD_HOT_MS;
+    if (s && s.state === "idle" && since < UPD_WARM_WINDOW_MS) return UPD_WARM_MS;
+    return UPD_IDLE_MS;
+  }
+
+  async function pollUpdate() {
+    const mine = updGen;
+    try {
+      const res = await fetch("/api/update");
+      if (res.ok) setUpdate((await res.json()).update);
+      else if (res.status === 404) setUpdate(null);
+    } catch (e) { /* server away — keep last state */ }
+    if (mine !== updGen) return;
+    updTimer = setTimeout(pollUpdate, updDelay(updStatus));
+  }
+  function pokeUpdate() { clearTimeout(updTimer); updGen += 1; pollUpdate(); }
+
+  upd.action.addEventListener("click", async () => {
+    const s = updStatus; if (!s) return;
+    upd.action.disabled = true;
+    try {
+      if (s.state === "installed") {
+        await postUpdate("relaunch");
+        upd.msg.textContent = "Restarting…"; upd.sub.textContent = ""; upd.action.hidden = true;
+        return;
+      }
+      // Send what THIS render shows: the server re-checks first and defers if
+      // a different version is current, so the button never installs a
+      // version the user did not see.
+      setUpdate(await postUpdate("install", { expected_version: s.latest_version }));
+    } catch (e) { /* the poll picks up the real state */ }
+    // Unconditional: setUpdate skips a render when nothing changed (a failed
+    // POST, a 409), and the button disabled above must not stay that way.
+    renderUpdate();
+    pokeUpdate();
+  });
+  upd.cancel.addEventListener("click", async () => {
+    upd.cancel.disabled = true;
+    try { setUpdate(await postUpdate("cancel")); } catch (e) { /* the poll picks up the real state */ }
+    renderUpdate();
+    pokeUpdate();
+  });
+
+  function holdNote(text) {
+    updNote = text; renderUpdate();
+    clearTimeout(updHold);
+    updHold = setTimeout(() => { updNote = null; renderUpdate(); }, UPD_HOLD_MS);
+  }
+  async function checkUpdates(manual) {
+    updLastCheckAt = Date.now();
+    let result;
+    try { result = await postUpdate("check"); } catch (e) {
+      if (manual) holdNote("Couldn't check");
+      return;
+    }
+    setUpdate(result);
+    // "checking" is not an answer yet (the server's own tick had a fetch out);
+    // the busy poll brings the real one within a second.
+    if (manual && result.state !== "checking" && !UPD_RELEVANT.includes(result.state)) {
+      holdNote(result.check_error ? "Couldn't check"
+        : "Up to date" + (result.current_version ? " · v" + result.current_version : ""));
+    }
+    pokeUpdate();
+  }
+  upd.check.addEventListener("click", () => { if (updStatus && updStatus.state !== "checking") checkUpdates(true); });
+  const onReturn = () => {
+    if (document.visibilityState !== "visible" || !updStatus || updStatus.state !== "idle") return;
+    if (Date.now() - updLastCheckAt < UPD_RETURN_GAP_MS) return;
+    checkUpdates(false);
+  };
+  window.addEventListener("focus", onReturn);
+  document.addEventListener("visibilitychange", onReturn);
+  pollUpdate();
 </script>
 </body>
 </html>
