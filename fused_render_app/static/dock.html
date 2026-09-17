@@ -153,7 +153,6 @@
   .item.util svg { width: calc(var(--tile) * 0.5 * var(--s)); height: calc(var(--tile) * 0.5 * var(--s)); }
   .item:focus-visible .tile { box-shadow: var(--tile-shadow), 0 0 0 2px var(--focus); }
   .item.dragging { opacity: .6; }
-  .item.missing .tile { opacity: .5; filter: saturate(.4); }
   .item.bounce { animation: bounce 600ms ease-in-out; }
   .item.shake  { animation: shake 320ms ease-in-out; }
   @keyframes bounce {
@@ -358,10 +357,8 @@
     const name = app.name || app.file.split("/").pop();
     b.dataset.name = name;
     b.dataset.pinned = app.pinned ? "1" : "";
-    b.dataset.exists = app.exists ? "1" : "";
-    b.setAttribute("aria-label", name + (app.exists ? "" : " (missing)"));
+    b.setAttribute("aria-label", name);
     b.classList.toggle("running", !!app.running);
-    b.classList.toggle("missing", !app.exists);
     // previewVersion changes when a preview is (re)written, so the bubble's
     // <img> retargets; the server caches the URL for good (immutable).
     b.dataset.preview = app.hasPreview
@@ -500,7 +497,6 @@
   async function openApp(file) {
     const b = state.nodes.get(file);
     if (!b || Date.now() - state.dragEndedAt < 300) return; // swallow the click that ends a drag
-    if (!b.dataset.exists) { shake(b); return; }
     bump(b);
     try {
       const r = await post("/api/dock/open", { file });
@@ -656,10 +652,9 @@
     if (state.hover === b) return;
     state.hover = b;
     if (!b) return;
-    const missing = b.classList.contains("app") && !b.dataset.exists;
     const name = document.createElement("span");
-    name.textContent = b.dataset.name + (missing ? " (missing)" : "");
-    const src = missing ? "" : b.dataset.preview;
+    name.textContent = b.dataset.name;
+    const src = b.dataset.preview;
     bubble.classList.toggle("pic", !!src);
     bubble.replaceChildren(...(src ? [name, previewImg(src)] : [name]));
   }
@@ -707,7 +702,7 @@
       bubble.classList.remove("on");
       const r = b.querySelector(".tile").getBoundingClientRect();
       window.webkit.messageHandlers.dock.postMessage({
-        type: "menu", file, name: b.dataset.name, pinned, exists: !!b.dataset.exists,
+        type: "menu", file, name: b.dataset.name, pinned,
         running: b.classList.contains("running"),
         x: Math.round(r.left), y: Math.round(r.bottom + 6),
       });

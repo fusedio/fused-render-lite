@@ -643,7 +643,6 @@ class DockController:
         name = str(data.get("name") or os.path.basename(file))
         pinned = bool(data.get("pinned"))
         running = bool(data.get("running"))
-        exists = bool(data.get("exists", True))
         menu = NSMenu.alloc().initWithTitle_(name)
         menu.setAutoenablesItems_(False)
         menu.setDelegate_(self._menu_delegate)
@@ -662,7 +661,7 @@ class DockController:
         add(menu, name, None, state=running, enabled=False)
         menu.addItem_(NSMenuItem.separatorItem())
         if not running:  # the Dock offers Open only for apps that are not running
-            add(menu, "Open", b"itemOpen:", enabled=exists)
+            add(menu, "Open", b"itemOpen:")
             menu.addItem_(NSMenuItem.separatorItem())
 
         options = NSMenu.alloc().initWithTitle_("Options")
@@ -672,8 +671,8 @@ class DockController:
         else:
             add(options, "Keep in Dock", b"itemPin:")
         options.addItem_(NSMenuItem.separatorItem())
-        add(options, "Show in Finder", b"itemReveal:", enabled=exists)
-        add(options, "Open in Browser", b"itemBrowser:", enabled=exists)
+        add(options, "Show in Finder", b"itemReveal:")
+        add(options, "Open in Browser", b"itemBrowser:")
         opt_item = add(menu, "Options", None)
         opt_item.setEnabled_(True)
         menu.setSubmenu_forItem_(options, opt_item)

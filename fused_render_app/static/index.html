@@ -57,7 +57,7 @@
   input[type=file] { display: none; }
   .status { margin-top: 16px; min-height: 1.5em; font-size: 13px; color: var(--muted); }
   .status.err { color: var(--err); }
-  /* Hovering a showcase card swaps the drop-zone copy for a mini preview card. */
+  /* Hovering a Recent/Showcase card swaps the drop-zone copy for a mini preview card. */
   .zone .drop-copy { transition: opacity .15s; }
   .zone.peeking .drop-copy { opacity: 0; pointer-events: none; }
   .zone.peeking { border-color: transparent; background: transparent; box-shadow: none; }
@@ -100,7 +100,7 @@
   .version a:hover { color: var(--fg); text-decoration: underline; }
   .version a svg { width: 12px; height: 12px; fill: currentColor; }
   .version .line { display: flex; align-items: center; gap: 6px; }
-  /* Showcase: a horizontal rail of thumbnails pinned at the bottom. */
+  /* One horizontal rail of thumbnails under the drop zone: recent apps, then the unopened showcase. */
   .rail-wrap { position: relative; width: 100%; min-width: 0; }
   .rail {
     display: flex; gap: 9px; overflow-x: auto; overscroll-behavior-x: contain;
@@ -132,16 +132,16 @@
   }
   .rail-nav.show { display: flex; }
   .rail-nav:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
-  #rail-prev { left: -12px; }
-  #rail-next { right: -12px; }
+  .rail-nav.prev { left: -12px; }
+  .rail-nav.next { right: -12px; }
   @media (max-width: 480px) {
     body { padding: 12px; }
     .zone { padding: 32px 16px; }
     h1 { font-size: 18px; }
     .wrap { gap: 20px; }
     .card { flex-basis: 120px; }
-    #rail-prev { left: -4px; }
-    #rail-next { right: -4px; }
+    .rail-nav.prev { left: -4px; }
+    .rail-nav.next { right: -4px; }
   }
 </style>
 </head>
@@ -177,11 +177,11 @@
   </div>
 </div>
 <section class="showcase" id="showcase" hidden>
-  <h2>Showcase</h2>
+  <h2>Apps</h2>
   <div class="rail-wrap">
-    <button id="rail-prev" class="rail-nav" type="button" title="Previous" aria-label="Scroll showcase left">&#8249;</button>
-    <div class="rail" id="rail"></div>
-    <button id="rail-next" class="rail-nav" type="button" title="Next" aria-label="Scroll showcase right">&#8250;</button>
+    <button class="rail-nav prev" type="button" title="Previous" aria-label="Scroll apps left">&#8249;</button>
+    <div class="rail"></div>
+    <button class="rail-nav next" type="button" title="Next" aria-label="Scroll apps right">&#8250;</button>
   </div>
 </section>
 <div class="version" id="version" hidden>
@@ -245,16 +245,16 @@
     if (f) upload(f);
   });
 
-  // Mini preview: while a showcase card is hovered/focused the drop zone shows
-  // the app's thumbnail, title and description instead of the drop copy.
+  // Mini preview: while a card is hovered/focused the drop zone shows the
+  // app's thumbnail, title and description instead of the drop copy.
   let peekTimer = null;
   function showPeek(ex) {
     clearTimeout(peekTimer);
     peekTimer = setTimeout(() => {
       const shot = document.getElementById("peek-shot");
       const blank = document.getElementById("peek-blank");
-      if (ex.has_preview) {
-        shot.src = "/api/showcase/preview?id=" + encodeURIComponent(ex.id);
+      if (ex.preview) {
+        shot.src = ex.preview;
         shot.hidden = false; blank.hidden = true;
       } else {
         shot.removeAttribute("src");
@@ -273,56 +273,48 @@
       document.getElementById("peek").setAttribute("aria-hidden", "true");
     }, 150);
   }
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") hidePeek(); });
 
-  // Showcase apps packaged with the app (fused_render_app/showcase/). The
-  // section stays hidden unless the server lists at least one.
-  async function loadShowcase() {
-    let rows;
-    try {
-      const res = await fetch("/api/showcase");
-      if (!res.ok) return;
-      rows = (await res.json()).showcase || [];
-    } catch (e) {
-      return;
+  // One card shape for every row. ``ex.preview`` is a ready URL from the
+  // server (/api/dock/preview for a recent app, /api/showcase/preview for a
+  // shipped one), so the card never has to know which kind it draws.
+  function makeCard(ex) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "card";
+    card.title = "Open " + ex.title;
+    if (ex.preview) {
+      const img = document.createElement("img");
+      img.className = "shot";
+      img.alt = "";
+      img.loading = "lazy";
+      img.src = ex.preview;
+      card.appendChild(img);
+    } else {
+      const blank = document.createElement("div");
+      blank.className = "shot blank";
+      blank.textContent = "\u25A3";
+      card.appendChild(blank);
     }
-    if (!rows.length) return;
-    const rail = document.getElementById("rail");
-    for (const ex of rows) {
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = "card";
-      card.title = "Open " + ex.title;
-      if (ex.has_preview) {
-        const img = document.createElement("img");
-        img.className = "shot";
-        img.alt = "";
-        img.loading = "lazy";
-        img.src = "/api/showcase/preview?id=" + encodeURIComponent(ex.id);
-        card.appendChild(img);
-      } else {
-        const blank = document.createElement("div");
-        blank.className = "shot blank";
-        blank.textContent = "\u25A3";
-        card.appendChild(blank);
-      }
-      const title = document.createElement("div");
-      title.className = "title";
-      title.textContent = ex.title;
-      card.appendChild(title);
-      card.addEventListener("click", () => openPath(ex.file));
-      card.addEventListener("pointerenter", (e) => { if (e.pointerType !== "touch") showPeek(ex); });
-      card.addEventListener("pointerleave", hidePeek);
-      card.addEventListener("focus", () => showPeek(ex));
-      card.addEventListener("blur", hidePeek);
-      rail.appendChild(card);
-    }
-    document.getElementById("showcase").hidden = false;
-    rail.addEventListener("scroll", hidePeek, { passive: true });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") hidePeek(); });
+    const title = document.createElement("div");
+    title.className = "title";
+    title.textContent = ex.title;
+    card.appendChild(title);
+    card.addEventListener("click", () => openPath(ex.file));
+    card.addEventListener("pointerenter", (e) => { if (e.pointerType !== "touch") showPeek(ex); });
+    card.addEventListener("pointerleave", hidePeek);
+    card.addEventListener("focus", () => showPeek(ex));
+    card.addEventListener("blur", hidePeek);
+    return card;
+  }
 
-    // Arrows only appear when the rail overflows; a rail that fits sits centred.
-    const prev = document.getElementById("rail-prev");
-    const next = document.getElementById("rail-next");
+  // The rail: fills its cards, hides its section when empty, and owns its
+  // arrows — they only appear when the rail overflows; one that fits sits
+  // centred. Wired once; fill() may run many times.
+  function railOf(section) {
+    const rail = section.querySelector(".rail");
+    const prev = section.querySelector(".rail-nav.prev");
+    const next = section.querySelector(".rail-nav.next");
     const updateNav = () => {
       const over = rail.scrollWidth - rail.clientWidth - 1;
       prev.classList.toggle("show", rail.scrollLeft > 4);
@@ -333,16 +325,49 @@
     prev.addEventListener("click", () => nudge(-1));
     next.addEventListener("click", () => nudge(1));
     rail.addEventListener("scroll", updateNav, { passive: true });
+    rail.addEventListener("scroll", hidePeek, { passive: true });
     rail.addEventListener("wheel", (e) => {
       if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
       e.preventDefault();
       rail.scrollLeft += e.deltaY;
     }, { passive: false });
     window.addEventListener("resize", updateNav);
-    updateNav();
-    requestAnimationFrame(updateNav);
+    return {
+      fill(rows) {
+        hidePeek(); // a hovered card about to be detached never fires pointerleave
+        rail.replaceChildren(...rows.map(makeCard));
+        section.hidden = rows.length === 0;
+        updateNav();
+        requestAnimationFrame(updateNav);
+      },
+    };
   }
-  loadShowcase();
+
+  // One list: recent apps (what the menu-bar dock remembers, newest first)
+  // and then the showcase apps packaged with the app that are not among them
+  // — the server computes both halves (showcase.home()). A fresh install is
+  // all showcase; an opened showcase app moves to the front and leaves the
+  // tail. Re-fetched whenever the page comes back into view, so an app
+  // opened or a file deleted meanwhile shows up without a reload.
+  const rail = railOf(document.getElementById("showcase"));
+  let loadSeq = 0;
+  async function loadHome() {
+    const seq = ++loadSeq;
+    let data;
+    try {
+      const res = await fetch("/api/showcase", { cache: "no-store" });
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (e) {
+      return;
+    }
+    if (seq !== loadSeq) return; // a newer load is in flight
+    rail.fill([...(data.recent || []), ...(data.showcase || [])]);
+  }
+  loadHome();
+  window.addEventListener("pageshow", (e) => { if (e.persisted) loadHome(); });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadHome(); });
+  window.addEventListener("focus", loadHome);
 
   // Version footer, from the server so it can never drift from __version__.
   fetch("/api/health").then(r => r.ok ? r.json() : null).then(h => {

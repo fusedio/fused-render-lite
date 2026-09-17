@@ -31,11 +31,21 @@ def files_of(apps):
     return [a["file"] for a in apps]
 
 
+def touch(path) -> str:
+    """A .fused that exists (any bytes: only the store's bookkeeping is under
+    test). list_apps drops entries whose file is gone, so store tests need
+    real files."""
+    path = str(path)
+    with open(path, "ab"):
+        pass
+    return path
+
+
 # ---- store -----------------------------------------------------------------
 
 
 def test_record_open_upserts_and_orders_recent_first(tmp_path):
-    a, b = str(tmp_path / "a.fused"), str(tmp_path / "b.fused")
+    a, b = touch(tmp_path / "a.fused"), touch(tmp_path / "b.fused")
     dock_store.record_open(a, "A")
     dock_store.record_open(b, "B")
     assert files_of(dock_store.list_apps()) == [b, a]
@@ -50,10 +60,10 @@ def test_record_open_upserts_and_orders_recent_first(tmp_path):
 
 
 def test_eviction_keeps_pinned(tmp_path):
-    pinned = str(tmp_path / "pinned.fused")
+    pinned = touch(tmp_path / "pinned.fused")
     dock_store.record_open(pinned, "P")
     dock_store.set_pinned(pinned, True)
-    names = [str(tmp_path / f"r{i}.fused") for i in range(dock_store.MAX_RECENT + 3)]
+    names = [touch(tmp_path / f"r{i}.fused") for i in range(dock_store.MAX_RECENT + 3)]
     for f in names:
         dock_store.record_open(f, os.path.basename(f))
     apps = dock_store.list_apps()
@@ -64,7 +74,7 @@ def test_eviction_keeps_pinned(tmp_path):
 
 
 def test_set_pinned_order_unknown_and_unpin(tmp_path):
-    a, b, c = (str(tmp_path / f"{n}.fused") for n in "abc")
+    a, b, c = (touch(tmp_path / f"{n}.fused") for n in "abc")
     dock_store.record_open(a, "A")
     dock_store.record_open(b, "B")
     dock_store.set_pinned(b, True)
@@ -76,7 +86,7 @@ def test_set_pinned_order_unknown_and_unpin(tmp_path):
     assert files_of(apps) == [b, a, c]
     assert apps[2]["name"] == "c" and apps[2]["openedAt"] is None
     # unknown + unpinned -> no-op
-    dock_store.set_pinned(str(tmp_path / "zzz.fused"), False)
+    dock_store.set_pinned(touch(tmp_path / "zzz.fused"), False)
     assert len(dock_store.list_apps()) == 3
     # unpin b: falls into the recent group, ordered by openedAt (c has none -> last)
     dock_store.set_pinned(b, False)
@@ -86,7 +96,7 @@ def test_set_pinned_order_unknown_and_unpin(tmp_path):
 
 
 def test_remove_and_reorder(tmp_path):
-    a, b, c, d = (str(tmp_path / f"{n}.fused") for n in "abcd")
+    a, b, c, d = (touch(tmp_path / f"{n}.fused") for n in "abcd")
     for f in (a, b, c, d):
         dock_store.record_open(f, f)
     for f in (a, b, c):
@@ -102,22 +112,22 @@ def test_remove_and_reorder(tmp_path):
     assert files_of(dock_store.list_apps()) == [c, a]
 
 
-def test_corrupt_or_missing_json_is_empty(app_home):
+def test_corrupt_or_missing_json_is_empty(app_home, tmp_path):
     assert dock_store.list_apps() == []
     path = app_home / "dock.json"
     path.write_text("{not json")
     assert dock_store.list_apps() == []
-    dock_store.record_open("/x/a.fused", "A")  # recovers by overwriting
+    dock_store.record_open(touch(tmp_path / "a.fused"), "A")  # recovers by overwriting
     assert len(dock_store.list_apps()) == 1
     path.write_text(json.dumps({"apps": "nope"}))
     assert dock_store.list_apps() == []
 
 
-def test_tilesize_default_clamp_and_survives_app_writes(app_home):
+def test_tilesize_default_clamp_and_survives_app_writes(app_home, tmp_path):
     assert dock_store.get_tilesize() == dock_store.DEFAULT_TILESIZE
     assert dock_store.set_tilesize(64) == 64
     assert dock_store.get_tilesize() == 64
-    dock_store.record_open("/x/a.fused", "A")  # app writes keep the size
+    dock_store.record_open(touch(tmp_path / "a.fused"), "A")  # app writes keep the size
     assert dock_store.get_tilesize() == 64
     assert dock_store.set_tilesize(3) == dock_store.MIN_TILESIZE
     assert dock_store.set_tilesize(9999) == dock_store.MAX_TILESIZE
@@ -144,19 +154,50 @@ def test_dock_size_route(client):
     assert json.loads(body) == {"tilesize": dock_store.DEFAULT_TILESIZE}
 
 
-def test_list_apps_shape(v2_fused_icon, v2_fused, tmp_path):
-    ghost = str(tmp_path / "ghost.fused")
+def test_list_apps_shape(v2_fused_icon, v2_fused):
     dock_store.record_open(v2_fused, "demo")
     dock_store.record_open(v2_fused_icon, "iconic")
-    dock_store.record_open(ghost, "ghost")
     by_file = {a["file"]: a for a in dock_store.list_apps(running={v2_fused})}
-    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "exists", "openedAt",
+    assert set(by_file[v2_fused]) == {"file", "name", "pinned", "running", "openedAt",
                                       "hasIcon", "iconVersion", "hasPreview", "previewVersion"}
     assert by_file[v2_fused]["hasPreview"] is False and by_file[v2_fused]["previewVersion"] is None
     assert by_file[v2_fused]["running"] is True and by_file[v2_fused]["hasIcon"] is False
     assert by_file[v2_fused_icon]["running"] is False and by_file[v2_fused_icon]["hasIcon"] is True
-    assert by_file[ghost]["exists"] is False and by_file[ghost]["hasIcon"] is False
-    assert by_file[v2_fused]["exists"] is True
+
+
+def test_deleted_file_is_dropped_from_the_store_on_read(v2_fused, tmp_path, app_home):
+    """No "missing" state: an entry whose .fused is gone — pinned or not —
+    leaves the list AND dock.json on the next read; the rest survive."""
+    gone = touch(tmp_path / "gone.fused")
+    pinned_gone = touch(tmp_path / "pinned_gone.fused")
+    dock_store.record_open(v2_fused, "demo")
+    dock_store.record_open(gone, "gone")
+    dock_store.record_open(pinned_gone, "pg")
+    dock_store.set_pinned(pinned_gone, True)
+    assert files_of(dock_store.list_apps()) == [pinned_gone, gone, v2_fused]
+    os.remove(gone)
+    os.remove(pinned_gone)
+    assert files_of(dock_store.list_apps()) == [v2_fused]
+    stored = json.load(open(os.path.join(app_home, "dock.json")))
+    assert [e["file"] for e in stored["apps"]] == [v2_fused]
+    # a directory is not a file either
+    os.mkdir(tmp_path / "dir.fused")
+    dock_store.record_open(str(tmp_path / "dir.fused"), "dir")
+    assert files_of(dock_store.list_apps()) == [v2_fused]
+
+
+def test_prune_survives_an_unwritable_store(v2_fused, tmp_path, monkeypatch, caplog):
+    gone = touch(tmp_path / "gone.fused")
+    dock_store.record_open(v2_fused, "demo")
+    dock_store.record_open(gone, "gone")
+    os.remove(gone)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(dock_store, "_save", boom)
+    assert files_of(dock_store.list_apps()) == [v2_fused]  # filtered answer, no raise
+    assert "pruning" in caplog.text
 
 
 def test_list_apps_sees_icon_written_to_extract_later(v2_fused):
@@ -298,7 +339,7 @@ def test_dock_api_flow(client, v2_fused_icon, v2_fused):
     assert status == 200, body
     apps = json.loads(client.get("/api/dock")[2])["apps"]
     assert files_of(apps) == [v2_fused, v2_fused_icon]
-    assert apps[1]["name"] == "iconic" and apps[1]["hasIcon"] is True and apps[1]["exists"] is True
+    assert apps[1]["name"] == "iconic" and apps[1]["hasIcon"] is True
     assert apps[0]["running"] is False
 
     status, _, body = client.post("/api/dock/pin", {"file": v2_fused_icon, "pinned": True})

@@ -20,16 +20,24 @@ path must be one card, not two.
 A corrupt or missing file is an empty list, never an error: the dock is a
 convenience over files the user still has on disk, and losing the list is
 strictly better than a menu-bar shell that will not open.
+
+An entry whose .fused is gone from disk is dropped on the next read
+(``list_apps``), pinned or not: there is no "missing" state. Deleting (or
+moving, or unmounting) a file removes it from the dock and from the home
+page's Recent row at once; opening it again from its new place adds it back.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
 from datetime import datetime, timezone
 
 from fused_render_app import appfile, paths
+
+logger = logging.getLogger(__name__)
 
 MAX_RECENT = 10
 DEFAULT_TILESIZE = 52
@@ -222,16 +230,39 @@ def _card_info(file: str) -> tuple[bool, int | None, bool, int | None]:
     return has_icon, icon_version, has_preview, preview_version
 
 
-def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
-    """Pinned first in stored order, then unpinned by openedAt desc."""
+def _pruned() -> list[dict]:
+    """The stored entries minus those whose file is no longer on disk. When
+    anything was dropped the store is rewritten so the file is gone for good;
+    a failed write is logged, not raised — the filtered list is still the
+    answer, and the next read prunes again.
+
+    The stats happen OUTSIDE the lock: a .fused on a hung network mount must
+    stall this poll, not every ``record_open`` queued behind it. The store is
+    re-read before the rewrite so an entry added meanwhile is not lost."""
     with _lock:
         apps = _load()
+    gone = {a["file"] for a in apps if not os.path.isfile(a["file"])}
+    if not gone:
+        return apps
+    with _lock:
+        kept = [a for a in _load() if a["file"] not in gone]
+        try:
+            _save(kept)
+        except OSError:
+            logger.warning("could not rewrite dock.json after pruning", exc_info=True)
+    return kept
+
+
+def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
+    """Pinned first in stored order, then unpinned by openedAt desc. Entries
+    whose .fused no longer exists are dropped (and forgotten) on the way."""
+    apps = _pruned()
     pinned = [a for a in apps if a.get("pinned")]
     recent = sorted((a for a in apps if not a.get("pinned")),
                     key=lambda a: a.get("openedAt") or "", reverse=True)
     running = {os.path.abspath(f) for f in running}
     out = []
-    for a in pinned + recent:  # filesystem probes happen outside the lock
+    for a in pinned + recent:  # container probes happen outside the lock
         file = a["file"]
         has_icon, icon_version, has_preview, preview_version = _card_info(file)
         out.append({
@@ -239,7 +270,6 @@ def list_apps(running: set[str] | frozenset[str] = frozenset()) -> list[dict]:
             "name": a.get("name") or _stem(file),
             "pinned": bool(a.get("pinned")),
             "running": file in running,
-            "exists": os.path.isfile(file),
             "openedAt": a.get("openedAt"),
             "hasIcon": has_icon,
             "iconVersion": icon_version,
