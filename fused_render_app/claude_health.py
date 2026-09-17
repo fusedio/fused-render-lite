@@ -9,13 +9,7 @@ import shutil
 BIN_ENV = "FUSED_RENDER_CLAUDE_BIN"
 APP_BIN_ENV = "FUSED_RENDER_APP_CLAUDE_BIN"
 
-WINDOWS_CANDIDATES = (
-    r"%USERPROFILE%\.local\bin\claude.exe",
-    r"%LOCALAPPDATA%\Microsoft\WinGet\Links\claude.exe",
-    r"%APPDATA%\npm\claude.exe",
-    r"%APPDATA%\npm\claude.cmd",
-)
-POSIX_CANDIDATES = (
+CANDIDATES = (
     "~/.local/bin/claude",
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
@@ -29,8 +23,7 @@ def executable(path: str) -> bool:
 
 
 def candidates() -> tuple[str, ...]:
-    raw = WINDOWS_CANDIDATES if os.name == "nt" else POSIX_CANDIDATES
-    return tuple(os.path.expandvars(os.path.expanduser(c)) for c in raw)
+    return tuple(os.path.expanduser(c) for c in CANDIDATES)
 
 
 def resolve(allow_shell: bool = True) -> tuple:

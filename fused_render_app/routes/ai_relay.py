@@ -3,8 +3,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -136,9 +134,8 @@ _AI_CTRL_TIMEOUT_S = 10.0
 # user is being told to set.
 _AI_BIN_ENV = claude_health.BIN_ENV
 # Model ids/aliases are a closed charset. This is a SECURITY boundary, not
-# just validation: on the Windows .cmd-shim path argv is re-parsed by cmd.exe
-# (whose quoting cannot be escaped reliably), so every argv element must be a
-# static literal, a tempdir path, or a value this regex admitted.
+# just validation: every argv element must be a static literal, a tempdir
+# path, or a value this regex admitted.
 # A cloud alias ("opus") or a Hugging Face repo id ("mlx-community/Qwen3-8B-4bit").
 # The slash is the SEAM (SPEC §40): a model id with an org in it names a repo on
 # disk, which means local inference, and one without it is a Claude alias. That
@@ -238,13 +235,8 @@ def _claude_seconds(data: dict) -> float | None:
 #
 # The claude chat template (templates/claude/agent.py) still keeps its own copy.
 # That is deliberate duplication, not a missing import: a template is standalone
-# user-forkable code and may not import the app (D166). It is pinned to this
-# list by tests/test_claude_health.py rather than left to drift.
-#
-# Ordered most-canonical first, `.exe` ahead of any `.cmd` shim: a shim has to
-# be run through cmd.exe, which re-parses the command line (see _popen_argv).
-_CLAUDE_WINDOWS_CANDIDATES = claude_health.WINDOWS_CANDIDATES
-_CLAUDE_POSIX_CANDIDATES = claude_health.POSIX_CANDIDATES
+# user-forkable code and may not import the app (D166).
+_CLAUDE_CANDIDATES = claude_health.CANDIDATES
 
 
 def _claude_bin() -> str | None:
@@ -257,12 +249,8 @@ def _claude_bin() -> str | None:
     found = shutil.which("claude")
     if found:
         return found
-    candidates = (_CLAUDE_WINDOWS_CANDIDATES if os.name == "nt"
-                  else _CLAUDE_POSIX_CANDIDATES)
-    for candidate in candidates:
-        # expandvars for the %VAR% Windows entries, expanduser for the ~ POSIX
-        # ones; each is a no-op on the other platform's shape.
-        path = os.path.expanduser(os.path.expandvars(candidate))
+    for candidate in _CLAUDE_CANDIDATES:
+        path = os.path.expanduser(candidate)
         # claude_health.executable, NOT a local isfile. This walks the SAME list
         # claude_health.resolve does, so a check that differed between them would
         # put the health report and the spawn on different binaries: a
@@ -275,82 +263,15 @@ def _claude_bin() -> str | None:
     return None
 
 
-def _needs_cmd_shim(bin_path: str) -> bool:
-    """Whether `bin_path` can only be started through cmd.exe.
-
-    npm installs claude as a .cmd/.bat shim, which CreateProcess (and so
-    create_subprocess_exec) cannot run directly — only cmd.exe can."""
-    return sys.platform == "win32" and bin_path.lower().endswith((".cmd", ".bat"))
-
-
-def _cmd_quote(arg: str) -> str:
-    """Quote one argument for the verbatim payload of `cmd /d /s /c "..."`.
-
-    EVERY element is quoted, not just the ones with spaces: /s stops cmd from
-    re-parsing the payload's quotes, but it does NOT stop cmd from acting on
-    metacharacters (& | > < ^), and a quoted run is where those are literal.
-    Windows paths cannot contain `"` and every other element here is a static
-    literal or charset-validated, so there is no inner quote to escape —
-    assert rather than silently produce a line that means something else."""
-    if '"' in arg:
-        raise ValueError(f"argument may not contain a double quote: {arg!r}")
-    return f'"{arg}"'
-
-
-def _popen_cmd(bin_path: str, args: list[str]) -> list[str] | str:
-    """How to spawn the CLI: an argv list, or — behind a Windows .cmd/.bat
-    shim — one command STRING for the cmd.exe hop.
-
-    A shim can only be started through cmd.exe, and the naive form of that is
-    the argv list ["cmd.exe", "/c", bin_path, *args]. It does not work.
-    Windows has no argv: CreateProcess takes a command line, which asyncio
-    builds with subprocess.list2cmdline, quoting each element that needs it.
-    cmd.exe preserves that inner quoting only when the rest of its line holds
-    exactly TWO quote characters; a shim path with spaces plus any quoted
-    argument makes four, cmd falls through to its strip-the-outermost-pair
-    rule and re-splits at the spaces — so a `C:\\Users\\John Doe\\...` install
-    never runs:
-
-        >>> subprocess.list2cmdline(["cmd.exe", "/c", r"C:\\p ath\\claude.cmd",
-        ...                          "-p", r"C:\\Users\\John Doe\\t.txt"])
-        'cmd.exe /c "C:\\\\p ath\\\\claude.cmd" -p "C:\\\\Users\\\\John Doe\\\\t.txt"'
-
-    Nor can the fixed line be smuggled through as one argv ELEMENT, because
-    list2cmdline would escape the quotes we just added. So the shim path
-    returns a string and is spawned as a command line instead (see
-    _spawn_claude_stream), which CPython wraps as `comspec /c "<payload>"` — one
-    outer quote pair around a payload in which every element is quoted. cmd
-    then strips exactly that outer pair and reads the rest as written.
-
-    Every element is quoted, not only the ones with spaces: the outer pair
-    stops cmd re-parsing QUOTES, not metacharacters (& | > < ^), and a quoted
-    run is where those stay literal. Nothing here can contain a `"` — Windows
-    paths cannot, and the rest is static or charset-validated — and
-    _cmd_quote raises rather than emit a line that means something else."""
-    if not _needs_cmd_shim(bin_path):
-        return [bin_path] + args
-    return " ".join(_cmd_quote(a) for a in [bin_path] + args)
-
-
 def _kill_process_tree(proc) -> None:
-    """Kill `proc` and, on Windows, its whole descendant tree.
-
-    A .cmd shim runs through cmd.exe, so proc.kill() there terminates only
-    cmd.exe and orphans the node/claude child — which keeps running (and
-    billing) after we've answered timeout. taskkill /T walks the tree;
-    proc.kill() stays as the POSIX path and the Windows fallback."""
-    if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW)
+    """Kill `proc`; a vanished process is not an error."""
     try:
         proc.kill()
     except ProcessLookupError:
         pass
 
 
-def _ai_cmd(bin_path: str, model: str, sp_file: str) -> list[str] | str:
+def _ai_cmd(bin_path: str, model: str, sp_file: str) -> list[str]:
     """The stream-json spawn command for the persistent completion process.
 
     --input-format stream-json is what makes the warm instance possible: the
@@ -363,16 +284,13 @@ def _ai_cmd(bin_path: str, model: str, sp_file: str) -> list[str] | str:
     multi-turn by design (per-request isolation comes from /clear, not from
     process death).
 
-    No user-controlled STRING may enter argv: on the Windows .cmd-shim path
-    cmd.exe re-parses the whole line, and cmd-escaping arbitrary text is not
-    reliably possible. The user prompt travels over stdin as a stream-json
-    message (which also dodges the OS argv size cap for the documented
-    embed-JSON-aggregates pattern), the system prompt goes via
+    No user-controlled STRING enters argv: the user prompt travels over stdin
+    as a stream-json message (which also dodges the OS argv size cap for the
+    documented embed-JSON-aggregates pattern), the system prompt goes via
     --system-prompt-file (`sp_file`, our own tempdir path) at spawn and via
     the set_model control_request afterwards, and the model is
-    charset-validated (_AI_MODEL_RE). _popen_cmd turns the result into an
-    argv list, or one fully-quoted command string behind a .cmd/.bat shim."""
-    return _popen_cmd(bin_path, [
+    charset-validated (_AI_MODEL_RE)."""
+    return [bin_path] + [
         "-p",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
@@ -380,32 +298,24 @@ def _ai_cmd(bin_path: str, model: str, sp_file: str) -> list[str] | str:
         "--verbose",
         "--model", model,
         "--system-prompt-file", sp_file,
-        # Single-token equals form, never a separate "" argv element: the
-        # cmd.exe %* expansion behind a .cmd shim drops empty args — the
-        # flags would then swallow the next token and leave tools/settings
-        # enabled. (Verified against claude 2.1.220: parses identically,
-        # same 544 input tokens.)
+        # Single-token equals form, never a separate "" argv element.
+        # (Verified against claude 2.1.220: parses identically, same 544
+        # input tokens.)
         "--tools=",
         "--setting-sources=",
         "--no-session-persistence",
-    ])
+    ]
 
 
-async def _spawn_claude_stream(cmd: list[str] | str, env: dict):
+async def _spawn_claude_stream(cmd: list[str], env: dict):
     """Spawn one claude CLI process in stream-json mode; return the process.
 
     The single subprocess hop, module-level so tests can patch it — the same
     discipline as _fs_stat/_fs_write. The caller writes the user message to
     stdin later (possibly much later, for a prewarmed process) and reads
-    events off stdout line by line.
-
-    A list `cmd` is exec'd directly. A string is the Windows .cmd-shim case
-    (_popen_cmd): it must go through create_subprocess_shell, whose comspec
-    wrapping is what gives cmd.exe the single outer quote pair it can parse
-    deterministically. That is NOT a shell-injection surface — the payload is
-    ours, fully quoted, and holds no user text (the prompt is on stdin, the
-    system prompt in a file, the model charset-validated)."""
-    kwargs = dict(
+    events off stdout line by line."""
+    return await asyncio.create_subprocess_exec(
+        *cmd,
         env=env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -417,12 +327,7 @@ async def _spawn_claude_stream(cmd: list[str] | str, env: dict):
         # live proj.db SQLite handle and SIGSEGVs the child (exit -11). Same
         # fix as executor.py's worker spawn — see the full story there and in
         # tests/test_worker_forksafe.py.
-        close_fds=False,
-        # a windowless server must not flash a console window per call
-        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-    if isinstance(cmd, str):
-        return await asyncio.create_subprocess_shell(cmd, **kwargs)
-    return await asyncio.create_subprocess_exec(*cmd, **kwargs)
+        close_fds=False)
 
 
 async def _ai_spawn(bin_path: str, model: str, system_prompt: str):

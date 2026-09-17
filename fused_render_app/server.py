@@ -60,7 +60,6 @@ import mimetypes
 import os
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -480,8 +479,6 @@ class Handler(BaseHTTPRequestHandler):
             hook(file)
             return self._json({"ok": True, "native": True})
         elif action == "reveal":
-            if sys.platform != "darwin":
-                return self._json({"ok": False})
             subprocess.Popen(["open", "-R", file])
             return self._json({"ok": True})
         self._json({"apps": dock_store.list_apps(self._dock_running())})

@@ -1,8 +1,7 @@
 name: release
 
-# Mirrors fusedio/fused-render's release.yml, macOS job only (no update
-# manifest or Windows/Linux builds). Same shape: prepare-release creates the
-# GitHub Release, the macOS job builds, signs, notarizes and staples the DMG on
+# Mirrors fusedio/fused-render's release.yml, macOS job only. Same shape:
+# prepare-release creates the GitHub Release, the macOS job builds, signs, notarizes and staples the DMG on
 # an ephemeral keychain, uploads it to the fused-render S3 bucket (served via
 # the same CloudFront distribution as the main app, under render-app-dmgs/)
 # and attaches it to the Release; bump-homebrew then points the

@@ -28,7 +28,6 @@ import tarfile
 import threading
 import time
 import urllib.request
-import zipfile
 
 from fused_render_app import paths
 
@@ -58,31 +57,21 @@ def clean_env(**overrides) -> dict:
     return env
 
 
-def _no_window() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0  # type: ignore[attr-defined]
-
-
 # ---------------------------------------------------------------------------
 # uv
 # ---------------------------------------------------------------------------
 
 def _uv_asset() -> str:
     machine = platform.machine().lower()
-    if sys.platform == "darwin":
-        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
-        return f"uv-{arch}-apple-darwin.tar.gz"
-    if sys.platform == "win32":
-        arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
-        return f"uv-{arch}-pc-windows-msvc.zip"
     arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
-    return f"uv-{arch}-unknown-linux-gnu.tar.gz"
+    return f"uv-{arch}-apple-darwin.tar.gz"
 
 
 def uv_bin(download: bool = False, log=None) -> str | None:
     override = os.environ.get("FUSED_RENDER_APP_UV")
     if override and os.path.isfile(override):
         return override
-    name = "uv.exe" if os.name == "nt" else "uv"
+    name = "uv"
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     candidates = (
         os.path.join(os.path.dirname(exe_dir), "Resources", "bin", name),  # macOS .app
@@ -103,7 +92,7 @@ def _uv_recent(path: str) -> bool:
     """Does `uv --version` report at least UV_MIN_VERSION?"""
     try:
         proc = subprocess.run([path, "--version"], capture_output=True, text=True,
-                              timeout=15, creationflags=_no_window())
+                              timeout=15)
         ver = proc.stdout.split()[1].split("+")[0]
         return tuple(int(x) for x in ver.split(".")[:3]) >= UV_MIN_VERSION
     except Exception:  # noqa: BLE001 - an unparseable uv is not one we rely on
@@ -140,20 +129,14 @@ def _download_uv(log) -> str:
     if actual != expected:
         raise RuntimeError(f"uv download failed verification (sha256 {actual} != {expected})")
     dest_dir = paths.bin_dir()
-    name = "uv.exe" if os.name == "nt" else "uv"
+    name = "uv"
     dest = os.path.join(dest_dir, name)
-    if asset.endswith(".zip"):
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            member = next(m for m in zf.namelist() if m.endswith(name))
-            with zf.open(member) as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
-    else:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-            member = next(m for m in tf.getmembers() if m.name.endswith("/" + name) or m.name == name)
-            src = tf.extractfile(member)
-            assert src is not None
-            with open(dest, "wb") as out:
-                shutil.copyfileobj(src, out)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        member = next(m for m in tf.getmembers() if m.name.endswith("/" + name) or m.name == name)
+        src = tf.extractfile(member)
+        assert src is not None
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(src, out)
     os.chmod(dest, 0o755)
     log("uv ready.")
     return dest
@@ -245,8 +228,6 @@ def venv_dir_for(app_dir: str) -> str:
 
 
 def venv_python(venv_dir: str) -> str:
-    if os.name == "nt":
-        return os.path.join(venv_dir, "Scripts", "python.exe")
     return os.path.join(venv_dir, "bin", "python")
 
 
@@ -352,8 +333,7 @@ class Install:
         env = clean_env(UV_PROJECT_ENVIRONMENT=venv, UV_NO_PROGRESS="1", PYTHONUNBUFFERED="1")
         proc = subprocess.Popen(cmd, cwd=project, env=env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding="utf-8", errors="replace",
-                                creationflags=_no_window())
+                                text=True, encoding="utf-8", errors="replace")
         assert proc.stdout is not None
         for line in proc.stdout:
             self.log(line)
@@ -430,7 +410,7 @@ def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEO
         proc = subprocess.run(
             [python, _CHILD], input=request, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout, env=clean_env(),
-            close_fds=False, creationflags=_no_window(),
+            close_fds=False,
         )
     except subprocess.TimeoutExpired:
         return _error("TimeoutError", f"execution exceeded {timeout:g}s and was killed")

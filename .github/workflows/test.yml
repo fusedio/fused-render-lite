@@ -34,12 +34,11 @@ jobs:
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
 
+  # The suite is platform-neutral (native bits are monkeypatched), so it runs
+  # on the cheap runner; macos-desktop below is the native check.
   test-python:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

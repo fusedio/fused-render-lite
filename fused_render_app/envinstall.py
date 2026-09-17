@@ -105,9 +105,8 @@ STAGE_PCT = {"spawn": 0, "python": 5, "create": 10, "install": 25, "done": 100}
 # error came from uv and named the real cause, but nothing in the flow could act
 # on it.
 #
-# 3.12 and not 3.13: all three installers already ship 3.12 (`python@3.12` in
-# build_dmg.sh, `uv python install 3.12` in build_linux_appimage.sh and
-# build_windows_installer.ps1), so pinning here needs no packaging change, and
+# 3.12 and not 3.13: the DMG already ships 3.12 (`python@3.12` in
+# build_dmg.sh), so pinning here needs no packaging change, and
 # both run paths — script venvs and the header-less app interpreter — end up on
 # one version instead of two.
 #
