@@ -34,9 +34,10 @@ jobs:
               - 'pyproject.toml'
               - '.github/workflows/test.yml'
 
-  # macOS only: the app is AppKit + WKWebView, so the suite runs where it ships.
+  # The suite is platform-neutral (native bits are monkeypatched), so it runs
+  # on the cheap runner; macos-desktop below is the native check.
   test-python:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
