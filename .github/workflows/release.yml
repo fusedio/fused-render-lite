@@ -219,6 +219,15 @@ jobs:
             exit 0
           fi
           VERSION="$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')"
+          # Never move latest.json BACKWARDS: rebuilding an older tag
+          # (workflow_dispatch --ref vX.Y.Z) must not point every install at
+          # that older version. Compare against the live manifest; a 404 (no
+          # manifest yet) or an unreadable one publishes.
+          LIVE="$(curl -fsSL "https://${CDN_DOMAIN}/${S3_PREFIX}/latest.json" 2>/dev/null || true)"
+          if ! python3 scripts/generate_update_manifest.py newer-than "$VERSION" "$LIVE"; then
+            echo "::notice::live manifest already names a newer version than $VERSION — leaving latest.json alone"
+            exit 0
+          fi
           python3 scripts/generate_update_manifest.py \
             "$VERSION" "$DMG_PATH" "https://${CDN_DOMAIN}/${S3_PREFIX}" dist/latest.json
           # no-cache: the updater polls this fixed name; a stale CDN copy

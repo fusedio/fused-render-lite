@@ -312,6 +312,68 @@ def test_swap_survives_a_detach_failure(manager, monkeypatch, tmp_path):
     assert "detach" in ran and not dmg.exists()
 
 
+def test_attach_failures_detach_what_got_mounted(manager, monkeypatch, tmp_path):
+    """`hdiutil attach` can succeed and still leave us without a mount point;
+    every such path detaches the image before raising (bugbot, PR #26)."""
+    import subprocess
+
+    dmg = str(tmp_path / "u.dmg")
+    open(dmg, "wb").write(b"x")
+    info = plistlib.dumps({"images": [{"image-path": dmg, "system-entities": [
+        {"dev-entry": "/dev/disk9"}, {"dev-entry": "/dev/disk9s1", "mount-point": "/Volumes/X"}]}]})
+    calls = []
+    attach_result = {}
+
+    def fake_run(argv, **kw):
+        calls.append(argv[:3])
+        if argv[1] == "attach":
+            if "raise" in attach_result:
+                raise attach_result["raise"]
+            return subprocess.CompletedProcess(argv, attach_result["rc"], stdout=attach_result["out"])
+        if argv[1] == "info":
+            return subprocess.CompletedProcess(argv, 0, stdout=info)
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(mac_update.subprocess, "run", fake_run)
+
+    def detached():
+        return [c for c in calls if c[1] == "detach"]
+
+    # Mounted with no volume.
+    attach_result.update(rc=0, out=plistlib.dumps({"system-entities": [{"dev-entry": "/dev/disk9"}]}))
+    with pytest.raises(RuntimeError, match="no volume"):
+        manager._attach(dmg)
+    assert detached() == [["/usr/bin/hdiutil", "detach", "/dev/disk9"]]
+    # Unparsable plist.
+    calls.clear(); attach_result.update(rc=0, out=b"garbage")
+    with pytest.raises(RuntimeError, match="mount table"):
+        manager._attach(dmg)
+    assert len(detached()) == 1
+    # Timeout.
+    calls.clear(); attach_result["raise"] = subprocess.TimeoutExpired(["hdiutil"], 120)
+    with pytest.raises(RuntimeError, match="could not open"):
+        manager._attach(dmg)
+    assert len(detached()) == 1
+    # Happy path: no detach.
+    calls.clear(); attach_result.clear()
+    attach_result.update(rc=0, out=plistlib.dumps({"system-entities": [{"mount-point": "/Volumes/X"}]}))
+    assert manager._attach(dmg) == "/Volumes/X" and detached() == []
+
+
+def test_manifest_newer_than_guard():
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "gen", pathlib.Path(__file__).resolve().parent.parent / "scripts" / "generate_update_manifest.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert gen.not_behind("0.8.14", "")                       # nothing live yet
+    assert gen.not_behind("0.8.14", "not json")
+    assert gen.not_behind("0.8.14", json.dumps({"version": "0.8.14"}))
+    assert gen.not_behind("0.8.14", json.dumps({"version": "0.8.13"}))
+    assert not gen.not_behind("0.8.13", json.dumps({"version": "0.8.14"}))  # a rebuilt old tag
+
+
 def test_verify_app_checks_version_and_bundle_id(manager, tmp_path):
     manager._verify_app(_bundle(tmp_path / "ok", version="0.8.14"), "0.8.14")
     with pytest.raises(RuntimeError, match="contains version 0.8.13"):

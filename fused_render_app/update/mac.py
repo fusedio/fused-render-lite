@@ -483,16 +483,55 @@ class UpdateManager:
             raise RuntimeError("not enough free disk space to download the update")
 
     def _attach(self, dmg: str) -> str:
-        result = subprocess.run(
-            ["/usr/bin/hdiutil", "attach", dmg, "-nobrowse", "-readonly",
-             "-plist", "-mountrandom", tempfile.gettempdir()],
-            capture_output=True, timeout=120)
-        if result.returncode != 0:
+        """Mount the DMG and return its mount point. Every failure path after
+        `hdiutil attach` may have done its work (a timeout, an unparsable
+        plist, a non-zero status with a mount already made, a mount with no
+        volume) detaches whatever got attached for this image before raising,
+        so `_install_dmg`'s cleanup never has to guess (bugbot, PR #26)."""
+        try:
+            result = subprocess.run(
+                ["/usr/bin/hdiutil", "attach", dmg, "-nobrowse", "-readonly",
+                 "-plist", "-mountrandom", tempfile.gettempdir()],
+                capture_output=True, timeout=120)
+        except subprocess.SubprocessError:
+            self._detach_image(dmg)
             raise RuntimeError("could not open the downloaded update image")
-        for entity in plistlib.loads(result.stdout).get("system-entities", []):
-            if entity.get("mount-point"):
-                return entity["mount-point"]
-        raise RuntimeError("update image mounted with no volume")
+        try:
+            if result.returncode != 0:
+                raise RuntimeError("could not open the downloaded update image")
+            for entity in plistlib.loads(result.stdout).get("system-entities", []):
+                if entity.get("mount-point"):
+                    return entity["mount-point"]
+            raise RuntimeError("update image mounted with no volume")
+        except (plistlib.InvalidFileException, ValueError, TypeError) as error:
+            raise RuntimeError("could not read the update image's mount table") from error
+        finally:
+            # Only reached without a mount point to hand back.
+            if sys.exc_info()[0] is not None:
+                self._detach_image(dmg)
+
+    def _detach_image(self, dmg: str) -> None:
+        """Best-effort: detach any attached image whose backing file is `dmg`
+        (`hdiutil info -plist` lists them by image-path), so a failed attach
+        leaves no stale volume behind and the DMG can be deleted."""
+        try:
+            info = subprocess.run(["/usr/bin/hdiutil", "info", "-plist"],
+                                  capture_output=True, timeout=60)
+            if info.returncode != 0:
+                return
+            target = os.path.realpath(dmg)
+            for image in plistlib.loads(info.stdout).get("images", []):
+                if os.path.realpath(str(image.get("image-path", ""))) != target:
+                    continue
+                for entity in image.get("system-entities", []):
+                    dev = entity.get("dev-entry")
+                    if dev:
+                        subprocess.run(["/usr/bin/hdiutil", "detach", dev, "-force", "-quiet"],
+                                       check=False, capture_output=True, timeout=60)
+                        break
+        except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException,
+                ValueError, TypeError):
+            logger.warning("could not detach stale update image %s", dmg, exc_info=True)
 
     def _find_app(self, mount: str) -> str:
         for name in sorted(os.listdir(mount)):

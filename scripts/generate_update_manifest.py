@@ -2,6 +2,12 @@
 
     python3 scripts/generate_update_manifest.py <version> <dmg> <base-url> <output>
     python3 scripts/generate_update_manifest.py keygen
+    python3 scripts/generate_update_manifest.py newer-than <version> <live-manifest-json>
+
+`newer-than` exits 0 when <version> is at least the version the live manifest
+names (or the live text is empty/unreadable — nothing published yet), 1 when
+the live manifest is newer: release CI uses it so rebuilding an old tag never
+moves latest.json backwards.
 
 Run from release CI (.github/workflows/release.yml) after the DMG is on S3.
 The ed25519 private key (base64 raw 32-byte seed) comes from the
@@ -31,12 +37,24 @@ from fused_render_app.update import common, ed25519  # noqa: E402
 _SCHEMA = 1
 
 
+def not_behind(version: str, live_text: str) -> bool:
+    """True unless `live_text` is a manifest naming a version newer than
+    `version`. Empty or unparsable live text means nothing to protect."""
+    try:
+        live = json.loads(live_text).get("version")
+        return not (isinstance(live, str) and common.is_newer(live, version))
+    except (ValueError, AttributeError):
+        return True
+
+
 def main() -> None:
     if sys.argv[1:] == ["keygen"]:
         seed = ed25519.generate_seed()
         print("FUSED_RENDER_UPDATE_SIGNING_KEY =", base64.b64encode(seed).decode())
         print("PUBLIC_KEY =", base64.b64encode(ed25519.public_key(seed)).decode())
         return
+    if len(sys.argv) == 4 and sys.argv[1] == "newer-than":
+        raise SystemExit(0 if not_behind(sys.argv[2], sys.argv[3]) else 1)
     if len(sys.argv) != 5:
         raise SystemExit(__doc__)
     version, dmg, base_url, output = sys.argv[1:5]
