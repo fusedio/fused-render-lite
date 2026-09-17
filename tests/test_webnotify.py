@@ -89,7 +89,7 @@ def test_dispatch_click_activates_then_calls_handler_on_main(monkeypatch):
 
 
 def test_dispatch_click_survives_activation_failure(monkeypatch):
-    # No AppKit (Linux CI): the click still reaches the handler.
+    # Activation raising (AppKit not importable): the click still reaches the handler.
     monkeypatch.setattr(webnotify, "_call_after", lambda fn, *a: fn(*a))
     monkeypatch.setattr(webnotify, "_activate_app", _raise_import_error)
     seen: list[str] = []

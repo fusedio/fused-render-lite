@@ -441,10 +441,7 @@ def test_dock_reveal(client, v2_fused, monkeypatch):
     spawned = []
     monkeypatch.setattr(server.subprocess, "Popen", lambda argv, **kw: spawned.append(argv))
     status, _, body = client.post("/api/dock/reveal", {"file": v2_fused})
-    if sys.platform == "darwin":
-        assert json.loads(body) == {"ok": True} and spawned == [["open", "-R", v2_fused]]
-    else:
-        assert json.loads(body) == {"ok": False} and spawned == []
+    assert json.loads(body) == {"ok": True} and spawned == [["open", "-R", v2_fused]]
 
 
 def test_dock_page_route(client):

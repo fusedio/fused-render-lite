@@ -201,7 +201,7 @@ keychain profile) additionally notarizes and staples.
 ### Release pipeline (GitHub Actions)
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
-macOS release job step for step (no Windows/Linux builds):
+macOS release job step for step:
 `prepare-release` creates the GitHub Release, then on `macos-26` an ephemeral
 keychain gets the Developer ID cert and an App Store Connect API key,
 `build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified, the
