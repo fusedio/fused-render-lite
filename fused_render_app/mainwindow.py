@@ -511,6 +511,10 @@ class _Window:
         self.app_file: str | None = app_file_of(url)
         # Stable identity for the saved frame (one bounded index read;
         # never raises). None for Home and for files that predate app ids.
+        # Deliberately fixed at creation: `app_file` follows in-window
+        # navigation (Home → app, title-bar Home) but the frame's owner
+        # does not — a window must never jump or resize because the page
+        # inside it navigated. The frame belongs to the window as opened.
         self.app_id: str | None = appfile.app_id_of(self.app_file) if self.app_file else None
         self.frame_name: str | None = None  # the autosave name this window owns
         self._popup = not load
