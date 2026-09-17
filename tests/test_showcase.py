@@ -72,8 +72,11 @@ def test_showcase_open(app_home):
 def test_showcase_api(client):
     status, _, body = client.get("/api/showcase")
     assert status == 200
-    rows = json.loads(body)["showcase"]
+    data = json.loads(body)
+    assert data["recent"] == []  # nothing opened yet
+    rows = data["showcase"]
     assert len(rows) == len(showcase.showcase_files())
+    assert all(row["preview"] == "/api/showcase/preview?id=" + row["id"] for row in rows if row["has_preview"])
     ex = rows[0]
     status, headers, body = client.get("/api/showcase/preview?id=" + ex["id"])
     assert status == 200 and headers["Content-Type"] == "image/png"
@@ -85,6 +88,39 @@ def test_showcase_api(client):
     status, _, body = client.post("/api/open", {"file": ex["file"]})
     assert status == 200, body
     assert json.loads(body)["view"].startswith("/render?path=")
+    # ...and an opened showcase app moves to Recent and leaves the Showcase tail
+    data = json.loads(client.get("/api/showcase")[2])
+    assert [r["file"] for r in data["recent"]] == [ex["file"]]
+    r = data["recent"][0]
+    assert r["title"] == ex["title"] and r["description"] == ex["description"]
+    assert r["showcase_id"] == ex["id"] and r["opened_at"]
+    assert r["preview"].startswith("/api/dock/preview?file=") if ex["has_preview"] else r["preview"] is None
+    assert [row["id"] for row in data["showcase"]] == [row["id"] for row in rows[1:]]
+    assert len(data["recent"]) + len(data["showcase"]) == len(rows)
+
+
+def test_home_recent_orders_newest_first_and_forgets_deleted(client, v2_fused, v2_fused_preview, tmp_path):
+    import shutil
+
+    from fused_render_app import dock_store
+
+    doomed = str(tmp_path / "doomed.fused")
+    shutil.copy(v2_fused, doomed)
+    for f in (v2_fused, doomed, v2_fused_preview):
+        assert client.post("/api/open", {"file": f})[0] == 200
+    home = showcase.home()
+    assert [r["file"] for r in home["recent"]] == [v2_fused_preview, doomed, v2_fused]
+    pictured = home["recent"][0]
+    assert pictured["showcase_id"] is None and pictured["description"] == ""
+    assert pictured["title"] == pictured["name"] == "pictured"
+    assert pictured["preview"].startswith("/api/dock/preview?file=") and "&v=" in pictured["preview"]
+    assert home["recent"][2]["preview"] is None
+    assert len(home["showcase"]) == len(showcase.showcase_files())  # none of these are shipped
+    # delete one: gone from Recent (and the dock) on the next read, no trace left
+    os.remove(doomed)
+    home = showcase.home()
+    assert [r["file"] for r in home["recent"]] == [v2_fused_preview, v2_fused]
+    assert doomed not in [a["file"] for a in dock_store.list_apps()]
 
 
 def test_placeholder_lists_showcase(client):

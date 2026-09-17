@@ -19,7 +19,7 @@ API (the six supported fused.* calls, plus what the shell needs)
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
   Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
-  GET  /api/dock                               {apps:[{file,name,pinned,running,exists,openedAt,
+  GET  /api/dock                               {apps:[{file,name,pinned,running,openedAt,
                                                  hasIcon,iconVersion,hasPreview,previewVersion}], tilesize}
   GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg (currentColor
                                                resolved for the theme, icon_color.py), else
@@ -27,7 +27,9 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/dock/preview?file=<abs>[&v=]       the app's preview.png (the hover bubble's
                                                picture; ``v`` = previewVersion, so it caches), or 404
   POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
-  GET  /api/showcase                           {showcase:[{id, file, title, description, has_preview, ...}]}
+  GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id}],
+                                                showcase:[{id, file, title, description, has_preview, preview, ...}]}
+                                               (home page: dock entries newest first, then the showcase apps not among them)
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
   fused.daemon (background_routes.py, copied from fused-render):
   GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
@@ -172,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/jobs":
                 return self._json({"jobs": jobs.list_jobs(mark_read=True)})
             if route == "/api/showcase":
-                return self._json({"showcase": showcase.list_showcase()})
+                return self._json(showcase.home())
             if route == "/api/showcase/preview":
                 return self._showcase_preview(q)
             if route == "/dock":
