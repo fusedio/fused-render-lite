@@ -178,3 +178,23 @@ def test_dot_fused_stays_local_without_an_app_id(v2_fused, app_home):
     assert os.path.isdir(dot) and not os.path.islink(dot)
     fd = str(app_home / "fused_data")
     assert not os.path.exists(fd) or not os.listdir(fd)
+
+
+def test_dot_fused_migrates_local_state_over_a_scaffold_only_shared_dir(tmp_path, app_home):
+    """Re-export opened FIRST (shared dir holds only the opener's scaffold),
+    then the old extract with real saved state: the state moves into the
+    shared dir instead of being deleted."""
+    appfile.open_app_file(_id_fused(tmp_path, "new.fused", b"new"))
+    shared = appfile.shared_dot_fused_dir(APP_ID)
+    assert os.path.isfile(os.path.join(shared, "meta.json"))
+
+    path = _id_fused(tmp_path, "old.fused", b"old")
+    dest = appfile.open_app_file(path)["dir"]
+    os.unlink(os.path.join(dest, ".fused"))  # pre-linking layout: a real .fused
+    os.makedirs(os.path.join(dest, ".fused", "data"))
+    with open(os.path.join(dest, ".fused", "data", "x.txt"), "w") as f:
+        f.write("kept")
+
+    appfile.open_app_file(path)
+    assert os.path.islink(os.path.join(dest, ".fused"))
+    assert open(os.path.join(shared, "data", "x.txt")).read() == "kept"

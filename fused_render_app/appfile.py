@@ -248,6 +248,22 @@ def shared_dot_fused_dir(app_id: str) -> str:
     return os.path.join(paths.fused_data_dir(), app_id)
 
 
+def _is_dot_fused_scaffold(dot: str) -> bool:
+    """Whether a ``.fused`` dir holds nothing an app saved: empty, or only
+    what `ensure_dot_fused` creates on open (``meta.json``, empty ``data``
+    and ``cache``)."""
+    for name in os.listdir(dot):
+        p = os.path.join(dot, name)
+        if os.path.islink(p):
+            return False
+        if name == "meta.json" and os.path.isfile(p):
+            continue
+        if name in ("data", "cache") and os.path.isdir(p) and not os.listdir(p):
+            continue
+        return False
+    return True
+
+
 def _link_dot_fused(app_dir: str, app_id: str) -> str:
     """Point ``<app>/.fused`` at the shared per-app-id dir and answer the
     path the state should be materialised under. Raises OSError.
@@ -258,8 +274,9 @@ def _link_dot_fused(app_dir: str, app_id: str) -> str:
 
     An extract that already holds a REAL ``.fused`` dir (made before this
     linking existed) is migrated: its contents move into the shared dir when
-    that is still empty, else the local dir is deleted (the shared state
-    wins), and the link goes in its place either way.
+    that holds no saved state yet (empty, or only the scaffold a first open
+    of another extract made), else the local dir is deleted (the shared
+    state wins), and the link goes in its place either way.
     """
     target = shared_dot_fused_dir(app_id)
     os.makedirs(target, exist_ok=True)
@@ -269,7 +286,12 @@ def _link_dot_fused(app_dir: str, app_id: str) -> str:
             return target
         os.unlink(dot)
     elif os.path.isdir(dot):
-        if not os.listdir(target):
+        if _is_dot_fused_scaffold(target):
+            # Nothing saved in the shared dir yet (it may hold only what a
+            # first open of ANOTHER extract scaffolded): the local state is
+            # the real one, move it in.
+            shutil.rmtree(target)
+            os.makedirs(target)
             for name in os.listdir(dot):
                 shutil.move(os.path.join(dot, name), os.path.join(target, name))
             os.rmdir(dot)
