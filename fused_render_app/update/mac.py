@@ -239,14 +239,7 @@ class UpdateManager:
             disk = self._disk_version()
             with self._lock:
                 if self._state == during:
-                    self._error = None
-                    if self._latest and disk is not None and not common.is_newer(
-                            self._latest["version"], disk):
-                        self._state = "installed"
-                    elif self._latest:
-                        self._state = "available"
-                    else:
-                        self._state = "idle"
+                    self._settle(self._latest, disk)
             return self.status()
         # The bundle on disk, not the running version, decides "already
         # installed": after a swap this process still runs the old code.
@@ -256,18 +249,34 @@ class UpdateManager:
             # Untouched if anything else moved the state while the fetch was
             # out (an install that began from "available").
             if self._state == during:
-                self._error = None
-                if newer and disk is not None and not common.is_newer(
-                        manifest["version"], disk):
-                    self._latest = manifest
-                    self._state = "installed"
-                elif newer:
-                    self._latest = manifest
-                    self._state = "available"
-                else:
-                    self._latest = None
-                    self._state = "idle"
+                self._settle(manifest if newer else None, disk)
         return self.status()
+
+    def _settle(self, latest: dict | None, disk: str | None) -> None:
+        """Set `_latest` and the resting state after a check, given what the
+        manifest offers (`latest`, None when nothing newer) and what is on
+        disk. Under the lock.
+
+        An install's "error" is HELD, not cleared (bugbot, PR #26): the auto
+        loop re-checks every five minutes, and a failed install's reason and
+        its Try again must survive those ticks — the user has not seen them
+        yet. Only two things end it: the bundle on disk is now the version we
+        failed on (someone installed it another way), or the manifest no
+        longer offers that version (a pulled release, or a newer one — the
+        retry would be a different install, so it starts clean)."""
+        previous = self._latest["version"] if self._latest else None
+        self._latest = latest
+        if self._state == "error" and latest is not None and latest["version"] == previous:
+            if disk is not None and not common.is_newer(latest["version"], disk):
+                self._state, self._error = "installed", None
+            return
+        self._error = None
+        if latest is not None and disk is not None and not common.is_newer(latest["version"], disk):
+            self._state = "installed"
+        elif latest is not None:
+            self._state = "available"
+        else:
+            self._state = "idle"
 
     def _disk_version(self) -> str | None:
         """CFBundleShortVersionString of the bundle on disk — what would

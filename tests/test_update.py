@@ -252,6 +252,33 @@ def test_install_runs_the_dmg_path_and_reports_errors(manager, monkeypatch):
     assert manager.status()["state"] == "available"
 
 
+def test_check_holds_an_install_error(manager, monkeypatch):
+    """The five-minute tick must not wipe a failed install's reason and Try
+    again (bugbot, PR #26) — whether the tick succeeds or fails itself."""
+    _point(monkeypatch, _manifest(version="0.8.14"))
+    manager.check(force=True)
+    manager._state, manager._error = "error", "no disk"
+    st = manager.check(force=True)
+    assert st["state"] == "error" and st["error"] == "no disk"
+
+    def boom(url, timeout):
+        raise OSError("offline")
+    monkeypatch.setattr(common, "urlopen", boom)
+    st = manager.check(force=True)
+    assert st["state"] == "error" and st["error"] == "no disk"
+    # A different version on offer is a different install: starts clean.
+    _point(monkeypatch, _manifest(version="0.8.15"))
+    st = manager.check(force=True)
+    assert st["state"] == "available" and st["error"] is None and st["latest_version"] == "0.8.15"
+    # ...and so does the version landing on disk by other means.
+    manager._state, manager._error = "error", "no disk"
+    with open(os.path.join(manager._bundle, "Contents", "Info.plist"), "wb") as f:
+        plistlib.dump({"CFBundleShortVersionString": "0.8.15",
+                       "CFBundleIdentifier": mac_update.BUNDLE_ID}, f)
+    st = manager.check(force=True)
+    assert st["state"] == "installed" and st["error"] is None
+
+
 def test_swap_survives_a_detach_failure(manager, monkeypatch, tmp_path):
     """Cleanup after the swap is best-effort: a hung `hdiutil detach` must not
     report a finished install as an error (bugbot, PR #26)."""
