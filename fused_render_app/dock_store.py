@@ -238,14 +238,17 @@ def _pruned() -> list[dict]:
 
     The stats happen OUTSIDE the lock: a .fused on a hung network mount must
     stall this poll, not every ``record_open`` queued behind it. The store is
-    re-read before the rewrite so an entry added meanwhile is not lost."""
+    re-read before the rewrite, and only an entry still EXACTLY as snapshotted
+    is dropped: a file re-opened (new ``openedAt``), re-pinned or re-added
+    while the stats ran has a changed entry and survives — the next read
+    re-checks the disk."""
     with _lock:
         apps = _load()
-    gone = {a["file"] for a in apps if not os.path.isfile(a["file"])}
+    gone = [a for a in apps if not os.path.isfile(a["file"])]
     if not gone:
         return apps
     with _lock:
-        kept = [a for a in _load() if a["file"] not in gone]
+        kept = [a for a in _load() if a not in gone]
         try:
             _save(kept)
         except OSError:

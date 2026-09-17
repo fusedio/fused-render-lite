@@ -186,6 +186,32 @@ def test_deleted_file_is_dropped_from_the_store_on_read(v2_fused, tmp_path, app_
     assert files_of(dock_store.list_apps()) == [v2_fused]
 
 
+def test_prune_keeps_an_entry_changed_while_it_stat_ed(v2_fused, tmp_path, monkeypatch):
+    """The stats run unlocked; a file re-opened (or re-pinned) in that window
+    has a changed entry and must survive the rewrite — otherwise a slow mount
+    could wipe a fresh open, pin included."""
+    back = touch(tmp_path / "back.fused")
+    dock_store.record_open(v2_fused, "demo")
+    dock_store.record_open(back, "back")
+    os.remove(back)
+    real_isfile = os.path.isfile
+
+    def isfile(path):
+        # between the stat and the rewrite the file returns and is re-opened + pinned
+        if path == back and real_isfile(path) is False:
+            monkeypatch.setattr(os.path, "isfile", real_isfile)
+            touch(back)
+            dock_store.record_open(back, "back again")
+            dock_store.set_pinned(back, True)
+            return False  # what the stat saw
+        return real_isfile(path)
+
+    monkeypatch.setattr(os.path, "isfile", isfile)
+    apps = dock_store.list_apps()
+    assert files_of(apps) == [back, v2_fused]
+    assert apps[0]["pinned"] is True and apps[0]["name"] == "back again"
+
+
 def test_prune_survives_an_unwritable_store(v2_fused, tmp_path, monkeypatch, caplog):
     gone = touch(tmp_path / "gone.fused")
     dock_store.record_open(v2_fused, "demo")
