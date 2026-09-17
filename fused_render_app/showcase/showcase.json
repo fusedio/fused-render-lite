@@ -1,4 +1,8 @@
 {
+  "00_OpenMail.fused": {
+    "title": "OpenMail",
+    "description": "A local-first multi-account Gmail client: thread list, reading pane, compose, labels and full Gmail search, with fused.ai catch-up briefings, thread summaries and an approval-gated triage board."
+  },
   "01_OpenBot.fused": {
     "title": "OpenBot",
     "description": "Autonomous browsing bots on your own machine: each gets a headless Chrome, a chat thread for tasks, scheduled routines and reusable skills. Runs as a resident worker."
