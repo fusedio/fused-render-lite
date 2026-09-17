@@ -3,7 +3,7 @@
 Pages
   GET  /                    placeholder: drop a .fused here / open one
   GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
-  GET  /open?_url=<http(s)> asks to confirm, downloads (POST /api/fetch), then navigates to _file
+  GET  /open?_url=<http(s)> downloads (POST /api/fetch), then navigates to _file
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
 
 API (the six supported fused.* calls, plus what the shell needs)
