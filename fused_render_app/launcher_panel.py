@@ -40,6 +40,12 @@ import AppKit
 import objc
 from AppKit import (
     NSApp,
+    NSViewHeightSizable,
+    NSViewWidthSizable,
+    NSVisualEffectBlendingModeBehindWindow,
+    NSVisualEffectMaterialHUDWindow,
+    NSVisualEffectStateActive,
+    NSVisualEffectView,
     NSBackingStoreBuffered,
     NSColor,
     NSEvent,
@@ -98,6 +104,8 @@ class _LauncherScriptHandler(NSObject):
             self._c.resize_to(data.get("height"))
         elif kind == "open":
             self._c.open_file(str(data.get("file") or ""))
+        elif kind == "home":
+            self._c.open_home()
         elif kind == "close":
             self._c.close()
 
@@ -162,9 +170,10 @@ class LauncherController:
     (focus-or-open in a window); the panel closes first.
     """
 
-    def __init__(self, port: int, open_app) -> None:
+    def __init__(self, port: int, open_app, show_home) -> None:
         self._port = port
         self._open_app = open_app
+        self._show_home = show_home
         self._handler = _LauncherScriptHandler.alloc().initWithController_(self)
         self._web_delegate = _LauncherWebDelegate.alloc().initWithController_(self)
         self._panel_delegate = _LauncherPanelDelegate.alloc().initWithController_(self)
@@ -222,6 +231,11 @@ class LauncherController:
         if file:
             self._open_app(file)
 
+    def open_home(self) -> None:
+        """The last row / <modifier>+0: Render App's own home window."""
+        self.close()
+        self._show_home()
+
     # ---- shortcut ----------------------------------------------------------------------
 
     def bind_hotkey(self, spec: str | None = None) -> bool:
@@ -272,9 +286,14 @@ class LauncherController:
             self._pinned_bound = True
             return True
         ok = True
-        for n, spec in enumerate(launcher.pinned_specs(modifier), start=1):
+        binds = [(spec, lambda n=n: self._open_pinned(n))
+                 for n, spec in enumerate(launcher.pinned_specs(modifier), start=1)]
+        home = launcher.home_spec(modifier)
+        if home:
+            binds.append((home, self._show_home))
+        for spec, callback in binds:
             try:
-                self._pinned.bind(spec, lambda n=n: self._open_pinned(n))
+                self._pinned.bind(spec, callback)
             except Exception:  # noqa: BLE001
                 logger.exception("pinned shortcut %s could not be bound", spec)
                 ok = False
@@ -418,7 +437,27 @@ def _make_backdrop(w: float, h: float):
     near-opaque surface in the Raycast style — the pre-26 vibrancy
     materials read as a blurry grey box under a search field."""
     if getattr(AppKit, "NSGlassEffectView", None) is not None:
-        return _make_glass(w, h)
+        # Frostier than the Dock's tray: a vibrancy material behind the glass
+        # (the frost) and a heavier, appearance-following tint on the glass
+        # itself, so text stays legible over busy windows.
+        root = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+        root.setWantsLayer_(True)
+        root.layer().setCornerRadius_(TRAY_RADIUS)
+        root.layer().setMasksToBounds_(True)
+        if root.layer().respondsToSelector_(b"setCornerCurve:"):
+            root.layer().setCornerCurve_("continuous")
+        frost = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+        frost.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        frost.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        frost.setState_(NSVisualEffectStateActive)
+        frost.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        glass = _make_glass(w, h)
+        if glass.respondsToSelector_(b"setTintColor:"):
+            glass.setTintColor_(NSColor.windowBackgroundColor().colorWithAlphaComponent_(0.55))
+        glass.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        root.addSubview_(frost)
+        root.addSubview_(glass)
+        return root
     view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
     view.setWantsLayer_(True)
     layer = view.layer()

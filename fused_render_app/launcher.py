@@ -137,6 +137,16 @@ def pinned_specs(modifier: str) -> list[str]:
     return [f"{modifier}+{n}" for n in range(1, 10)] if modifier else []
 
 
+def home_spec(modifier: str) -> str | None:
+    """``<modifier>+0`` opens Render App itself (its home window)."""
+    return f"{modifier}+0" if modifier else None
+
+
+HOME_ROW = {"home": True, "file": "", "name": "Render App", "title": "Render App",
+            "description": "Open Render App", "pinned": False, "running": False,
+            "showcase": False, "hasIcon": False, "iconVersion": None, "icon": None}
+
+
 def nth_pinned(n: int, running=frozenset()) -> str | None:
     """The .fused of the ``n``-th pinned Dock app (1-based, Dock order), or None."""
     pinned = [a for a in dock_store.list_apps(running) if a["pinned"]]
@@ -259,4 +269,7 @@ def results(query: str, running=frozenset()) -> list[dict]:
             icon = ("/api/dock/icon?file=" + urllib.parse.quote(r["file"], safe="/")
                     + "&v=" + urllib.parse.quote(str(r["iconVersion"] or "")))
         out.append({**r, "icon": icon})
+    # Always last, never counted against the limit, never filtered by the
+    # query: the app itself, on <modifier>+0.
+    out.append(dict(HOME_ROW))
     return out

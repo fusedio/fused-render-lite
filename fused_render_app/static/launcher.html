@@ -111,7 +111,7 @@
   .hint { flex: none; font-size: 13px; color: var(--fg-faint); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
   .row.sel .hint { color: var(--fg-dim); }
 
-  #empty { padding: 20px 12px 16px; text-align: center; color: var(--fg-dim); font-size: 13px; }
+  #empty { padding: 18px 12px 8px; text-align: center; color: var(--fg-dim); font-size: 13px; }
   #empty:empty { display: none; }
   #empty .tip { display: block; margin-top: 6px; color: var(--fg-faint); font-size: 12.5px; }
 
@@ -144,8 +144,8 @@
       </svg>
     </div>
   </div>
-  <ul id="list" role="listbox"></ul>
   <div id="empty"></div>
+  <ul id="list" role="listbox"></ul>
   <div id="foot">
     <div class="keys"><span><kbd>↑↓</kbd>select</span><span><kbd>↩</kbd>open</span></div>
     <button id="shortcut" type="button" title="Click, then press the new shortcut">⌥Space</button>
@@ -223,7 +223,13 @@
     const f = app.file || "";
     return f.replace(/^\/Users\/[^/]+/, "~");
   }
-  function rowHint(i) { return i < 9 ? state.rowSym + (i + 1) : ""; }
+  function rowHint(i) {
+    if (state.apps[i]?.home) return state.rowSym + "0";
+    return i < 9 ? state.rowSym + (i + 1) : "";
+  }
+  const HOME_SVG = '<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#1b1d21"/>'
+    + '<path d="M32 10 C34 24 40 30 54 32 C40 34 34 40 32 54 C30 40 24 34 10 32 C24 30 30 24 32 10 Z" fill="#ebfd66"/>'
+    + '<circle cx="32" cy="32" r="5" fill="#1b1d21"/></svg>';
   function rowModsHeld(e) {
     const held = { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, cmd: e.metaKey };
     return Object.keys(held).every(m => held[m] === state.rowMods.includes(m));
@@ -232,7 +238,7 @@
     list.textContent = "";
     empty.textContent = "";
     const apps = state.apps;
-    if (!apps.length) {
+    if (!apps.some(a => !a.home)) {
       const text = q.value.trim();
       empty.textContent = text ? `No app matches “${text}”` : "No pinned apps";
       if (!text) {
@@ -249,7 +255,11 @@
       li.dataset.i = i;
       const icon = document.createElement("div");
       icon.className = "icon";
-      if (app.icon) {
+      if (app.home) {
+        icon.innerHTML = HOME_SVG;
+        icon.firstChild.style.width = icon.firstChild.style.height = "100%";
+        icon.firstChild.style.borderRadius = "8px";
+      } else if (app.icon) {
         const img = document.createElement("img");
         img.alt = "";
         img.src = app.icon;
@@ -293,9 +303,14 @@
   }
 
   // ---------- actions ----------
+  function openHome() {
+    if (bridge()) bridge().postMessage({ type: "home" });
+    else post("/api/dock/home").then(r => { if (r && !r.ok) location.href = r.view || "/"; }).catch(console.warn);
+  }
   function open(i) {
     const app = state.apps[i];
     if (!app) return;
+    if (app.home) { openHome(); return; }
     if (bridge()) bridge().postMessage({ type: "open", file: app.file });
     else post("/api/dock/open", { file: app.file }).then(r => { if (r && r.view) location.href = r.view; }).catch(console.warn);
   }
@@ -343,6 +358,7 @@
     else if (e.key === "ArrowUp") { e.preventDefault(); if (n) select(Math.max(state.sel - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); open(state.sel); }
     else if (e.key === "Escape") { e.preventDefault(); if (q.value) { q.value = ""; query(""); } else close(); }
+    else if (rowModsHeld(e) && e.code === "Digit0") { e.preventDefault(); openHome(); }
     else if (rowModsHeld(e) && /^Digit[1-9]$/.test(e.code)) {
       // ⌥1 arrives as e.key "¡": match the physical key, not the character.
       e.preventDefault();
