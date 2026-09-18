@@ -469,7 +469,13 @@ def main() -> None:
                     NSApp.activateIgnoringOtherApps_(True)
                     manager.focus_or_open(fs_path)
 
-                state["launcher"] = LauncherController(port, open_from_launcher)
+                def home_from_launcher() -> None:
+                    from AppKit import NSApp
+
+                    NSApp.activateIgnoringOtherApps_(True)
+                    manager.show_home()
+
+                state["launcher"] = LauncherController(port, open_from_launcher, home_from_launcher)
                 _install_launcher_hooks(state)
                 if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):
                     # Dev only: SIGUSR2 toggles the launcher (SIGUSR1 is the

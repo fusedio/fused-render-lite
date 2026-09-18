@@ -145,12 +145,13 @@ def test_launcher_page_and_search_route(client, tmp_path):
     dock_store.record_open(a, "Zeta")
     dock_store.set_pinned(a, True)
     body = json.loads(client.get("/api/launcher")[2])
-    assert body["query"] == "" and [x["file"] for x in body["apps"]] == [a]
+    assert body["query"] == "" and [x["file"] for x in body["apps"]] == [a, ""]
     assert body["apps"][0]["icon"] is None
+    assert body["apps"][-1]["home"] is True and body["apps"][-1]["name"] == "Render App"
     body = json.loads(client.get("/api/launcher?q=" + urllib.parse.quote("zet"))[2])
-    assert [x["name"] for x in body["apps"]] == ["Zeta"]
+    assert [x["name"] for x in body["apps"]] == ["Zeta", "Render App"]
     body = json.loads(client.get("/api/launcher?q=qqqq")[2])
-    assert body["apps"] == []
+    assert [x.get("home") for x in body["apps"]] == [True]  # only the app itself
 
 
 def test_launcher_search_route_icon_url(client, v2_fused_icon):
@@ -191,6 +192,8 @@ def test_launcher_settings_route(client, monkeypatch):
 
 
 def test_pinned_specs_and_nth_pinned(tmp_path):
+    assert launcher.home_spec("alt") == "alt+0" and launcher.home_spec("") is None
+    assert hotkey.parse_spec(launcher.home_spec("alt"))[0] == 0x1D
     assert launcher.pinned_specs("") == []
     assert launcher.pinned_specs("alt") == [f"alt+{n}" for n in range(1, 10)]
     assert all(hotkey.parse_spec(s) for s in launcher.pinned_specs("ctrl+alt"))
