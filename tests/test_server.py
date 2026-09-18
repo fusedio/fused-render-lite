@@ -188,6 +188,10 @@ def test_runtime_no_longer_throws_for_030_members():
     for name in ("uploadFile", "mkdir", "trackJob", "watchJob", "autoReload"):
         assert f'unsupportedFn("fused.{name}")' not in js
     assert 'unsupportedNamespace("fused.daemon")' not in js  # 0.7.0: fused.daemon supported
+    assert 'unsupportedNamespace("fused.capture")' not in js  # fused.capture supported (macOS native)
+    assert '"/api/capture/start"' in js and '"/api/capture/screenshot"' in js
+    for verb in ("screen", "audio", "screenshot", "sources", "list", "attach"):
+        assert f"{verb}: capture{verb.capitalize()}" in js
     assert 'throw unsupported("fused.autoReload(true)")' in js
 
 

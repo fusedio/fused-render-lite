@@ -47,6 +47,13 @@ API (the six supported fused.* calls, plus what the shell needs)
   ANY  /api/engines/<id>/proxy/<path>          forwarded to that daemon (POST guarded)
   /api/ai, /api/ai/*        fused-render's own AI routers (server/ai_relay.py, server/ai_routes.py),
                             copied verbatim and mounted through _web.APIRouter
+  fused.capture (routes/capture.py, capture/ — native macOS screen/mic/still capture):
+  GET  /api/capture                            {sources, active}
+  POST /api/capture/start   {mode, ...}        -> {id, path, ...}   X-Fused-Page names the page
+  POST /api/capture/<id>/stop | /cancel        -> the recording (cancel deletes the file); 404 unknown id
+  POST /api/capture/screenshot {path?, ...}    -> {path, ...}
+  POST /api/capture/shot-region {rect, dpr}    raw image/png bytes (Cache-Control: no-store)
+                            errors: 400 bad request, 409 unsupported on this machine, {error} JSON body
 
 Binds 127.0.0.1 only. Mutating/executing POSTs require ``X-Fused: 1``, which
 forces a CORS preflight a foreign origin cannot pass — same guard as
@@ -71,10 +78,14 @@ from fused_render_app import __version__, appfile, background_apps, background_r
 from fused_render_app.update import mac as mac_update
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
+from fused_render_app.routes import capture as capture_routes
 
 AI_ROUTER = APIRouter()
 AI_ROUTER.include_router(ai_relay.router)
 AI_ROUTER.include_router(ai_routes.router)
+# Not AI, but the same FastAPI-shaped shim: `_dispatch` walks this one router
+# for every path the explicit `do_GET`/`do_POST` tables do not name.
+AI_ROUTER.include_router(capture_routes.router)
 
 logger = logging.getLogger(__name__)
 

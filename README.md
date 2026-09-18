@@ -65,13 +65,13 @@ The page runtime exposes these `fused.*` members:
 | `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
 | `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws (no live reload) |
 | `fused.daemon.status / start / stop / restart / setAutostart / run / call / watch` | the app's own long-running daemon, fused-render's implementation copied in (see Background daemons below) |
+| `fused.capture.screen / audio / screenshot / sources / list / attach` | native macOS screen / microphone / still capture, fused-render's contract, ScreenCaptureKit + AVFoundation (see Capture below) |
 
-Every other member the full fused-render runtime has (`capture`,
-`fileIndex`, `snapshot`)
-is **not supported**. There are no stubs: calling one, or reading any
-property of `fused.capture` / `fused.fileIndex`,
-throws `<name> is not supported on Render App` and logs it to the
-console. An app that needs those belongs in full fused-render.
+Every other member the full fused-render runtime has (`fileIndex`,
+`snapshot`) is **not supported**. There are no stubs: calling one, or reading
+any property of `fused.fileIndex`, throws `<name> is not supported on Render
+App` and logs it to the console. An app that needs those belongs in full
+fused-render.
 
 ## Background daemons (`fused.daemon`)
 
@@ -94,6 +94,45 @@ may be retried after a heal-restart). `setAutostart(true)` brings it back at
 every launch; `start()` alone never does. State lives under
 `~/.fused-render-app/engines/<engine_id>/` (`daemon.log`) and
 `~/.fused-render-app/background_apps.json` (autostart list).
+
+## Capture (`fused.capture`)
+
+Same contract as fused-render, served natively: ScreenCaptureKit records the
+screen, AVFoundation the microphone (`capture/`, routes in
+`routes/capture.py`). Six verbs:
+
+```js
+const rec = await fused.capture.screen({ audio: "mic", maxSeconds: 600 });
+//  -> {id, jobId, path, url, state, stop(), cancel()}, resolved once recording
+await rec.stop();                      // {path, url, mime, seconds, bytes}; keeps the file
+await fused.capture.audio({ path: "notes.m4a" });   // mic only, same handle
+await fused.capture.screenshot({ path: "shot.png" }); // {path, url, width, height, bytes, mime}
+await fused.capture.sources();         // {video, audio, systemAudio, screenshot, displays, microphones}; never prompts
+await fused.capture.list();            // live recordings on this machine
+await fused.capture.attach(id);        // handle for one of them (a reload finds its recording here)
+```
+
+A recording is a job row (`sys:capture:<id>`, origin Capture, visible to
+`fused.watchJob(rec.jobId)`): ✕ on the row = `cancel()` = stop and delete;
+the `maxSeconds` cap (default 30 min) = `stop()` = keep. Files land in
+`~/.fused-render-app/recordings/` as `.mov` / `.m4a` / `.png|.jpg` unless the
+page names a `path`; a relative `path` resolves beside the page, like
+`readFile`. The file's extension picks png vs jpeg. A recording survives the
+page that started it. Rejections carry `.type`: `unavailable` (this machine
+cannot), `bad_request` (the arguments, or a preview trying to record),
+`capture_error` (the file failed to write on stop).
+
+Render App-specific: macOS only, 13+ (13–14 write the movie through an
+`AVAssetWriter` mux, 15+ through `SCRecordingOutput`); any other platform
+gets `unavailable`. fused-render's browser fallback (MediaRecorder streamed
+over a WebSocket) is not ported. A preview (`_preview=1`) refuses
+`screen` / `audio` / `screenshot` with `bad_request`; `sources` / `list` /
+`attach` still work there, so draw the record button off `sources()` and
+start a capture only from a click. Permissions: the Screen Recording grant is
+TCC, prompted on the first real capture and managed in System Settings (no
+plist key or entitlement); the microphone uses the app's existing
+`NSMicrophoneUsageDescription` + `audio-input` entitlement. None of this goes
+through the web view's `getUserMedia`.
 
 ## AI
 
@@ -249,6 +288,8 @@ fused_render_app/
   mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
   window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts (tested)
   _child.py       worker: import the .py, call main(**params), print JSON
+  capture/        fused.capture: ScreenCaptureKit / AVFoundation recorder (_darwin, _darwin_mux, _mixdown)
+  routes/         Handler route groups: ai_routes, ai_relay, ai_metrics, capture
   static/         runtime.js, placeholder (index.html), open page (open.html)
   showcase.py     lists showcase/*.fused for the placeholder; serves their preview.png
   showcase/       showcase .fused apps + showcase.json (title, description)

@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.10.0 | TBD (release build) | — | — | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0 |
 | 0.9.1 | 43.02 MB (43,021,381 B) | +0.29 MB | 99 MB | per-app window frame memory (window_policy + mainwindow); no packaging change |
 | 0.9.0 | 42.74 MB (42,735,197 B) | +0.18 MB | 98 MB | OpenMail showcase demo (.fused ~166 KB) bundled in the wheel; no packaging change |
 | 0.8.16 | 42.55 MB (42,553,189 B) | +0.00 MB | 98 MB | .fused state shared across every extract of one app via symlink to ~/.fused-render-app/fused_data/<app_id> (PR #32); no packaging change |
@@ -66,6 +67,42 @@ only in the `[app]` extra); no bundled data packages (each app's
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
+
+## 0.10.0
+
+Minor: `fused.capture` supported — fused-render's native macOS capture
+copied in (`capture/__init__.py`, `_darwin.py`, `_darwin_mux.py`,
+`_mixdown.py`, runtime.js block), packaging change: the `[app]` extra gains
+`pyobjc-framework-ScreenCaptureKit` + `pyobjc-framework-AVFoundation` (Quartz,
+CoreMedia, CoreAudio as transitives) and the py2app packages list grows to
+match. Verified end to end: screen `.mov`, mic `.m4a`, screenshot `.png`.
+
+Render App-specific: macOS only — any other platform answers `unavailable`
+(409); the browser MediaRecorder / WebSocket streaming transport fused-render
+carries for Windows and Linux is dropped, so `sources()` never reports a
+`client` recorder. Routes live on the stdlib `Handler` (`routes/capture.py`).
+A preview (`_preview=1`) refuses `screen` / `audio` / `screenshot` with
+`bad_request`; `sources` / `list` / `attach` are allowed there. A recording
+is a job row `sys:capture:<id>` (origin Capture, cancellable): ✕ = stop +
+delete, the `maxSeconds` cap (default 30 min) = stop + keep. Files land in
+`~/.fused-render-app/recordings/` unless the page names a `path` (relative
+resolves beside the page). Permissions: Screen Recording is a TCC grant in
+System Settings (no plist key or entitlement); the mic reuses the existing
+`NSMicrophoneUsageDescription` + `audio-input` entitlement. A `shot-region`
+route is present for future shell use, no page verb yet.
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.capture.screen(opts)` | ✅ new | `{display, rect, audio: false\|"mic"\|"system"\|"both", device, cursor, path, maxSeconds, title}` → handle `{id, jobId, path, url, state, stop(), cancel()}`; `.mov` |
+| `fused.capture.audio(opts)` | ✅ new | `{source, path, maxSeconds, title}` → same handle; `.m4a`; a `device` is refused |
+| `fused.capture.screenshot(opts)` | ✅ new | `{display, rect, cursor, path}` → `{path, url, width, height, bytes, mime}`; extension picks png / jpeg; no job row |
+| `fused.capture.sources()` | ✅ new | `{video, audio, systemAudio, screenshot}` each `{available, granted, reason}` + `displays`, `microphones`; never prompts |
+| `fused.capture.list()` | ✅ new | live recordings on this machine, any page's |
+| `fused.capture.attach(id)` | ✅ new | handle for a live recording (reload finds its own) |
+
+Server routes added: `GET /api/capture`, `POST /api/capture/start`,
+`POST /api/capture/{id}/stop`, `POST /api/capture/{id}/cancel`,
+`POST /api/capture/screenshot`, `POST /api/capture/shot-region`.
 
 ## 0.9.1
 

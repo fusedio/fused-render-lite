@@ -88,7 +88,15 @@ OPTIONS = {
     # extension, half `_metadata.py`, and a traced import can leave the
     # metadata behind — which surfaces as delegate blocks arriving without a
     # signature inside the built app only.
-    "packages": ["fused_render_app", "rumps", "WebKit"] + STDLIB_PACKAGES,
+    # Native capture (fused.capture): fused_render_app/capture/_darwin.py
+    # imports these directly. Quartz carries the non-prompting permission probe
+    # (CGPreflightScreenCaptureAccess) and the still's ImageIO writer;
+    # CoreMedia/CoreAudio arrive as their dependencies and are named so a
+    # dropped transitive is a build error rather than an ImportError on a
+    # user's first recording.
+    "packages": ["fused_render_app", "rumps", "WebKit",
+                 "ScreenCaptureKit", "AVFoundation", "Quartz", "CoreMedia", "CoreAudio"]
+                + STDLIB_PACKAGES,
     "includes": STDLIB_INCLUDES,
     "resources": [os.path.join(REPO_ROOT, "fused_render_app", "static")],
     # Third-party only: the stdlib is shipped whole (STDLIB_EXCLUDED is the
@@ -142,8 +150,10 @@ OPTIONS = {
         "NSDownloadsFolderUsageDescription": "Render App opens .fused apps from your Downloads folder.",
         # Pages run inside the app's own WKWebView (mainwindow.py), so a
         # .fused app's getUserMedia is THIS process asking for the camera or
-        # microphone. Without the usage string the OS kills the app instead
-        # of prompting.
+        # microphone. fused.capture's audio recording (capture/_darwin.py) is
+        # this process opening the mic natively too. Without the usage string
+        # the OS kills the app instead of prompting. (Screen recording has no
+        # plist key or entitlement: the OS prompts on first ScreenCaptureKit use.)
         "NSCameraUsageDescription": "Render App uses the camera when a .fused app you opened asks for it.",
         "NSMicrophoneUsageDescription": "Render App uses the microphone when a .fused app you opened asks for it.",
         # Same for navigator.geolocation: mainwindow.py grants our own pages,
