@@ -132,3 +132,20 @@ def test_download_destination_sanitises_the_name():
     assert wp.download_destination("/dl", "", exists=never) == "/dl/download"
     assert wp.download_destination("/dl", "..", exists=never) == "/dl/download"
     assert wp.download_destination("/dl", ".bashrc", exists=lambda p: p == "/dl/.bashrc") == "/dl/.bashrc 2"
+
+
+def test_frame_autosave_name():
+    # Home keeps the historical shared name so a saved Home frame survives
+    # the upgrade; each app gets its own stable name.
+    assert wp.frame_autosave_name(None) == "RenderAppWindow"
+    assert wp.frame_autosave_name("") == "RenderAppWindow"
+    # With an app id the file's location does not matter: same app, same frame.
+    a = wp.frame_autosave_name("/Users/me/a.fused", "my-app-82de2580")
+    assert a == wp.frame_autosave_name("/Downloads/a (2).fused", "my-app-82de2580")
+    assert a != wp.frame_autosave_name("/Users/me/a.fused", "my-app-00000000")
+    assert a != "RenderAppWindow" and a.startswith("RenderAppWindow")
+    # No id (a file that predates them): keyed on the normalised path.
+    p1 = wp.frame_autosave_name("/Users/me/a.fused")
+    assert p1 == wp.frame_autosave_name("/Users/me/./a.fused")
+    assert p1 != wp.frame_autosave_name("/Users/me/b.fused")
+    assert p1 != a

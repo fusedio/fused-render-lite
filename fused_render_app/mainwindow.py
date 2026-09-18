@@ -95,7 +95,7 @@ from WebKit import (
     WKWebViewConfiguration,
 )
 
-from fused_render_app import __version__, paths, webnotify, window_policy
+from fused_render_app import __version__, appfile, paths, webnotify, window_policy
 from fused_render_app.cli import open_url
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,6 @@ logger = logging.getLogger(__name__)
 APP_NAME = "Render App"
 DEFAULT_SIZE = (1200, 800)
 MIN_SIZE = (560, 360)
-FRAME_AUTOSAVE_NAME = "RenderAppWindow"
 # Rides on WebKit's own UA so a page can tell "inside the app" from "a browser".
 USER_AGENT_MARKER = f"RenderApp/{__version__}"
 
@@ -510,6 +509,15 @@ class _Window:
                  load: bool = True):
         self.manager = manager
         self.app_file: str | None = app_file_of(url)
+        # Stable identity for the saved frame (one bounded index read;
+        # never raises). None for Home and for files that predate app ids.
+        # Deliberately fixed at creation: `app_file` follows in-window
+        # navigation (Home → app, title-bar Home) but the frame's owner
+        # does not — a window must never jump or resize because the page
+        # inside it navigated. The frame belongs to the window as opened.
+        self.app_id: str | None = appfile.app_id_of(self.app_file) if self.app_file else None
+        self.frame_name: str | None = None  # the autosave name this window owns
+        self._popup = not load
         style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                  | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
         w, h = DEFAULT_SIZE
@@ -586,18 +594,57 @@ class _Window:
         self.ns.addTitlebarAccessoryViewController_(vc)
 
     def _place(self) -> None:
-        # The first window restores where the user last left one; each
-        # further window cascades from the front window.
-        front = self.manager.front()
-        if front is None:
-            if not self.ns.setFrameUsingName_(FRAME_AUTOSAVE_NAME):
-                self.ns.center()
+        """Size and position the new window.
+
+        Every app (and Home) has its own saved frame — the size and place
+        the user last left a window of it — so reopening an app puts it
+        back exactly there. A second window of the same app cascades from
+        the one already open instead of stacking on it, and only the first
+        owns the saved frame (AppKit gives an autosave name to one window
+        at a time). Nothing saved yet: centre if it is the only window,
+        else cascade from the front one. Popups (`window.open`) cascade and
+        are never saved — they would otherwise overwrite Home's frame.
+        """
+        name = (None if self._popup
+                else window_policy.frame_autosave_name(self.app_file, self.app_id))
+        owner = self.manager.frame_owner(name) if name else None
+        if owner is not None:
+            self._cascade_from(owner)
+            return
+        if name and self.ns.setFrameUsingName_(name):
+            pass  # AppKit keeps a restored frame on a visible screen
         else:
-            frame = front.ns.frame()
-            self.ns.setFrame_display_(frame, False)
-            self.ns.cascadeTopLeftFromPoint_(
-                NSMakePoint(frame.origin.x, frame.origin.y + frame.size.height))
-        self.ns.setFrameAutosaveName_(FRAME_AUTOSAVE_NAME)
+            front = self.manager.front()
+            if front is None:
+                self.ns.center()
+            else:
+                self._cascade_from(front)
+        if name:
+            if self.ns.setFrameAutosaveName_(name):
+                self.frame_name = name
+            else:
+                logger.warning("frame autosave name in use: %s", name)
+
+    def _cascade_from(self, other: "_Window") -> None:
+        # Same size as ``other``, top-left stepped down-right from it.
+        # `cascadeTopLeftFromPoint:` PLACES the window at the point and
+        # returns the point for the NEXT window: place ourselves on
+        # ``other``, then step from there. Both calls are on ``self`` —
+        # ``other`` is never moved, not even to constrain it on screen.
+        frame = other.ns.frame()
+        self.ns.setFrame_display_(frame, False)
+        top_left = NSMakePoint(frame.origin.x, frame.origin.y + frame.size.height)
+        self.ns.cascadeTopLeftFromPoint_(self.ns.cascadeTopLeftFromPoint_(top_left))
+
+    def save_frame(self) -> None:
+        """Persist the frame now. Autosave writes on move/resize; a window
+        the user never touched (cascaded, then closed) needs this so it too
+        reopens where it was."""
+        if self.frame_name and self.ns is not None:
+            try:
+                self.ns.saveFrameUsingName_(self.frame_name)
+            except Exception:  # noqa: BLE001 — a lost frame is not worth a crash
+                logger.debug("saveFrameUsingName failed", exc_info=True)
 
     def set_title(self, title: str) -> None:
         self.ns.setTitle_(title or APP_NAME)
@@ -643,6 +690,7 @@ class _Window:
         if webview is None or getattr(self, "_torn", False):
             return
         self._torn = True
+        self.save_frame()
         try:
             webview.removeObserver_forKeyPath_(delegate, "title")
         except Exception:  # noqa: BLE001 — already removed; nothing to undo
@@ -900,6 +948,14 @@ class WindowManager:
 
     def front(self) -> _Window | None:
         return self.key() or (self._windows[-1] if self._windows else None)
+
+    def frame_owner(self, name: str) -> _Window | None:
+        """The open window that owns frame-autosave ``name`` (one per name),
+        so a sibling window can cascade from it instead of stacking."""
+        for w in self._windows:
+            if w.frame_name == name and w.ns is not None:
+                return w
+        return None
 
     def key(self) -> _Window | None:
         kw = NSApp.keyWindow()

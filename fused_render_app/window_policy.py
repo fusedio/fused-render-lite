@@ -21,6 +21,27 @@ from urllib.parse import urlsplit
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
+HOME_FRAME_NAME = "RenderAppWindow"
+
+
+def frame_autosave_name(app_file: str | None, app_id: str | None = None) -> str:
+    """The NSWindow frame-autosave name for a window showing ``app_file``.
+
+    Each .fused app remembers its own window size and position, so an app
+    reopens where the user last left *that* app, not where the last window
+    of any app was. Keyed on the app's stable id (`appfile.app_id_of`,
+    ``<meta name="fused-app-id">``) when the file carries one — the frame
+    then survives updates, renames and moves of the .fused; a file that
+    predates ids is keyed on its abspath. The launcher (no file) keeps the
+    name every version so far used for all windows, so an existing user's
+    saved Home frame carries over.
+    """
+    if app_id:
+        return f"{HOME_FRAME_NAME}:app:{app_id}"
+    if not app_file:
+        return HOME_FRAME_NAME
+    return f"{HOME_FRAME_NAME}:{os.path.abspath(app_file)}"
+
 
 def is_own_origin(host: str | None, port: int | None, app_port: int) -> bool:
     """Is a security origin (``host``, ``port``) this process's own server?
