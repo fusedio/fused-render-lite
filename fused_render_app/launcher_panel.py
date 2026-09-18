@@ -244,6 +244,7 @@ class LauncherController:
                 try:
                     self._hotkey.set(previous)
                     launcher.set_hotkey(previous)
+                    self._bound = True  # the shortcut in effect (the old one) works
                 except Exception:  # noqa: BLE001
                     logger.exception("could not restore shortcut %s", previous)
         self._push_hotkey()

@@ -309,6 +309,11 @@
     state.recording = false;
     shortcut.classList.remove("rec");
     if (state.hotkey) setHotkey(state.hotkey);
+    // Drop the last search now: until the pinned list arrives, Enter or a
+    // click must not launch a stale row from the previous query.
+    state.apps = [];
+    state.sel = 0;
+    render();
     query("");
     q.focus();
   }
