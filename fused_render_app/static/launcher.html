@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Launcher</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1c1c1e;
+    --fg-dim: rgba(28,28,30,.55);
+    --fg-faint: rgba(28,28,30,.38);
+    --sel-bg: rgba(0,0,0,.08);
+    --sel-fg: #1c1c1e;
+    --line: rgba(0,0,0,.10);
+    --field-bg: rgba(0,0,0,.05);
+    --tile-shadow: 0 1px 2px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.12);
+    --kbd-bg: rgba(0,0,0,.07);
+    --width: 680px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f2f2f5;
+      --fg-dim: rgba(242,242,245,.6);
+      --fg-faint: rgba(242,242,245,.4);
+      --sel-bg: rgba(255,255,255,.14);
+      --sel-fg: #fff;
+      --line: rgba(255,255,255,.12);
+      --field-bg: rgba(255,255,255,.07);
+      --tile-shadow: 0 1px 2px rgba(0,0,0,.4), 0 2px 6px rgba(0,0,0,.3);
+      --kbd-bg: rgba(255,255,255,.12);
+    }
+  }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body {
+    font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, sans-serif;
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    user-select: none; -webkit-user-select: none;
+    overflow: hidden;
+  }
+  /* Dev-only: a plain tab has no native glass behind the page. */
+  body.dev {
+    min-height: 100vh; box-sizing: border-box; padding: 60px 0;
+    background:
+      radial-gradient(1200px 500px at 20% 0%, #cfe7d7 0%, transparent 60%),
+      radial-gradient(900px 500px at 90% 100%, #b7c9dd 0%, transparent 60%),
+      linear-gradient(160deg, #e8efe6, #d5dde8);
+  }
+  @media (prefers-color-scheme: dark) {
+    body.dev {
+      background:
+        radial-gradient(1200px 500px at 20% 0%, #23402f 0%, transparent 60%),
+        radial-gradient(900px 500px at 90% 100%, #2a3444 0%, transparent 60%),
+        linear-gradient(160deg, #1c2220, #1b2028);
+    }
+  }
+  body.dev #panel {
+    margin: 0 auto;
+    background: rgba(246,246,248,.86); border-radius: 18px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.25);
+  }
+  @media (prefers-color-scheme: dark) { body.dev #panel { background: rgba(40,40,44,.9); } }
+
+  #panel { width: var(--width); box-sizing: border-box; padding: 10px 12px 8px; }
+
+  #field {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 10px 12px; border-bottom: 1px solid var(--line);
+  }
+  #q {
+    flex: 1; min-width: 0;
+    font: 400 22px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Helvetica, sans-serif;
+    color: var(--fg); background: transparent; border: 0; outline: 0; padding: 2px 0;
+    -webkit-user-select: text; user-select: text;
+  }
+  #q::placeholder { color: var(--fg-faint); }
+  #mark {
+    width: 20px; height: 20px; flex: none; opacity: .5;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #mark svg { width: 17px; height: 17px; }
+
+  #list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  #list:empty { margin: 0; }
+  .row {
+    display: flex; align-items: center; gap: 14px; height: 48px; box-sizing: border-box;
+    padding: 0 14px; border-radius: 10px; cursor: default;
+  }
+  .row.sel { background: var(--sel-bg); color: var(--sel-fg); }
+  .icon {
+    position: relative; width: 32px; height: 32px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .icon img, .icon .mono { border-radius: 8px; }
+  /* running badge: green dot on the icon's upper-left corner, like the Dock's */
+  .icon .dot {
+    position: absolute; left: -3px; top: -3px; width: 8px; height: 8px; border-radius: 50%; z-index: 2;
+    background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55) 0, rgba(255,255,255,0) 45%), #34c759;
+    box-shadow: 0 0 0 2px rgba(255,255,255,.95), 0 1px 3px rgba(0,0,0,.4); pointer-events: none;
+  }
+  @media (prefers-color-scheme: dark) { .icon .dot { box-shadow: 0 0 0 2px rgba(28,28,30,.95), 0 1px 3px rgba(0,0,0,.4); } }
+  .icon img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .icon .mono {
+    width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+    font: 600 14px/1 -apple-system, BlinkMacSystemFont, sans-serif; color: #fff; letter-spacing: .5px;
+  }
+  .text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; white-space: nowrap; overflow: hidden; }
+  .name { font-size: 15px; flex: none; }
+  .sub { font-size: 13px; color: var(--fg-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .hint { flex: none; font-size: 13px; color: var(--fg-faint); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+  .row.sel .hint { color: var(--fg-dim); }
+
+  #empty { padding: 20px 12px 16px; text-align: center; color: var(--fg-dim); font-size: 13px; }
+  #empty:empty { display: none; }
+  #empty .tip { display: block; margin-top: 6px; color: var(--fg-faint); font-size: 12.5px; }
+
+  #foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-top: 10px; padding: 9px 12px 2px; border-top: 1px solid var(--line);
+    font-size: 12px; color: var(--fg-faint);
+  }
+  #foot .keys { display: flex; gap: 12px; }
+  kbd {
+    font: inherit; font-size: 11px; padding: 1px 6px; border-radius: 5px;
+    background: var(--kbd-bg); color: var(--fg-dim); margin-right: 4px;
+  }
+  #shortcut {
+    background: none; border: 0; padding: 2px 6px; border-radius: 6px; cursor: pointer;
+    color: var(--fg-dim); font: inherit; font-size: 12px;
+  }
+  #shortcut:hover { background: var(--kbd-bg); }
+  #shortcut.rec { color: #2f6fed; outline: 1.5px solid rgba(47,111,237,.6); }
+  #shortcut.bad { color: #d0342c; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <div id="field">
+    <input id="q" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search apps…" />
+    <div id="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/>
+      </svg>
+    </div>
+  </div>
+  <ul id="list" role="listbox"></ul>
+  <div id="empty"></div>
+  <div id="foot">
+    <div class="keys"><span><kbd>↑↓</kbd>select</span><span><kbd>↩</kbd>open</span></div>
+    <button id="shortcut" type="button" title="Click, then press the new shortcut">⌥Space</button>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const INAPP = navigator.userAgent.includes("RenderApp/");
+  document.body.classList.add(INAPP ? "inapp" : "dev");
+
+  const q = document.getElementById("q");
+  const list = document.getElementById("list");
+  const empty = document.getElementById("empty");
+  const shortcut = document.getElementById("shortcut");
+  const panel = document.getElementById("panel");
+  const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
+  const bridge = () => window.webkit?.messageHandlers?.launcher;
+
+  const state = { apps: [], sel: 0, seq: 0, recording: false, hotkey: null, lastH: 0, rowMods: ["alt"], rowSym: "⌥" };
+  const SYM = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘" };
+
+  // ---------- net ----------
+  async function post(path, body) {
+    const r = await fetch(path, { method: "POST", headers: HDRS, body: JSON.stringify(body || {}) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || (path + " " + r.status));
+    return data;
+  }
+  // Newest query wins: a slow reply for an older query is dropped.
+  async function query(text) {
+    const seq = ++state.seq;
+    try {
+      const r = await fetch("/api/launcher?q=" + encodeURIComponent(text), { cache: "no-store" });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (seq !== state.seq) return;
+      state.apps = Array.isArray(data.apps) ? data.apps : [];
+      state.sel = 0;
+      render();
+    } catch (e) { console.warn("launcher query failed", e); }
+  }
+  async function loadHotkey() {
+    try {
+      const r = await fetch("/api/launcher/settings", { cache: "no-store" });
+      if (r.ok) setHotkey(await r.json());
+    } catch (e) { /* footer keeps its last label */ }
+  }
+  function setHotkey(h) {
+    state.hotkey = h;
+    if (h.rowModifier) {
+      state.rowMods = h.rowModifier.split("+");
+      state.rowSym = h.rowModifierDisplay || state.rowMods.map(m => SYM[m] || m).join("");
+      [...list.children].forEach((li, i) => { if (i !== state.sel) li.querySelector(".hint").textContent = rowHint(i); });
+    }
+    if (state.recording) return;
+    shortcut.textContent = h.display || h.hotkey || "—";
+    shortcut.classList.toggle("bad", h.bound === false);
+    shortcut.title = h.bound === false
+      ? "Could not bind this shortcut (another app may use it). Click, then press a new one."
+      : "Click, then press the new shortcut";
+  }
+
+  // ---------- render ----------
+  function hash(s) { let h = 2166136261; for (const c of s) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+  function monogram(name) {
+    const d = document.createElement("div");
+    d.className = "mono";
+    d.style.background = `hsl(${hash(name) % 360} 45% 48%)`;
+    d.textContent = (name.trim()[0] || "?").toUpperCase();
+    return d;
+  }
+  function subtitle(app) {
+    if (app.description) return app.description;
+    const f = app.file || "";
+    return f.replace(/^\/Users\/[^/]+/, "~");
+  }
+  function rowHint(i) { return i < 9 ? state.rowSym + (i + 1) : ""; }
+  function rowModsHeld(e) {
+    const held = { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, cmd: e.metaKey };
+    return Object.keys(held).every(m => held[m] === state.rowMods.includes(m));
+  }
+  function render() {
+    list.textContent = "";
+    empty.textContent = "";
+    const apps = state.apps;
+    if (!apps.length) {
+      const text = q.value.trim();
+      empty.textContent = text ? `No app matches “${text}”` : "No pinned apps";
+      if (!text) {
+        const tip = document.createElement("span");
+        tip.className = "tip";
+        tip.textContent = "Type to search every app you have opened, or pin apps in the menu-bar Dock to list them here.";
+        empty.appendChild(tip);
+      }
+    }
+    apps.forEach((app, i) => {
+      const li = document.createElement("li");
+      li.className = "row" + (i === state.sel ? " sel" : "");
+      li.setAttribute("role", "option");
+      li.dataset.i = i;
+      const icon = document.createElement("div");
+      icon.className = "icon";
+      if (app.icon) {
+        const img = document.createElement("img");
+        img.alt = "";
+        img.src = app.icon;
+        img.onerror = () => { icon.textContent = ""; icon.appendChild(monogram(app.name || "?")); };
+        icon.appendChild(img);
+      } else icon.appendChild(monogram(app.name || "?"));
+      if (app.running) { const dot = document.createElement("span"); dot.className = "dot"; dot.title = "open"; icon.appendChild(dot); }
+      const text = document.createElement("div");
+      text.className = "text";
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = app.title || app.name;
+      const sub = document.createElement("div");
+      sub.className = "sub";
+      sub.textContent = subtitle(app);
+      text.append(name, sub);
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = i === state.sel ? "↩" : rowHint(i);
+      li.append(icon, text, hint);
+      li.addEventListener("pointermove", () => select(i));
+      li.addEventListener("click", () => open(i));
+      list.appendChild(li);
+    });
+    report();
+  }
+  function select(i) {
+    if (i === state.sel || i < 0 || i >= state.apps.length) return;
+    const rows = list.children;
+    rows[state.sel]?.classList.remove("sel");
+    if (rows[state.sel]) rows[state.sel].querySelector(".hint").textContent = rowHint(state.sel);
+    state.sel = i;
+    rows[i].classList.add("sel");
+    rows[i].querySelector(".hint").textContent = "↩";
+  }
+  function report() {
+    const h = Math.ceil(panel.getBoundingClientRect().height);
+    if (h === state.lastH) return;
+    state.lastH = h;
+    bridge()?.postMessage({ type: "size", width: panel.offsetWidth, height: h });
+  }
+
+  // ---------- actions ----------
+  function open(i) {
+    const app = state.apps[i];
+    if (!app) return;
+    if (bridge()) bridge().postMessage({ type: "open", file: app.file });
+    else post("/api/dock/open", { file: app.file }).then(r => { if (r && r.view) location.href = r.view; }).catch(console.warn);
+  }
+  function close() {
+    if (bridge()) bridge().postMessage({ type: "close" });
+  }
+  function reset() {
+    q.value = "";
+    state.recording = false;
+    shortcut.classList.remove("rec");
+    if (state.hotkey) setHotkey(state.hotkey);
+    // Drop the last search now: until the pinned list arrives, Enter or a
+    // click must not launch a stale row from the previous query.
+    state.apps = [];
+    state.sel = 0;
+    render();
+    query("");
+    q.focus();
+  }
+
+  // ---------- keyboard ----------
+  const MODS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn"]);
+  function recordKey(e) {
+    e.preventDefault();
+    if (e.key === "Escape") { state.recording = false; shortcut.classList.remove("rec"); setHotkey(state.hotkey || {}); q.focus(); return; }
+    if (MODS.has(e.key)) return;  // wait for the key itself
+    const mods = [];
+    if (e.ctrlKey) mods.push("ctrl");
+    if (e.altKey) mods.push("alt");
+    if (e.shiftKey) mods.push("shift");
+    if (e.metaKey) mods.push("cmd");
+    if (!mods.length) { shortcut.textContent = "Add a modifier (⌥ ⌘ ⌃ ⇧)…"; return; }
+    const spec = mods.concat([e.code]).join("+");
+    state.recording = false;
+    shortcut.classList.remove("rec");
+    post("/api/launcher/settings", { hotkey: spec })
+      .then(h => { setHotkey(h); setTimeout(loadHotkey, 300); })
+      .catch(err => { shortcut.textContent = String(err.message || err); shortcut.classList.add("bad"); setTimeout(loadHotkey, 1500); })
+      .finally(() => q.focus());
+  }
+  document.addEventListener("keydown", (e) => {
+    if (state.recording) { recordKey(e); return; }
+    const n = state.apps.length;
+    if (e.key === "ArrowDown") { e.preventDefault(); if (n) select(Math.min(state.sel + 1, n - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); if (n) select(Math.max(state.sel - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); open(state.sel); }
+    else if (e.key === "Escape") { e.preventDefault(); if (q.value) { q.value = ""; query(""); } else close(); }
+    else if (rowModsHeld(e) && /^Digit[1-9]$/.test(e.code)) {
+      // ⌥1 arrives as e.key "¡": match the physical key, not the character.
+      e.preventDefault();
+      open(Number(e.code.slice(5)) - 1);
+    }
+    else if (e.key === "Tab") e.preventDefault();
+  });
+  q.addEventListener("input", () => query(q.value));
+  // Anything typed while a row has focus still lands in the field.
+  document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#shortcut")) setTimeout(() => q.focus(), 0); });
+
+  shortcut.addEventListener("click", () => {
+    state.recording = true;
+    shortcut.classList.add("rec");
+    shortcut.classList.remove("bad");
+    shortcut.textContent = "Press the new shortcut…";
+    shortcut.focus();
+  });
+
+  // ---------- native hooks ----------
+  window.launcherShown = () => { reset(); loadHotkey(); };
+  window.launcherSettings = (h) => setHotkey(h || {});
+
+  new ResizeObserver(report).observe(panel);
+  if (!INAPP) document.body.style.setProperty("--width", "680px");
+  reset();
+  loadHotkey();
+})();
+</script>
+</body>
+</html>

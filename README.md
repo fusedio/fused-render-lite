@@ -45,7 +45,16 @@ Closing the last window does not quit. The menu-bar item has four entries:
 browser", "Open app logs", "Quit". The Dock icon does the same as "Open in
 app"; ⌘Q and the Dock also quit. View → Open in Browser hands the current page
 to the default browser. `FUSED_RENDER_APP_NO_BROWSER=1` suppresses the
-startup window. The CLI (`fused-render-app`, `scripts/dev.sh`) is unchanged
+startup window.
+
+⌥Space (change it in Settings — the gear on the home page — or from the
+search panel's footer; right-click the menu-bar item → "Search Apps…" opens
+it without a shortcut) drops a Spotlight-like search panel: empty, it lists the
+apps pinned in the menu-bar Dock; typing searches every app Render App
+remembers plus the showcase. ↑/↓ select, ↩ opens, ⌥1–⌥9 open the Nth row
+(the modifier is a setting), esc clears then closes. The same ⌥1–9 work
+from anywhere as global shortcuts for the Nth pinned Dock app. `FUSED_RENDER_APP_LAUNCHER_SHOW=1` shows it at
+startup and makes SIGUSR2 toggle it (dev). The CLI (`fused-render-app`, `scripts/dev.sh`) is unchanged
 and still opens a browser tab.
 
 ## What it supports
@@ -248,8 +257,12 @@ fused_render_app/
   macapp.py       macOS shell: server thread, menu-bar item, Finder open events -> windows
   mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
   window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts (tested)
+  menubar_dock.py the menu-bar Dock tray (static/dock.html in a floating panel); dock_store.py its list
+  launcher_panel.py  the ⌥Space launcher (static/launcher.html in a floating panel)
+  launcher.py     launcher search over the Dock's apps + showcase; launcher.json (shortcut)
+  hotkey.py       the global shortcut: Carbon RegisterEventHotKey via ctypes; spec parsing (tested)
   _child.py       worker: import the .py, call main(**params), print JSON
-  static/         runtime.js, placeholder (index.html), open page (open.html)
+  static/         runtime.js, placeholder (index.html), open page (open.html), dock.html, launcher.html, settings.html
   showcase.py     lists showcase/*.fused for the placeholder; serves their preview.png
   showcase/       showcase .fused apps + showcase.json (title, description)
 ```
