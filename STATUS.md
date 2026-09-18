@@ -13,7 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
-| 0.9.1 | 43.02 MB (43,021,381 B) | +0.27 MB | 99 MB | per-app window frame memory (window_policy + mainwindow); no packaging change |
+| 0.9.1 | 43.02 MB (43,021,381 B) | +0.29 MB | 99 MB | per-app window frame memory (window_policy + mainwindow); no packaging change |
 | 0.9.0 | 42.74 MB (42,735,197 B) | +0.18 MB | 98 MB | OpenMail showcase demo (.fused ~166 KB) bundled in the wheel; no packaging change |
 | 0.8.16 | 42.55 MB (42,553,189 B) | +0.00 MB | 98 MB | .fused state shared across every extract of one app via symlink to ~/.fused-render-app/fused_data/<app_id> (PR #32); no packaging change |
 | 0.8.15 | 42.55 MB (42,553,006 B) | −0.00 MB | 98 MB | open .fused from URL without confirm, CDN link first in release notes, non-macOS code paths dropped (PRs #28, #29, #30); no packaging change |
