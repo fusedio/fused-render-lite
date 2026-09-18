@@ -67,6 +67,25 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.9.2
+
+Patch: Spotlight-like app launcher, no packaging change.
+
+⌥Space (configurable) drops a non-activating search panel: empty, it lists the
+apps pinned in the menu-bar Dock; typing searches every app Render App
+remembers plus the shipped showcase. ↑/↓ select, ↩ opens, esc clears then
+closes. ⌥1–9 are global shortcuts for the Nth pinned Dock app, resolved at
+press time so pin/unpin/reorder need no rebind; while the panel is up the same
+keys open the Nth row. One modifier setting drives both. Global hotkeys go
+through Carbon `RegisterEventHotKey` via ctypes (`hotkey.py`: no Accessibility
+grant, no new dependency; `HotKeySet` shares one process-wide handler and id
+space). `launcher.py` holds the registry (dock_store ∪ showcase), ranked
+search and settings in `<home>/launcher.json`; `launcher_panel.py` is the
+NSPanel + WKWebView (Liquid Glass on macOS 26, flat before). New pages
+`static/launcher.html` and `static/settings.html` (gear on Home); server
+routes `/launcher`, `/settings`, `/api/launcher?q=`, `/api/launcher/settings`.
+Menu-bar item right-click gains "Search Apps…".
+
 ## 0.9.1
 
 Patch: per-app window frame memory, no packaging change.
