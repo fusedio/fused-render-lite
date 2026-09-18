@@ -147,7 +147,7 @@
   <ul id="list" role="listbox"></ul>
   <div id="empty"></div>
   <div id="foot">
-    <div class="keys"><span><kbd>↑↓</kbd>select</span><span><kbd>↩</kbd>open</span><span><kbd id="rowkbd">⌥1–9</kbd>open Nth</span><span><kbd>esc</kbd>close</span></div>
+    <div class="keys"><span><kbd>↑↓</kbd>select</span><span><kbd>↩</kbd>open</span></div>
     <button id="shortcut" type="button" title="Click, then press the new shortcut">⌥Space</button>
   </div>
 </div>
@@ -166,7 +166,6 @@
   const bridge = () => window.webkit?.messageHandlers?.launcher;
 
   const state = { apps: [], sel: 0, seq: 0, recording: false, hotkey: null, lastH: 0, rowMods: ["alt"], rowSym: "⌥" };
-  const rowkbd = document.getElementById("rowkbd");
   const SYM = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘" };
 
   // ---------- net ----------
@@ -200,7 +199,6 @@
     if (h.rowModifier) {
       state.rowMods = h.rowModifier.split("+");
       state.rowSym = h.rowModifierDisplay || state.rowMods.map(m => SYM[m] || m).join("");
-      rowkbd.textContent = state.rowSym + "1–9";
       [...list.children].forEach((li, i) => { if (i !== state.sel) li.querySelector(".hint").textContent = rowHint(i); });
     }
     if (state.recording) return;
