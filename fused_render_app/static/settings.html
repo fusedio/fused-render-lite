@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Settings — Render App</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1f2023; --muted: #6b7078; --bg: #f6f7f8; --card: #ffffff;
+    --line: #d9dce1; --accent: #ebfd66; --accent-ink: #0d0d0f; --err: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8eaed; --muted: #9aa0a6; --bg: #131417; --card: #1b1d21; --line: #2c2f35; --err: #ff6b6b; }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { min-height: 100%; margin: 0; }
+  body {
+    padding: 40px 24px 48px; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--fg); background: var(--bg);
+  }
+  .wrap { width: min(560px, 100%); margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+  .top { display: flex; align-items: center; gap: 12px; }
+  .back {
+    display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px 5px 6px; border-radius: 8px;
+    color: var(--muted); text-decoration: none; font-size: 13px; border: 1px solid transparent;
+  }
+  .back:hover { color: var(--fg); background: var(--card); border-color: var(--line); }
+  .back svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: -0.02em; }
+  h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .rows { border: 1px solid var(--line); border-radius: 12px; background: var(--card); overflow: hidden; }
+  .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
+  .setting + .setting { border-top: 1px solid var(--line); }
+  .label { min-width: 0; }
+  .label b { display: block; font-weight: 500; font-size: 14px; }
+  .label span { display: block; font-size: 12.5px; color: var(--muted); }
+  .label span.warn { color: var(--err); }
+  .keycap {
+    font: inherit; font-size: 13px; min-width: 88px; padding: 5px 12px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: color-mix(in srgb, var(--fg) 5%, var(--card)); color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .keycap:hover { border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
+  .keycap.rec { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: none; }
+  .seg button {
+    font: inherit; font-size: 14px; padding: 5px 12px; border: 0; background: transparent; color: var(--fg); cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); }
+  .note { font-size: 12.5px; color: var(--muted); margin: 0; }
+  .note.warn { color: var(--err); }
+  .where { font-size: 12px; color: var(--muted); }
+  .where code { font-size: 11.5px; padding: 1px 6px; border-radius: 5px; background: var(--card); border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/" title="Back to the launcher"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>Launcher</a>
+    <h1>Settings</h1>
+  </div>
+
+  <section>
+    <h2>Search</h2>
+    <div class="rows">
+      <div class="setting">
+        <div class="label"><b>Open the search</b><span id="hk-note">Click the key, then press the new shortcut. Esc cancels.</span></div>
+        <button type="button" class="keycap" id="hk" title="Click, then press the new shortcut">…</button>
+      </div>
+      <div class="setting">
+        <div class="label"><b>Open the Nth result</b><span>Hold this and press 1–9 while the search is up.</span></div>
+        <div class="seg" id="rowmod" role="radiogroup" aria-label="Row shortcut modifier">
+          <button type="button" data-mod="alt" title="Option">⌥</button>
+          <button type="button" data-mod="cmd" title="Command">⌘</button>
+          <button type="button" data-mod="ctrl" title="Control">⌃</button>
+          <button type="button" data-mod="alt+cmd" title="Option-Command">⌥⌘</button>
+          <button type="button" data-mod="ctrl+alt" title="Control-Option">⌃⌥</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <p class="note" id="not-app" hidden>The search panel only exists inside Render App; this tab is served by the dev server. Changes are saved and take effect in the app.</p>
+  <p class="where">Stored in <code id="where">~/.fused-render-app/launcher.json</code></p>
+</div>
+<script>
+(() => {
+  "use strict";
+  const INAPP = navigator.userAgent.includes("RenderApp/");
+  const hkBtn = document.getElementById("hk");
+  const hkNote = document.getElementById("hk-note");
+  const rowmod = document.getElementById("rowmod");
+  const HK_NOTE = "Click the key, then press the new shortcut. Esc cancels.";
+  const MODKEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn"]);
+  let recording = false, current = null;
+  document.getElementById("not-app").hidden = INAPP;
+
+  function show(s) {
+    current = s;
+    if (!recording) {
+      hkBtn.textContent = s.display || s.hotkey || "…";
+      hkBtn.classList.remove("rec");
+    }
+    const bad = s.bound === false;
+    hkNote.textContent = bad
+      ? "Could not bind " + (s.display || s.hotkey) + " — another app may own it. Pick a different shortcut."
+      : HK_NOTE;
+    hkNote.classList.toggle("warn", bad);
+    [...rowmod.querySelectorAll("button")].forEach(b => b.classList.toggle("on", b.dataset.mod === s.rowModifier));
+  }
+  async function load() {
+    try {
+      const res = await fetch("/api/launcher/settings", { cache: "no-store" });
+      if (res.ok) show(await res.json());
+    } catch (e) { hkNote.textContent = "Could not load settings."; hkNote.classList.add("warn"); }
+  }
+  async function save(body) {
+    const res = await fetch("/api/launcher/settings", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Fused": "1" }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    show(data);
+    setTimeout(load, 400);  // the bind happens on the app's main thread a tick later
+  }
+  function fail(err) { hkNote.textContent = String(err.message || err); hkNote.classList.add("warn"); show(current || {}); }
+
+  hkBtn.addEventListener("click", () => { recording = true; hkBtn.classList.add("rec"); hkBtn.textContent = "Press keys…"; });
+  document.addEventListener("keydown", (e) => {
+    if (!recording) return;
+    e.preventDefault();
+    if (e.key === "Escape") { recording = false; show(current || {}); return; }
+    if (MODKEYS.has(e.key)) return;
+    const mods = [];
+    if (e.ctrlKey) mods.push("ctrl");
+    if (e.altKey) mods.push("alt");
+    if (e.shiftKey) mods.push("shift");
+    if (e.metaKey) mods.push("cmd");
+    if (!mods.length) { hkBtn.textContent = "Add ⌥ ⌘ ⌃ or ⇧…"; return; }
+    recording = false;
+    save({ hotkey: mods.concat([e.code]).join("+") }).catch(fail);
+  }, true);
+  rowmod.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-mod]");
+    if (b) save({ rowModifier: b.dataset.mod }).catch(fail);
+  });
+  load();
+})();
+</script>
+</body>
+</html>

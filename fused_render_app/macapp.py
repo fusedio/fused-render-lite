@@ -122,6 +122,26 @@ def _install_dock_hooks(state: dict) -> None:
     })
 
 
+def _install_launcher_hooks(state: dict) -> None:
+    """What ``POST /api/launcher/hotkey`` and the footer's status read call,
+    from the HTTP thread: rebinding hops to the main thread (Carbon and the
+    page live there); the bound flag is a plain attribute read."""
+    from PyObjCTools import AppHelper
+
+    launcher = state["launcher"]
+
+    def rebind(spec) -> None:
+        if spec:
+            AppHelper.callAfter(launcher.bind_hotkey, spec)
+        else:  # another setting changed; only the page needs telling
+            AppHelper.callAfter(launcher.push_settings)
+
+    server.native_hooks.update({
+        "launcher_rebind": rebind,
+        "launcher_hotkey_bound": launcher.hotkey_bound,
+    })
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -164,7 +184,7 @@ def main() -> None:
 
     port = pick_port()
     state = {"ready": False, "docs": False, "pending": [], "server": None, "windows": None,
-             "dock": None}
+             "dock": None, "launcher": None}
 
     def show(target: str) -> None:
         """Open ``target`` in a new window of this app. Callable from any
@@ -266,6 +286,8 @@ def main() -> None:
             state["windows"].set_port(actual)
         if state["dock"] is not None:
             state["dock"].set_port(actual)
+        if state["launcher"] is not None:
+            state["launcher"].set_port(actual)
         # argv files join the queue BEFORE the ready flip so they dedupe
         # against the openFiles event AppKit already delivered for them.
         for f in argv_files + argv_urls:
@@ -278,6 +300,13 @@ def main() -> None:
             AppHelper.callAfter(state["dock"].server_ready)
             if os.environ.get("FUSED_RENDER_APP_DOCK_SHOW"):  # dev: screenshot the tray
                 AppHelper.callAfter(state["dock"].show_popover)
+        if state["launcher"] is not None:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(state["launcher"].server_ready)
+            AppHelper.callAfter(state["launcher"].bind_hotkey)
+            if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):  # dev: show without the shortcut
+                AppHelper.callAfter(state["launcher"].show)
         # The in-app updater (update/mac.py): a background manifest check
         # whose only surface is the launcher page's banner. No-op outside a
         # bundle, and guarded like everything else — no updates is a lesser
@@ -396,6 +425,8 @@ def main() -> None:
                 state["dock"] = DockController(
                     app._nsapp.nsstatusitem, port,
                     actions={"show_home": show_home,
+                             # The launcher is built after the Dock: resolve at click time.
+                             "show_launcher": lambda: state["launcher"] and state["launcher"].show(),
                              "open_browser": lambda: webbrowser.open(open_url(port, None)),
                              "open_logs": lambda: subprocess.run(
                                  ["open", "-R", paths.log_path()], check=False),
@@ -419,6 +450,40 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("menu-bar Dock unavailable; keeping the status-item menu")
                 state["dock"] = None
+        # The launcher (launcher_panel.py): a Spotlight-like panel on a
+        # global shortcut (⌥Space by default) that opens any known app.
+        # Guarded like the Dock — no launcher is a lesser outcome than no app.
+        if state["windows"] is not None:
+            try:
+                from fused_render_app.launcher_panel import LauncherController
+
+                manager = state["windows"]
+
+                def open_from_launcher(fs_path: str) -> None:
+                    # Dock semantics; the panel is non-activating, so bring
+                    # this app forward or the window opens behind the caller.
+                    from AppKit import NSApp
+
+                    NSApp.activateIgnoringOtherApps_(True)
+                    manager.focus_or_open(fs_path)
+
+                state["launcher"] = LauncherController(port, open_from_launcher)
+                _install_launcher_hooks(state)
+                if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):
+                    # Dev only: SIGUSR2 toggles the launcher (SIGUSR1 is the
+                    # Dock's); the breathing timer below keeps signals landing.
+                    import signal
+
+                    from PyObjCTools import AppHelper
+
+                    signal.signal(signal.SIGUSR2, lambda *_: AppHelper.callAfter(
+                        state["launcher"].toggle))
+                    if not hasattr(app, "dock_dev_tick"):
+                        app.dock_dev_tick = rumps.Timer(lambda _t: None, 0.5)
+                        app.dock_dev_tick.start()
+            except Exception:  # noqa: BLE001
+                logger.exception("launcher unavailable")
+                state["launcher"] = None
         threading.Thread(target=bootstrap, daemon=True).start()
 
     # Held on `app`: an unreferenced rumps.Timer is collected before it fires.

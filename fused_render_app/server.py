@@ -34,6 +34,13 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/dock/preview?file=<abs>[&v=]       the app's preview.png (the hover bubble's
                                                picture; ``v`` = previewVersion, so it caches), or 404
   POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
+  Launcher (launcher.py; GET /launcher serves static/launcher.html, GET /settings its settings page):
+  GET  /api/launcher?q=                        {query, apps:[{file,name,title,description,pinned,running,
+                                                 showcase,icon}]} (empty q: the pinned apps; else search)
+  GET  /api/launcher/settings                  {hotkey: "alt+space", display: "⌥Space", bound: bool|null,
+                                                 rowModifier: "alt", rowModifierDisplay: "⌥"}
+  POST /api/launcher/settings {hotkey?, rowModifier?}  stores (+ rebinds the hotkey); 400 on a bad
+                                               spec, nothing written -> same shape. /api/launcher/hotkey = alias.
   GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id}],
                                                 showcase:[{id, file, title, description, has_preview, preview, ...}]}
                                                (home page: dock entries newest first, then the showcase apps not among them)
@@ -67,7 +74,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, icon_color, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, showcase, jobs, paths
 from fused_render_app.update import mac as mac_update
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
@@ -197,6 +204,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._showcase_preview(q)
             if route == "/dock":
                 return self._static("dock.html")
+            if route == "/launcher":
+                return self._static("launcher.html")
+            if route == "/settings":
+                return self._static("settings.html")
+            if route == "/api/launcher":
+                return self._json({"query": q.get("q") or "",
+                                   "apps": launcher.results(q.get("q") or "", self._dock_running())})
+            if route in ("/api/launcher/settings", "/api/launcher/hotkey"):
+                return self._json(self._launcher_status())
             if route == "/api/dock":
                 return self._json({"apps": dock_store.list_apps(self._dock_running()),
                                    "tilesize": dock_store.get_tilesize()})
@@ -245,6 +261,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._jobs_report()
             if route.startswith("/api/dock/"):
                 return self._dock(route[len("/api/dock/"):])
+            if route in ("/api/launcher/settings", "/api/launcher/hotkey"):
+                return self._launcher_settings()
             if route == "/api/jobs/clear":
                 return self._guarded() and self._json({"cleared": jobs.clear_finished()})
             if route.startswith("/api/update/"):
@@ -482,6 +500,43 @@ class Handler(BaseHTTPRequestHandler):
             subprocess.Popen(["open", "-R", file])
             return self._json({"ok": True})
         self._json({"apps": dock_store.list_apps(self._dock_running())})
+
+    # ---- launcher ---------------------------------------------------------
+
+    @staticmethod
+    def _launcher_status() -> dict:
+        out = launcher.settings()
+        hook = native_hooks.get("launcher_hotkey_bound")
+        bound = None
+        if hook is not None:
+            try:
+                bound = hook()
+            except Exception:  # noqa: BLE001
+                logger.exception("launcher_hotkey_bound hook failed")
+        out["bound"] = bound
+        return out
+
+    def _launcher_settings(self) -> None:
+        if not self._guarded():
+            return
+        body = self._json_body() or {}
+        try:
+            if "rowModifier" in body:
+                launcher.set_row_modifier(body.get("rowModifier"))
+            spec = launcher.set_hotkey(body.get("hotkey")) if "hotkey" in body else None
+        except hotkey.SpecError as e:
+            return self._error(str(e))
+        # Rebinding is native and main-thread: the hook hops there itself
+        # and returns at once; the reply's ``bound`` reflects the previous
+        # state, the page re-reads a moment later. spec None: only another
+        # setting changed — the panel's page is told, nothing is rebound.
+        hook = native_hooks.get("launcher_rebind")
+        if hook is not None:
+            try:
+                hook(spec)
+            except Exception:  # noqa: BLE001
+                logger.exception("launcher_rebind hook failed")
+        self._json(self._launcher_status())
 
     # ---- runPython --------------------------------------------------------
 
