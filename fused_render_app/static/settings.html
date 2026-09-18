@@ -64,14 +64,14 @@
   </div>
 
   <section>
-    <h2>Search</h2>
+    <h2>Shortcuts</h2>
     <div class="rows">
       <div class="setting">
         <div class="label"><b>Open the search</b><span id="hk-note">Click the key, then press the new shortcut. Esc cancels.</span></div>
         <button type="button" class="keycap" id="hk" title="Click, then press the new shortcut">…</button>
       </div>
       <div class="setting">
-        <div class="label"><b>Open the Nth result</b><span>Hold this and press 1–9 while the search is up.</span></div>
+        <div class="label"><b>Open the Nth app</b><span id="pin-note">Hold this and press 1–9: anywhere, the Nth pinned Dock app; in the search, the Nth result. ⌥ takes ¡™£… away from typing.</span></div>
         <div class="seg" id="rowmod" role="radiogroup" aria-label="Row shortcut modifier">
           <button type="button" data-mod="alt" title="Option">⌥</button>
           <button type="button" data-mod="cmd" title="Command">⌘</button>
@@ -93,6 +93,8 @@
   const hkBtn = document.getElementById("hk");
   const hkNote = document.getElementById("hk-note");
   const rowmod = document.getElementById("rowmod");
+  const pinNote = document.getElementById("pin-note");
+  const PIN_NOTE = pinNote.textContent;
   const HK_NOTE = "Click the key, then press the new shortcut. Esc cancels.";
   const MODKEYS = new Set(["Shift", "Control", "Alt", "Meta", "CapsLock", "Fn"]);
   let recording = false, current = null;
@@ -110,6 +112,9 @@
       : HK_NOTE;
     hkNote.classList.toggle("warn", bad);
     [...rowmod.querySelectorAll("button")].forEach(b => b.classList.toggle("on", b.dataset.mod === s.rowModifier));
+    const pinBad = s.pinnedBound === false;
+    pinNote.textContent = pinBad ? "Some of " + s.rowModifierDisplay + "1–9 could not be bound system-wide — another app may own them." : PIN_NOTE;
+    pinNote.classList.toggle("warn", pinBad);
   }
   async function load() {
     try {

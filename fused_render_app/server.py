@@ -38,8 +38,8 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/launcher?q=                        {query, apps:[{file,name,title,description,pinned,running,
                                                  showcase,icon}]} (empty q: the pinned apps; else search)
   GET  /api/launcher/settings                  {hotkey: "alt+space", display: "⌥Space", bound: bool|null,
-                                                 rowModifier: "alt", rowModifierDisplay: "⌥"}
-  POST /api/launcher/settings {hotkey?, rowModifier?}  stores (+ rebinds the hotkey); 400 on a bad
+                                                 rowModifier: "alt", rowModifierDisplay: "⌥", pinnedBound: bool|null}
+  POST /api/launcher/settings {hotkey?, rowModifier?}  stores (+ rebinds); 400 on a bad
                                                spec, nothing written -> same shape. /api/launcher/hotkey = alias.
   GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id}],
                                                 showcase:[{id, file, title, description, has_preview, preview, ...}]}
@@ -514,6 +514,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 logger.exception("launcher_hotkey_bound hook failed")
         out["bound"] = bound
+        hook = native_hooks.get("launcher_pinned_bound")
+        pinned_bound = None
+        if hook is not None:
+            try:
+                pinned_bound = hook()
+            except Exception:  # noqa: BLE001
+                logger.exception("launcher_pinned_bound hook failed")
+        out["pinnedBound"] = pinned_bound
         return out
 
     def _launcher_settings(self) -> None:
@@ -529,7 +537,8 @@ class Handler(BaseHTTPRequestHandler):
         # Rebinding is native and main-thread: the hook hops there itself
         # and returns at once; the reply's ``bound`` reflects the previous
         # state, the page re-reads a moment later. spec None: only another
-        # setting changed — the panel's page is told, nothing is rebound.
+        # setting changed — the panel's page is told, the pinned shortcuts
+        # re-read their modifier.
         hook = native_hooks.get("launcher_rebind")
         if hook is not None:
             try:

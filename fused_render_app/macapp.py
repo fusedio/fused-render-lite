@@ -139,6 +139,7 @@ def _install_launcher_hooks(state: dict) -> None:
     server.native_hooks.update({
         "launcher_rebind": rebind,
         "launcher_hotkey_bound": launcher.hotkey_bound,
+        "launcher_pinned_bound": launcher.pinned_bound,
     })
 
 
@@ -305,6 +306,7 @@ def main() -> None:
 
             AppHelper.callAfter(state["launcher"].server_ready)
             AppHelper.callAfter(state["launcher"].bind_hotkey)
+            AppHelper.callAfter(state["launcher"].bind_pinned)
             if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):  # dev: show without the shortcut
                 AppHelper.callAfter(state["launcher"].show)
         # The in-app updater (update/mac.py): a background manifest check

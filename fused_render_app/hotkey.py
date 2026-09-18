@@ -188,74 +188,114 @@ def _lib():
     return _carbon
 
 
-class HotKey:
-    """One global shortcut bound to ``callback`` (no arguments, main thread).
+# One Carbon handler for the whole process, one id space: Carbon delivers a
+# hot-key event to EVERY installed handler, and the EventHotKeyID is the only
+# way to tell combinations apart — two sets numbering from 1 each would both
+# answer id 1 (⌥Z opened pinned app 1). The callback object is kept here for
+# the life of the process: a collected ctypes callback is a crash on press.
+_registry: dict[int, object] = {}  # id -> callback
+_next_id = 1
+_handler_ref = None
+_cfunc = None
 
-    ``set(spec)`` swaps the combination in place (unregisters the old one
-    first); ``clear()`` unregisters. ``spec`` is the spec currently bound,
-    or None. The event handler is installed once per instance and kept
-    referenced on ``self``: a collected ctypes callback is a crash on the
-    next press.
-    """
+
+def _dispatch(_call_ref, event, _user) -> int:
+    try:
+        hk = _EventHotKeyID()
+        err = _lib().GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, None,
+                                       ctypes.sizeof(hk), None, ctypes.byref(hk))
+        if err == 0 and hk.signature == SIGNATURE:
+            callback = _registry.get(int(hk.id))
+            if callback is not None:
+                callback()
+    except Exception:  # noqa: BLE001 — never let an exception cross into Carbon
+        logger.exception("hot key handler failed")
+    return 0  # noErr
+
+
+def _install() -> None:
+    global _handler_ref, _cfunc
+    if _handler_ref is not None:
+        return
+    lib = _lib()
+    _cfunc = _HANDLER(_dispatch)
+    spec = _EventTypeSpec(kEventClassKeyboard, kEventHotKeyPressed)
+    out = ctypes.c_void_p()
+    err = lib.InstallEventHandler(lib.GetApplicationEventTarget(), _cfunc, 1,
+                                  ctypes.byref(spec), None, ctypes.byref(out))
+    if err != 0:
+        _cfunc = None
+        raise OSError(f"InstallEventHandler failed: {err}")
+    _handler_ref = out
+
+
+class HotKeySet:
+    """Any number of global shortcuts, each bound to a callback (no
+    arguments, main thread). ``bind(spec, callback)`` registers one
+    combination and returns its id; ``unbind(id)`` / ``clear()`` unregister.
+    Ids are process-wide (see ``_registry``)."""
+
+    def __init__(self) -> None:
+        self._bound: dict[int, tuple[object, str]] = {}  # id -> (EventHotKeyRef, spec)
+
+    def bind(self, spec: str, callback) -> int:
+        """Register ``spec``; returns the binding id. SpecError for a
+        malformed spec, OSError when the system refuses (another app owns
+        the combination) — nothing is bound then."""
+        global _next_id
+        keycode, flags, _names, _key = parse_spec(spec)
+        canon = canonical(spec)
+        _install()
+        lib = _lib()
+        hk_id = _next_id
+        _next_id += 1  # fresh per registration: a late event for an old one is ignored
+        out = ctypes.c_void_p()
+        err = lib.RegisterEventHotKey(keycode, flags, _EventHotKeyID(SIGNATURE, hk_id),
+                                      lib.GetApplicationEventTarget(), 0, ctypes.byref(out))
+        if err != 0:
+            raise OSError(f"RegisterEventHotKey({canon}) failed: {err}")
+        _registry[hk_id] = callback
+        self._bound[hk_id] = (out, canon)
+        logger.info("hot key bound: %s (id %d)", canon, hk_id)
+        return hk_id
+
+    def unbind(self, hk_id: int) -> None:
+        entry = self._bound.pop(hk_id, None)
+        _registry.pop(hk_id, None)
+        if entry is None:
+            return
+        try:
+            _lib().UnregisterEventHotKey(entry[0])
+        except Exception:  # noqa: BLE001
+            logger.debug("UnregisterEventHotKey failed", exc_info=True)
+
+    def clear(self) -> None:
+        for hk_id in list(self._bound):
+            self.unbind(hk_id)
+
+    def specs(self) -> list[str]:
+        return [e[1] for e in self._bound.values()]
+
+
+class HotKey:
+    """One global shortcut bound to ``callback``: ``set(spec)`` swaps the
+    combination in place (the old one is unregistered first), ``clear()``
+    unregisters, ``spec`` is what is currently bound or None."""
 
     def __init__(self, callback) -> None:
         self._callback = callback
-        self._ref = None  # EventHotKeyRef
-        self._handler_ref = None
-        self._id = 1
+        self._set = HotKeySet()
+        self._id: int | None = None
         self.spec: str | None = None
-        self._cfunc = _HANDLER(self._on_event)  # keep alive with the instance
-
-    def _install(self) -> None:
-        if self._handler_ref is not None:
-            return
-        lib = _lib()
-        spec = _EventTypeSpec(kEventClassKeyboard, kEventHotKeyPressed)
-        out = ctypes.c_void_p()
-        err = lib.InstallEventHandler(lib.GetApplicationEventTarget(), self._cfunc, 1,
-                                      ctypes.byref(spec), None, ctypes.byref(out))
-        if err != 0:
-            raise OSError(f"InstallEventHandler failed: {err}")
-        self._handler_ref = out
-
-    def _on_event(self, _call_ref, event, _user) -> int:
-        try:
-            lib = _lib()
-            hk = _EventHotKeyID()
-            err = lib.GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, None,
-                                        ctypes.sizeof(hk), None, ctypes.byref(hk))
-            if err == 0 and hk.signature == SIGNATURE and hk.id == self._id:
-                self._callback()
-        except Exception:  # noqa: BLE001 — never let an exception cross into Carbon
-            logger.exception("hot key handler failed")
-        return 0  # noErr
 
     def set(self, spec: str) -> None:
-        """Bind ``spec`` (canonical form stored in ``self.spec``). Raises
-        SpecError for a malformed spec, OSError when the system refuses
-        (usually: another app already registered that combination); in
-        both cases nothing is bound afterwards."""
-        keycode, flags, _names, _key = parse_spec(spec)
-        canon = canonical(spec)
+        canon = canonical(spec)  # SpecError before anything is unbound
         self.clear()
-        self._install()
-        lib = _lib()
-        self._id += 1  # a fresh id per registration: a late event for the old one is ignored
-        hk_id = _EventHotKeyID(SIGNATURE, self._id)
-        out = ctypes.c_void_p()
-        err = lib.RegisterEventHotKey(keycode, flags, hk_id, lib.GetApplicationEventTarget(),
-                                      0, ctypes.byref(out))
-        if err != 0:
-            raise OSError(f"RegisterEventHotKey({canon}) failed: {err}")
-        self._ref = out
+        self._id = self._set.bind(canon, self._callback)
         self.spec = canon
-        logger.info("hot key bound: %s", canon)
 
     def clear(self) -> None:
-        if self._ref is not None:
-            try:
-                _lib().UnregisterEventHotKey(self._ref)
-            except Exception:  # noqa: BLE001
-                logger.debug("UnregisterEventHotKey failed", exc_info=True)
-            self._ref = None
+        if self._id is not None:
+            self._set.unbind(self._id)
+            self._id = None
         self.spec = None

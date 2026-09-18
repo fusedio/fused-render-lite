@@ -12,9 +12,12 @@ Settings live in ``<home>/launcher.json``::
 
     {"hotkey": "alt+space", "rowModifier": "alt"}
 
-``hotkey`` opens the launcher (``hotkey.py`` spec syntax); ``rowModifier``
+``hotkey`` opens the launcher (``hotkey.py`` spec syntax). ``rowModifier``
 is the modifier (or ``+``-joined modifiers) that, with a digit 1–9, opens
-the Nth row while the launcher is up. Missing or corrupt → the defaults.
+the Nth app: from anywhere, the Nth PINNED Dock app (nine global
+shortcuts); while the launcher is up, the Nth row — the same list when the
+query is empty. One knob from the user's point of view. Missing or corrupt
+→ the defaults.
 Kept apart from ``dock.json`` because ``dock_store._save`` rewrites that
 document whole.
 
@@ -127,6 +130,17 @@ def set_row_modifier(spec) -> str:
         doc["rowModifier"] = canon
         _save_doc(doc)
     return canon
+
+
+def pinned_specs(modifier: str) -> list[str]:
+    """The nine specs ``<modifier>+1`` … ``+9``; empty when off."""
+    return [f"{modifier}+{n}" for n in range(1, 10)] if modifier else []
+
+
+def nth_pinned(n: int, running=frozenset()) -> str | None:
+    """The .fused of the ``n``-th pinned Dock app (1-based, Dock order), or None."""
+    pinned = [a for a in dock_store.list_apps(running) if a["pinned"]]
+    return pinned[n - 1]["file"] if 1 <= n <= len(pinned) else None
 
 
 def modifier_display(spec: str) -> str:

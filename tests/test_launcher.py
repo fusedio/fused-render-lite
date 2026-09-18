@@ -168,7 +168,7 @@ def test_launcher_settings_route(client, monkeypatch):
     monkeypatch.setitem(server.native_hooks, "launcher_hotkey_bound", lambda: True)
     body = json.loads(client.get("/api/launcher/settings")[2])
     assert body == {"hotkey": "alt+space", "display": "⌥Space", "bound": True,
-                    "rowModifier": "alt", "rowModifierDisplay": "⌥"}
+                    "rowModifier": "alt", "rowModifierDisplay": "⌥", "pinnedBound": None}
     assert json.loads(client.get("/api/launcher/hotkey")[2]) == body  # alias
     status, _, raw = client.post("/api/launcher/settings", {"hotkey": "cmd+shift+KeyL"})
     assert status == 200
@@ -188,6 +188,19 @@ def test_launcher_settings_route(client, monkeypatch):
     # unguarded (no X-Fused header) is refused
     status, _, _ = client.post("/api/launcher/settings", {"hotkey": "alt+space"}, headers={"X-Fused": ""})
     assert status in (400, 403)
+
+
+def test_pinned_specs_and_nth_pinned(tmp_path):
+    assert launcher.pinned_specs("") == []
+    assert launcher.pinned_specs("alt") == [f"alt+{n}" for n in range(1, 10)]
+    assert all(hotkey.parse_spec(s) for s in launcher.pinned_specs("ctrl+alt"))
+    a, b, c = (touch(tmp_path / f"{n}.fused") for n in "abc")
+    for f in (a, b, c):
+        dock_store.record_open(f, f)
+    dock_store.set_pinned(c, True)
+    dock_store.set_pinned(a, True)
+    assert launcher.nth_pinned(1) == c and launcher.nth_pinned(2) == a
+    assert launcher.nth_pinned(3) is None and launcher.nth_pinned(0) is None
 
 
 def test_row_modifier_setting_default_and_corrupt(app_home):

@@ -62,11 +62,11 @@
   }
   @media (prefers-color-scheme: dark) { body.dev #panel { background: rgba(40,40,44,.9); } }
 
-  #panel { width: var(--width); box-sizing: border-box; padding: 8px 10px 6px; }
+  #panel { width: var(--width); box-sizing: border-box; padding: 10px 12px 8px; }
 
   #field {
     display: flex; align-items: center; gap: 12px;
-    padding: 6px 8px 10px; border-bottom: 1px solid var(--line);
+    padding: 8px 10px 12px; border-bottom: 1px solid var(--line);
   }
   #q {
     flex: 1; min-width: 0;
@@ -81,17 +81,25 @@
   }
   #mark svg { width: 17px; height: 17px; }
 
-  #list { list-style: none; margin: 8px 0 0; padding: 0; }
+  #list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
   #list:empty { margin: 0; }
   .row {
-    display: flex; align-items: center; gap: 12px; height: 40px; box-sizing: border-box;
-    padding: 0 10px; border-radius: 8px; cursor: default;
+    display: flex; align-items: center; gap: 14px; height: 48px; box-sizing: border-box;
+    padding: 0 14px; border-radius: 10px; cursor: default;
   }
   .row.sel { background: var(--sel-bg); color: var(--sel-fg); }
   .icon {
-    width: 28px; height: 28px; flex: none; border-radius: 7px; overflow: hidden;
+    position: relative; width: 32px; height: 32px; flex: none;
     display: flex; align-items: center; justify-content: center;
   }
+  .icon img, .icon .mono { border-radius: 8px; }
+  /* running badge: green dot on the icon's upper-left corner, like the Dock's */
+  .icon .dot {
+    position: absolute; left: -3px; top: -3px; width: 8px; height: 8px; border-radius: 50%; z-index: 2;
+    background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.55) 0, rgba(255,255,255,0) 45%), #34c759;
+    box-shadow: 0 0 0 2px rgba(255,255,255,.95), 0 1px 3px rgba(0,0,0,.4); pointer-events: none;
+  }
+  @media (prefers-color-scheme: dark) { .icon .dot { box-shadow: 0 0 0 2px rgba(28,28,30,.95), 0 1px 3px rgba(0,0,0,.4); } }
   .icon img { width: 100%; height: 100%; object-fit: contain; display: block; }
   .icon .mono {
     width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
@@ -100,7 +108,6 @@
   .text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; white-space: nowrap; overflow: hidden; }
   .name { font-size: 15px; flex: none; }
   .sub { font-size: 13px; color: var(--fg-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #34c759; margin-left: 6px; vertical-align: 2px; }
   .hint { flex: none; font-size: 13px; color: var(--fg-faint); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
   .row.sel .hint { color: var(--fg-dim); }
 
@@ -110,7 +117,7 @@
 
   #foot {
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    margin-top: 6px; padding: 7px 10px 1px; border-top: 1px solid var(--line);
+    margin-top: 10px; padding: 9px 12px 2px; border-top: 1px solid var(--line);
     font-size: 12px; color: var(--fg-faint);
   }
   #foot .keys { display: flex; gap: 12px; }
@@ -251,12 +258,12 @@
         img.onerror = () => { icon.textContent = ""; icon.appendChild(monogram(app.name || "?")); };
         icon.appendChild(img);
       } else icon.appendChild(monogram(app.name || "?"));
+      if (app.running) { const dot = document.createElement("span"); dot.className = "dot"; dot.title = "open"; icon.appendChild(dot); }
       const text = document.createElement("div");
       text.className = "text";
       const name = document.createElement("div");
       name.className = "name";
       name.textContent = app.title || app.name;
-      if (app.running) { const dot = document.createElement("span"); dot.className = "dot"; dot.title = "open"; name.appendChild(dot); }
       const sub = document.createElement("div");
       sub.className = "sub";
       sub.textContent = subtitle(app);

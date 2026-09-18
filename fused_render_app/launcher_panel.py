@@ -17,6 +17,12 @@ Dismissal: ⎋ in the page (a ``close`` message), the panel resigning key
 monitor: a non-activating panel gets no resignKey for clicks in the app
 that IS active), or the shortcut again (toggle).
 
+Pinned shortcuts: ``<rowModifier>+1`` … ``+9`` (⌥ by default) are global
+shortcuts too, opening the Nth PINNED Dock app from anywhere. Which app is resolved
+at press time from the Dock's list, so pinning, unpinning and reordering
+need no rebind. They are suspended while the panel is up, so the same
+digits mean "the Nth row" there.
+
 The shortcut is Carbon's ``RegisterEventHotKey`` (``hotkey.py``), bound
 after the server is up and rebound from ``POST /api/launcher/hotkey``
 (``server.native_hooks["launcher_rebind"]``, via ``macapp``). A failed
@@ -167,6 +173,8 @@ class LauncherController:
         self._height = INITIAL_HEIGHT
         self._hotkey: hotkey.HotKey | None = None
         self._bound: bool | None = None
+        self._pinned: hotkey.HotKeySet | None = None
+        self._pinned_bound: bool | None = None
         self._build_panel()
 
     # ---- public ------------------------------------------------------------------
@@ -199,6 +207,7 @@ class LauncherController:
                 mask, lambda _e: self.close())
         self._webview.evaluateJavaScript_completionHandler_(
             "window.launcherShown && window.launcherShown();", None)
+        self._suspend_pinned()
 
     def close(self) -> None:
         if self._monitor is not None:
@@ -206,6 +215,7 @@ class LauncherController:
             self._monitor = None
         if self._panel.isVisible():
             self._panel.orderOut_(None)
+        self._resume_pinned()
 
     def open_file(self, file: str) -> None:
         self.close()
@@ -243,8 +253,50 @@ class LauncherController:
         return self._bound
 
     def push_settings(self) -> None:
-        """Settings changed (footer recorder or the home page): tell the panel's page."""
+        """Settings changed (footer recorder or the settings page): re-read
+        the pinned modifier and tell the panel's page."""
+        self.bind_pinned()
         self._push_hotkey()
+
+    # ---- pinned shortcuts -------------------------------------------------------------
+
+    def bind_pinned(self) -> bool | None:
+        """(Re)bind ``<rowModifier>+1…9``. A digit the system refuses is
+        skipped (logged); ``pinned_bound`` is False when any was."""
+        if self._pinned is None:
+            self._pinned = hotkey.HotKeySet()
+        self._pinned.clear()
+        modifier = launcher.get_row_modifier()
+        if self.is_shown():  # bound on close (_resume_pinned)
+            self._pinned_bound = True
+            return True
+        ok = True
+        for n, spec in enumerate(launcher.pinned_specs(modifier), start=1):
+            try:
+                self._pinned.bind(spec, lambda n=n: self._open_pinned(n))
+            except Exception:  # noqa: BLE001
+                logger.exception("pinned shortcut %s could not be bound", spec)
+                ok = False
+        self._pinned_bound = ok
+        return ok
+
+    def pinned_bound(self) -> bool | None:
+        return self._pinned_bound
+
+    def _open_pinned(self, n: int) -> None:
+        file = launcher.nth_pinned(n)
+        if file:
+            self._open_app(file)
+        else:
+            logger.info("pinned shortcut %d: no such pinned app", n)
+
+    def _suspend_pinned(self) -> None:
+        if self._pinned is not None:
+            self._pinned.clear()
+
+    def _resume_pinned(self) -> None:
+        if self._pinned is not None and not self._pinned.specs():
+            self.bind_pinned()
 
     def _push_hotkey(self) -> None:
         js = "window.launcherSettings && window.launcherSettings(%s);" % json.dumps(

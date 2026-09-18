@@ -52,7 +52,8 @@ search panel's footer; right-click the menu-bar item → "Search Apps…" opens
 it without a shortcut) drops a Spotlight-like search panel: empty, it lists the
 apps pinned in the menu-bar Dock; typing searches every app Render App
 remembers plus the showcase. ↑/↓ select, ↩ opens, ⌥1–⌥9 open the Nth row
-(the modifier is a setting), esc clears then closes. `FUSED_RENDER_APP_LAUNCHER_SHOW=1` shows it at
+(the modifier is a setting), esc clears then closes. The same ⌥1–9 work
+from anywhere as global shortcuts for the Nth pinned Dock app. `FUSED_RENDER_APP_LAUNCHER_SHOW=1` shows it at
 startup and makes SIGUSR2 toggle it (dev). The CLI (`fused-render-app`, `scripts/dev.sh`) is unchanged
 and still opens a browser tab.
 
