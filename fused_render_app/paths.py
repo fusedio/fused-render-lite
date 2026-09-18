@@ -41,6 +41,12 @@ def downloads_dir() -> str:
     return _sub("downloads")
 
 
+def recordings_dir() -> str:
+    """Native ``fused.capture`` recordings and audio takes land here unless the
+    page names a path."""
+    return _sub("recordings")
+
+
 def bin_dir() -> str:
     """Tools fetched on demand (uv)."""
     return _sub("bin")

@@ -328,6 +328,14 @@ def main() -> None:
             except Exception:  # noqa: BLE001 — quitting regardless
                 logger.debug("close_all failed during quit", exc_info=True)
         server.stop_ai()  # evict resident models (kills worker processes), stop the warm claude
+        # End every recording BEFORE the server goes: each one has a file open
+        # and a native stream running, and the muxer finalises on stop. Lazy
+        # import so a bundle missing ScreenCaptureKit still quits cleanly.
+        try:
+            from fused_render_app import capture
+            capture.stop_all()
+        except Exception:  # noqa: BLE001 — quitting regardless
+            logger.debug("capture.stop_all failed during quit", exc_info=True)
         srv = state.get("server")
         if srv is not None:
             threading.Thread(target=srv.shutdown, daemon=True).start()

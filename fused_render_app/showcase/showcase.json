@@ -21,10 +21,7 @@
   },
   "05_OpenWhisper.fused": {
     "title": "OpenWhisper",
-    "description": "Local, offline speech-to-text for macOS. Press the mic, talk, and Whisper types the transcript into whatever app has focus. Audio never leaves the machine.",
-    "guarded": [
-      "fused.capture"
-    ]
+    "description": "Local, offline speech-to-text for macOS. Press the mic, talk, and Whisper types the transcript into whatever app has focus. Audio never leaves the machine."
   },
   "06_OpenColor.fused": {
     "title": "OpenColor",
@@ -44,10 +41,7 @@
   },
   "10_OpenScreen.fused": {
     "title": "OpenScreen",
-    "description": "A screen recorder: record your screen from the page, keep the recordings in a searchable library with metadata, and export clips.",
-    "guarded": [
-      "fused.capture"
-    ]
+    "description": "A screen recorder: record your screen from the page, keep the recordings in a searchable library with metadata, and export clips."
   },
   "11_ShatteredGlass.fused": {
     "title": "Shattered Glass",
