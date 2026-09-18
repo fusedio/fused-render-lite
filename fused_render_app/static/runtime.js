@@ -18,9 +18,16 @@
  *     A .fused app's own long-running daemon, declared in its pyproject.toml
  *     ([tool.fused-render.app] daemon = "x.py" | main = "y.py"); fused-render's
  *     block, copied verbatim (see background_routes.py).
+ *   fused.capture.screen(opts) / audio(opts) -> Promise<handle>,
+ *   fused.capture.screenshot(opts) -> Promise<file>,
+ *   fused.capture.sources() / list() / attach(id)
+ *     Native macOS screen / microphone / still capture (routes/capture.py).
+ *     screen() and audio() resolve when the recording is RUNNING with a handle
+ *     {id, path, url, mode, jobId, state, stop(), cancel()}; a recording is a
+ *     job row and outlives the page. Previews (?_preview=1) refuse to record.
  *
- * Everything else the full fused-render runtime exposes (capture,
- * fileIndex, snapshot) is NOT
+ * Everything else the full fused-render runtime exposes (fileIndex,
+ * snapshot) is NOT
  * supported: touching it throws "<name> is not supported on Render App".
  */
 (function () {
@@ -1603,6 +1610,215 @@
     watch: daemonWatch,
   };
 
+  // ---- fused.capture (routes/capture.py, capture/) --------------------------
+  //
+  // Native screen / microphone / still capture, macOS only — Render App is a
+  // Mac app, so the browser-recorder path fused-render carries for Windows and
+  // Linux (MediaRecorder + a streamed sink) is not ported: the server never
+  // answers `sources.client`, and every start is a plain POST that the native
+  // recorder serves. Contract, trimmed from fused-render's header:
+  //
+  //   screen({display, rect, audio, device, cursor, path, maxSeconds, title})
+  //   audio({source, device, path, maxSeconds, title})
+  //     -> Promise<handle>, resolving WHEN THE RECORDING IS RUNNING. handle =
+  //     {id, mode, path, url, jobId, maxSeconds, state, stop(), cancel()}.
+  //     stop() -> {path, url, mime, seconds, bytes} and KEEPS the file;
+  //     cancel() stops AND DELETES it (what the job row's ✕ does too). Elapsed
+  //     seconds live on the job row: fused.watchJob(rec.jobId). Nothing ends by
+  //     itself except maxSeconds (default 30 min), and that is a stop.
+  //     `audio` on screen() is false | "mic" | "system" | "both" — named, and
+  //     refused rather than coerced. audio() records the system's current
+  //     input; a `device` there is refused (pick one via screen's audio:"mic").
+  //   screenshot({display, rect, cursor, path})
+  //     -> Promise<{path, url, width, height, bytes, mime}>; no handle, no job
+  //     row. The file's EXTENSION picks png vs jpeg (there is no `format`).
+  //   sources() -> {video, audio, systemAudio, screenshot} each {available,
+  //     granted, reason}, plus `displays` and `microphones`. NEVER prompts —
+  //     the TCC dialog rides the first real capture — so draw the record
+  //     button off it. `available: false` always carries a `reason`.
+  //   list() -> live recordings on this machine, including another page's;
+  //   attach(id) -> handle for one of them (a reload finds its recording here
+  //     rather than starting a second one).
+  //
+  //   A RELATIVE `path` lands beside THIS PAGE, like readFile/rawUrl.
+  //   Rejections carry `.type`: "unavailable" (this machine cannot; show
+  //   .message), "bad_request" (the arguments, or a preview trying to record),
+  //   and on stop()/cancel() only "capture_error" (the file failed to write).
+  //
+  //   macOS 13+ records and shoots (13-14 via an AVAssetWriter muxer, 15+ via
+  //   ScreenCaptureKit's own recorder). No share picker, and a recording
+  //   survives the page that started it.
+  function captureFetch(path, body, method) {
+    return fetch(path, {
+      method: method || "POST",
+      headers: callHeaders(
+        body === undefined
+          ? { "X-Fused": "1" }
+          : { "Content-Type": "application/json", "X-Fused": "1" }),
+      body: body === undefined ? undefined : JSON.stringify(body || {}),
+    }).then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error((data && data.error) || res.statusText);
+        // 409 is "this machine cannot", 400 is "you asked wrong" — the same
+        // split /api/ai/* makes, so one `catch` can branch on `.type`.
+        err.type = res.status === 409 ? "unavailable" : "bad_request";
+        throw err;
+      }
+      return data;
+    });
+  }
+
+  // The page's own path, so a RELATIVE `path` lands beside THIS PAGE rather
+  // than beside wherever the server was launched from.
+  function captureBase(body) {
+    const ownPath = ownQuery("path");
+    if (ownPath) body.base = ownPath;
+    return body;
+  }
+
+  // Previews must not record. A card thumbnail mounts the page live in a
+  // sandboxed iframe, so an app whose init path starts a recording would open
+  // the TCC prompt — or write a file — just because its card scrolled past
+  // (the same guard fused.daemon's start()/stop() carry). sources(), list()
+  // and attach() stay open: read-only, and what a page should call on load.
+  function _captureRejectPreview(method) {
+    const err = new Error(
+      `fused.capture.${method}: refused — this page is rendering as a preview ` +
+      "thumbnail (a card peek or hover, not a real open), and previews must " +
+      "not record. Call fused.capture.sources() on load to draw the UI, and " +
+      "start a capture only from an explicit user action, e.g. a button's " +
+      "click handler."
+    );
+    err.type = "bad_request";
+    return Promise.reject(err);
+  }
+
+  // The handle a running recording hands back. `state` and `url` are getters
+  // so a rAF loop reading them never sees a stale copy. There is deliberately
+  // no onTick: elapsed seconds are on the job row, fused.watchJob(rec.jobId).
+  function captureHandle(started) {
+    let state = "recording";
+    let result = null;
+    // The PROMISE is memoized, not the settled value: a double-clicked stop
+    // button fires the request twice and the second one 404s. Cleared on
+    // failure so a stop that really failed can be retried.
+    let ending = null;
+    function end(action) {
+      if (ending) return ending;
+      ending = captureFetch(
+        "/api/capture/" + encodeURIComponent(started.id) + "/" + action)
+        .then((done) => {
+          state = done.state
+            || (action === "cancel" ? "cancelled" : "stopped");
+          // A stop whose file failed to write reports the failure rather than
+          // handing back a path to something unplayable.
+          if (done.error) {
+            const err = new Error(done.error);
+            err.type = "capture_error";
+            throw err;
+          }
+          result = done;
+          return done;
+        })
+        .catch((err) => {
+          ending = null;
+          throw err;
+        });
+      return ending;
+    }
+    const handle = {
+      id: started.id,
+      mode: started.mode,
+      path: started.path,
+      jobId: started.jobId,
+      maxSeconds: started.maxSeconds,
+      stop: () => end("stop"),      // keeps the file
+      cancel: () => end("cancel"),  // stops AND deletes it
+    };
+    Object.defineProperty(handle, "state", { get: () => state });
+    Object.defineProperty(handle, "url", {
+      get: () => (result ? result.url : rawUrl(started.path)),
+    });
+    return handle;
+  }
+
+  function captureStart(body) {
+    return captureFetch("/api/capture/start", captureBase(body))
+      .then((started) => captureHandle(started));
+  }
+
+  function captureScreen(opts) {
+    if (IS_THUMBNAIL) return _captureRejectPreview("screen");
+    opts = opts || {};
+    const body = { mode: "screen" };
+    for (const key of ["display", "rect", "audio", "device", "cursor", "path",
+                       "maxSeconds", "title"]) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    return captureStart(body);
+  }
+
+  // `device` is still forwarded so the refusal is the server's one sentence.
+  function captureAudio(opts) {
+    if (IS_THUMBNAIL) return _captureRejectPreview("audio");
+    opts = opts || {};
+    const body = { mode: "audio" };
+    for (const key of ["source", "device", "path", "maxSeconds", "title"]) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    return captureStart(body);
+  }
+
+  function captureScreenshot(opts) {
+    if (IS_THUMBNAIL) return _captureRejectPreview("screenshot");
+    opts = opts || {};
+    const body = {};
+    for (const key of ["display", "rect", "cursor", "path"]) {
+      if (opts[key] !== undefined) body[key] = opts[key];
+    }
+    return captureFetch("/api/capture/screenshot", captureBase(body));
+  }
+
+  // `client` is fused-render's wire-only flag for the browser-recorder path;
+  // this server never sets it, but it is stripped anyway so a page has nothing
+  // to branch on.
+  function captureMerge(sources) {
+    if (sources && sources.client) delete sources.client;
+    return sources;
+  }
+
+  function captureSources() {
+    return captureFetch("/api/capture", undefined, "GET")
+      .then((data) => captureMerge(data.sources));
+  }
+
+  function captureList() {
+    return captureFetch("/api/capture", undefined, "GET")
+      .then((data) => data.active || []);
+  }
+
+  function captureAttach(id) {
+    return captureList().then((rows) => {
+      const found = rows.find((row) => row.id === id);
+      if (!found) {
+        const err = new Error("no live capture with id " + id);
+        err.type = "bad_request";
+        throw err;
+      }
+      return captureHandle(found);
+    });
+  }
+
+  const capture = {
+    screen: captureScreen,
+    audio: captureAudio,
+    screenshot: captureScreenshot,
+    sources: captureSources,
+    list: captureList,
+    attach: captureAttach,
+  };
+
   window.fused = {
     env: "local",
     device: "desktop",
@@ -1622,7 +1838,7 @@
     snapshot: unsupportedFn("fused.snapshot"),
     daemon,
     ai,
-    capture: unsupportedNamespace("fused.capture"),
+    capture,
     fileIndex: unsupportedNamespace("fused.fileIndex"),
   };
 

@@ -21,6 +21,10 @@ app = [
     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
     # The app's windows are WKWebViews (mainwindow.py).
     "pyobjc-framework-WebKit; sys_platform == 'darwin'",
+    # fused.capture (capture/_darwin.py): native screen + mic recording and
+    # stills. Quartz, CoreMedia and CoreAudio arrive as their transitives.
+    "pyobjc-framework-ScreenCaptureKit; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

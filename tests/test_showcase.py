@@ -8,9 +8,10 @@ import pytest
 from fused_render_app import appfile, container, env, showcase
 
 # Every member a showcase app must NOT call: Render App throws on these. An app that
-# probes one inside try/catch and falls back (OpenWhisper: fused.capture ->
-# getUserMedia) lists it under "guarded" in showcase.json.
-UNSUPPORTED = ("fused.capture", "fused.fileIndex", "fused.snapshot", "autoReload(true")
+# probes one inside try/catch and falls back lists it under "guarded" in
+# showcase.json. (fused.capture left this list when the native macOS capture
+# API landed.)
+UNSUPPORTED = ("fused.fileIndex", "fused.snapshot", "autoReload(true")
 
 
 @pytest.fixture(autouse=True)
