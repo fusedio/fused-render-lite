@@ -66,6 +66,22 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.9.1
+
+Patch: per-app window frame memory, no packaging change.
+
+Every window shared one NSWindow frame-autosave name, so the first window
+restored wherever the last window of any app was left. Now each `.fused` app
+owns its own saved frame, keyed on its stable app id (`fused-app-id` meta,
+via `appfile.app_id_of`) so it survives updates, renames and moves; files
+that predate ids are keyed on abspath. Home keeps the historical name so an
+existing saved Home frame carries over. `window_policy.frame_autosave_name`
+holds the decision (pure, tested); `mainwindow` enacts it. A second window of
+an already-open app cascades from it instead of stacking, and does not take
+the autosave name. Frame is saved explicitly on close. Also fixed: cascading
+never worked (`cascadeTopLeftFromPoint:` was handed the front window's own
+top-left), and `window.open` popups no longer write to any saved frame.
+
 ## 0.9.0
 
 Minor bump: first showcase entry, no packaging change.
