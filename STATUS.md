@@ -68,6 +68,17 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.9.3
+
+Patch: launcher polish, no packaging change.
+
+The search always ends with a "Render App" row that opens the app's home
+window; <modifier>+0 does the same, in the panel and globally (bound alongside
+the pinned-app digits). macOS 26 backdrop: a HUD vibrancy material behind the
+Liquid Glass plus a heavier, appearance-following tint, so text stays legible
+over busy windows. Empty-state note sits above the list, not under the Render
+App row.
+
 ## 0.9.2
 
 Patch: Spotlight-like app launcher, no packaging change.
