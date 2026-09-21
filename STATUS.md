@@ -69,6 +69,16 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## Unreleased
+
+Legacy env aligned with fused-render's authoring skill. `LEGACY_DEPS`
+(`fused_render_app/env.py`) gains `pyarrow>=14`, `duckdb>=1.1` and `httpx`:
+fused-render's skill promises them to apps without a `pyproject.toml` (they
+ride along as core server deps there), so a `.fused` importing `httpx` worked
+in fused-render and failed here. `botocore` / `google-auth` stay out; the skill
+now says so. The generated legacy `pyproject.toml` header changes too, which
+invalidates the existing legacy venv and triggers one rebuild on next open.
+
 ## 0.9.3
 
 Patch: launcher polish, no packaging change.
