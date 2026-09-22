@@ -69,7 +69,9 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
-## Unreleased
+## 0.9.4
+
+Patch: legacy env deps + refreshed showcase files, no packaging change.
 
 Legacy env aligned with fused-render's authoring skill. `LEGACY_DEPS`
 (`fused_render_app/env.py`) gains `pyarrow>=14`, `duckdb>=1.1` and `httpx`:
@@ -78,6 +80,9 @@ ride along as core server deps there), so a `.fused` importing `httpx` worked
 in fused-render and failed here. `botocore` / `google-auth` stay out; the skill
 now says so. The generated legacy `pyproject.toml` header changes too, which
 invalidates the existing legacy venv and triggers one rebuild on next open.
+
+Showcase: `02_DoodleShooter.fused` and `03_OpenRelax.fused` updated (OpenRelax
+grows ~130 KB → ~432 KB).
 
 ## 0.9.3
 
