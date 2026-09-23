@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.9.5 | 43.43 MB (43,434,486 B) | −0.00 MB | 99 MB | legacy env drops pyarrow/duckdb; DoodleShooter + OpenRelax regain pyproject.toml (+361 B); no packaging change |
 | 0.9.4 | 43.44 MB (43,438,706 B) | +0.41 MB | 99 MB | legacy env deps (pyarrow/duckdb/httpx); refreshed DoodleShooter + OpenRelax showcase files (OpenRelax ~130 KB → ~432 KB); no packaging change |
 | 0.9.3 | 43.03 MB (43,029,693 B) | −0.00 MB | 99 MB | launcher polish (Render App row / ⌥0, frostier glass); no packaging change |
 | 0.9.2 | 43.03 MB (43,032,592 B) | +0.01 MB | 99 MB | Spotlight-like app launcher (hotkey, launcher, launcher_panel, launcher.html, settings.html); no packaging change |
