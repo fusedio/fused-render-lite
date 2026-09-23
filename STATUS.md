@@ -70,7 +70,18 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
-## Unreleased
+## 0.9.5
+
+Patch: legacy env sheds pyarrow/duckdb; showcase containers regain their
+`pyproject.toml`; no packaging change.
+
+Showcase: `02_DoodleShooter.fused` and `03_OpenRelax.fused` were re-exported
+from fused-render in 0.9.4 without a `pyproject.toml` (the exporter dropped
+it; upstream follow-up). Since `env.ensure` runs on every open, both demos
+pulled the full legacy venv on first click, and `test_showcase` had been red
+on `main` since then (the release job does not gate on `test`). Re-added:
+empty deps for DoodleShooter (pure three.js), `httpx` for OpenRelax
+(`research.py`, `sounds.py` import it). All other members byte-identical.
 
 Legacy env drops `pyarrow` and `duckdb`: 122 MB + 44 MB installed (58% of the
 285 MB legacy venv; pyarrow alone is 3x pandas), both added in 0.9.4 only for
