@@ -70,6 +70,15 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## Unreleased
+
+Legacy env drops `pyarrow` and `duckdb`: 122 MB + 44 MB installed (58% of the
+285 MB legacy venv; pyarrow alone is 3x pandas), both added in 0.9.4 only for
+parity with fused-render's authoring skill. Removed from `LEGACY_DEPS`; a
+`.fused` without a `pyproject.toml` that imports either now fails on open
+(accepted). The generated legacy `pyproject.toml` header changes, so the legacy
+venv rebuilds once on next open.
+
 ## 0.9.4
 
 Patch: legacy env deps + refreshed showcase files, no packaging change.

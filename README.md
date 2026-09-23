@@ -150,9 +150,9 @@ interpreter at `Contents/MacOS/python`, whole stdlib, self-locating through a
 Every environment is built on it. Each `.fused` app carries its own
 `pyproject.toml`; on open, `uv sync --python <that interpreter>` builds a venv
 for it under `~/.fused-render-app/venvs/` and `runPython` runs inside it. An app without a `pyproject.toml` runs in one
-shared "legacy" venv holding fused-render's implicit set (numpy, pandas, pyarrow,
-duckdb, requests, httpx, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3;
-not botocore or google-auth), also built
+shared "legacy" venv holding fused-render's implicit set (numpy, pandas,
+requests, httpx, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3;
+not pyarrow, duckdb, botocore or google-auth), also built
 on first use, so older `.fused` exports keep working.
 
 `uv` ships inside the app (`Contents/Resources/bin/uv`, copied from the build
