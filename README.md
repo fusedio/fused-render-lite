@@ -47,6 +47,17 @@ app"; ⌘Q and the Dock also quit. View → Open in Browser hands the current pa
 to the default browser. `FUSED_RENDER_APP_NO_BROWSER=1` suppresses the
 startup window.
 
+Every window's title bar ends in three buttons: Edit, Open in Browser, Home
+(View → Edit in fused-render ⌘⇧E, Open in Browser ⌘⇧L, Home ⌘⇧H). Edit hands
+the window's `.fused` to fused-render, the full editor, as a
+`fused-render://open?file=<path>` deep link: fused-render clones it into its
+workspace (`~/Fused/local/<name>`) and opens the copy for editing; when a
+copy already exists, fused-render asks whether to overwrite it with this
+`.fused` or open the copy as it is. Edit is disabled
+on Home. Without fused-render installed, a dialog offers to download the
+latest DMG (`render.fused.io/latest.json` → `dmg_url`, falling back to the
+download page) — `editlink.py`.
+
 ⌥Space (change it in Settings — the gear on the home page — or from the
 search panel's footer; right-click the menu-bar item → "Search Apps…" opens
 it without a shortcut) drops a Spotlight-like search panel: empty, it lists the

@@ -95,7 +95,7 @@ from WebKit import (
     WKWebViewConfiguration,
 )
 
-from fused_render_app import __version__, appfile, paths, webnotify, window_policy
+from fused_render_app import __version__, appfile, editlink, paths, webnotify, window_policy
 from fused_render_app.cli import open_url
 
 logger = logging.getLogger(__name__)
@@ -284,6 +284,7 @@ class _WebDelegate(NSObject):
                 # Plain Python attribute, main thread: the server thread reads
                 # it (WindowManager.open_files) without touching WebKit.
                 self._window.app_file = app_file_of(url)
+                self._window.sync_edit_button()
             decision(WKNavigationActionPolicyAllow)
         elif verdict == "download":
             decision(WKNavigationActionPolicyDownload)
@@ -551,14 +552,17 @@ class _Window:
             self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
 
     def _add_titlebar_button(self) -> None:
-        """"Open in Browser" and "Home" buttons at the right end of the title
-        bar — Home rightmost, Browser to its left.
+        """"Edit", "Open in Browser" and "Home" buttons at the right end of
+        the title bar — Home rightmost, Browser to its left, Edit leftmost.
 
         A titlebar accessory keeps the standard titled window (title stays
         centred, traffic lights untouched) — no toolbar row, no
-        full-size-content-view mask. Same actions as the ⌘⇧L / ⌘⇧H menu items.
+        full-size-content-view mask. Same actions as the ⌘⇧E / ⌘⇧L / ⌘⇧H
+        menu items. Edit only means something for a window showing a
+        ``.fused``: it is disabled on Home (`sync_edit_button`).
         """
         specs = (  # left to right
+            ("square.and.pencil", "Edit", "Edit in fused-render (⌘⇧E)", b"editInFusedRender:"),
             ("safari", "Open in Browser", "Open in Browser (⌘⇧L)", b"openInBrowser:"),
             ("house", "Home", "Home (⌘⇧H)", b"goHome:"),
         )
@@ -573,6 +577,8 @@ class _Window:
             button.setControlSize_(NSControlSizeLarge)
             button.sizeToFit()
             buttons.append(button)
+        self.edit_button = buttons[0]
+        self.sync_edit_button()
         gap = 6   # between buttons
         pad = 10  # breathing room from the window's right edge
         bh = max(b.frame().size.height for b in buttons)
@@ -592,6 +598,14 @@ class _Window:
         vc.setView_(holder)
         vc.setLayoutAttribute_(NSLayoutAttributeTrailing)
         self.ns.addTitlebarAccessoryViewController_(vc)
+
+    def sync_edit_button(self) -> None:
+        """Edit follows the page: enabled while the window shows a ``.fused``,
+        disabled on Home. Called at creation and on every main-frame
+        navigation (`app_file` moves with the page)."""
+        button = getattr(self, "edit_button", None)
+        if button is not None:
+            button.setEnabled_(self.app_file is not None)
 
     def _place(self) -> None:
         """Size and position the new window.
@@ -776,6 +790,38 @@ class _MenuTarget(NSObject):
     def openInBrowser_(self, _s):
         w = self._m.key()
         webbrowser.open((w and w.current_url()) or self._m.home_url)
+
+    def editInFusedRender_(self, _s):
+        """Hand the front window's ``.fused`` to fused-render for editing
+        (title-bar Edit, ⌘⇧E). fused-render clones it into its workspace and
+        opens the copy; nothing here touches the file. Without fused-render
+        installed, offer its latest DMG instead."""
+        w = self._m.key()
+        app_file = w.app_file if w is not None else None
+        if not app_file:
+            return  # Home, or no window: the button is disabled there anyway
+        workspace = NSWorkspace.sharedWorkspace()
+        handler = workspace.URLForApplicationToOpenURL_(_nsurl(editlink.PROBE_URL))
+        if handler is None:
+            logger.info("no handler for %s://; offering the fused-render download", editlink.SCHEME)
+            self._offer_fused_render_download()
+            return
+        url = editlink.edit_url(app_file)
+        logger.info("edit in fused-render (%s): %s", handler.path(), url)
+        if not workspace.openURL_(_nsurl(url)):
+            logger.warning("NSWorkspace refused %s", url)
+            self._offer_fused_render_download()
+
+    def _offer_fused_render_download(self) -> None:
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("fused-render is not installed")
+        alert.setInformativeText_(
+            "Editing an app needs fused-render, the full editor. Download and "
+            "install the latest version, then click Edit again.")
+        alert.addButtonWithTitle_("Download fused-render")
+        alert.addButtonWithTitle_("Cancel")
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            _open_external(editlink.download_url())
 
     def copyUrl_(self, _s):
         w = self._m.key()
@@ -1054,6 +1100,7 @@ def _build_main_menu(target) -> NSMenu:
         item("Forward", b"goForward:", "]"),
         item("Home", b"goHome:", "H", CMD | _SHIFT),
         sep(),
+        item("Edit in fused-render", b"editInFusedRender:", "E", CMD | _SHIFT),
         item("Open in Browser", b"openInBrowser:", "L", CMD | _SHIFT),
         item("Copy URL", b"copyUrl:", "C", CMD | _SHIFT),
         sep(),
