@@ -348,6 +348,23 @@ def main() -> None:
 
     server.native_hooks["relaunch"] = relaunch
 
+    def _stop_captures() -> None:
+        """End every recording BEFORE the process goes: each one has a file
+        open and a native stream running, and a .mov only gets its moov atom
+        on stop. Lazy import so a bundle missing ScreenCaptureKit still quits
+        cleanly. Idempotent — `stop_all` on an empty registry is a no-op."""
+        try:
+            from fused_render_app import capture
+            capture.stop_all()
+        except Exception:  # noqa: BLE001 — quitting regardless
+            logger.debug("capture.stop_all failed during quit", exc_info=True)
+
+    # Logout, shutdown and any `NSApp.terminate:` never reach `quit_app`:
+    # AppKit exits through C `exit()`, which runs no Python `atexit` handler.
+    # rumps emits `before_quit` from `applicationWillTerminate:`, synchronously
+    # and before that exit, so this is the one hook that covers those paths.
+    rumps.events.before_quit.register(lambda: _stop_captures())
+
     def quit_app(_sender) -> None:
         logger.info("quitting")
         # Unload every page and destroy its web view first, so media stops
@@ -359,14 +376,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001 — quitting regardless
                 logger.debug("close_all failed during quit", exc_info=True)
         server.stop_ai()  # evict resident models (kills worker processes), stop the warm claude
-        # End every recording BEFORE the server goes: each one has a file open
-        # and a native stream running, and the muxer finalises on stop. Lazy
-        # import so a bundle missing ScreenCaptureKit still quits cleanly.
-        try:
-            from fused_render_app import capture
-            capture.stop_all()
-        except Exception:  # noqa: BLE001 — quitting regardless
-            logger.debug("capture.stop_all failed during quit", exc_info=True)
+        _stop_captures()
         srv = state.get("server")
         if srv is not None:
             threading.Thread(target=srv.shutdown, daemon=True).start()

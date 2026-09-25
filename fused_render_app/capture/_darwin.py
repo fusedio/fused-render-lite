@@ -269,12 +269,24 @@ def _display(display_id) -> object:
         wait.done(error)
 
     SCK.SCShareableContent.getShareableContentWithCompletionHandler_(handler)
-    wait.result()
+    from fused_render_app.capture import Unsupported
+
+    # On macOS 15+ a machine without the Screen Recording grant answers this
+    # call at once with a "user declined" error while the TCC prompt is posted
+    # asynchronously; older releases held the call until the dialog was
+    # answered. Either way the page must get the 409 `unavailable` shape with
+    # the System Settings sentence, so it can tell the user to grant and retry,
+    # not a 500 that runtime.js files under `bad_request`.
+    grant = ("Screen Recording is not granted to Render App — allow it in "
+             "System Settings › Privacy & Security › Screen & System Audio "
+             "Recording, then try again")
+    try:
+        wait.result()
+    except RuntimeError as e:
+        raise Unsupported(f"{grant} ({e})") from e
     displays = list(box.get("content").displays()) if box.get("content") else []
     if not displays:
-        raise RuntimeError(
-            "no capturable display — Screen Recording permission is most "
-            "likely denied (System Settings › Privacy & Security)")
+        raise Unsupported(f"no capturable display — {grant}")
     if display_id in (None, "", 0):
         wanted = Quartz.CGMainDisplayID()
     else:
@@ -519,12 +531,16 @@ def failure(handle) -> str | None:
     that, and it is why the delegate stores the error instead of only unblocking
     `stop`.
     """
+    if isinstance(handle, _ScreenHandle):
+        return handle.finished.error or None
+    if isinstance(handle, _AudioHandle):
+        return None
+    # Only a 13–14 (or FORCE_MUX) handle reaches the muxer, so its module —
+    # with ctypes and protocol lookups at import — is never touched on 15+.
     from fused_render_app.capture import _darwin_mux
 
     if isinstance(handle, _darwin_mux.MuxHandle):
         return _darwin_mux.failure(handle)
-    if isinstance(handle, _ScreenHandle):
-        return handle.finished.error or None
     return None
 
 
@@ -538,11 +554,14 @@ def stop(handle) -> None:
     however quiet its delegate was. AVFoundation's callback needs a run loop
     nobody here can promise, so audio only ever watches the file.
     """
-    from fused_render_app.capture import _darwin_mux
+    if not isinstance(handle, (_ScreenHandle, _AudioHandle)):
+        # See `failure`: the muxer's import must not sit between a 15+ stream
+        # and its `stopCaptureWithCompletionHandler:`.
+        from fused_render_app.capture import _darwin_mux
 
-    if isinstance(handle, _darwin_mux.MuxHandle):
-        _darwin_mux.stop(handle)
-        return
+        if isinstance(handle, _darwin_mux.MuxHandle):
+            _darwin_mux.stop(handle)
+            return
     if isinstance(handle, _ScreenHandle):
         wait = _Wait("stopping the capture")
         handle.stream.stopCaptureWithCompletionHandler_(wait.done)

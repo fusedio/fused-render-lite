@@ -438,6 +438,14 @@ def test_a_recording_that_dies_mid_flight_ends_its_row_then(backend, client,
     assert row["state"] == "error"
     assert "display went away" in row["message"]
     assert backend.handles[0].stopped is True
+    # The page still holds the handle and calls stop(): it must be told the
+    # take was lost (runtime.js turns `error` into `capture_error`), not 404.
+    status, _, body = client.post(f"/api/capture/{started['id']}/stop", {})
+    assert status == 200
+    done = J(body)
+    assert done["state"] == "error"
+    assert "display went away" in done["error"]
+    assert done["path"] == started["path"]
 
 
 def test_a_tick_that_raises_does_not_strand_the_recording(backend, client,
@@ -529,6 +537,18 @@ def test_stop_all_runs_in_the_quit_path_before_the_server_goes():
     stop = source.index("capture.stop_all()")
     assert stop < source.index("srv.shutdown")
     assert stop < source.index("os._exit(0)")
+
+
+def test_logout_and_shutdown_also_end_the_recordings():
+    """Logout, shutdown and any `NSApp.terminate:` never reach `quit_app`:
+    AppKit exits through C `exit()`, which runs no `atexit` handler, so the
+    only hook left is `applicationWillTerminate:` — rumps re-emits it as
+    `events.before_quit`, synchronously and before the exit."""
+    source = open(os.path.join(ROOT, "fused_render_app", "macapp.py"),
+                  encoding="utf-8").read()
+    assert "rumps.events.before_quit.register(" in source
+    hook = source.index("rumps.events.before_quit.register(")
+    assert "_stop_captures" in source[hook:hook + 120]
 
 
 def test_stop_all_finalises_everything_on_the_way_out(backend, client):
@@ -639,6 +659,70 @@ def test_the_macos_backend_imports_and_probes_without_prompting():
         assert set(payload[key]) >= {"available", "reason"}
     assert isinstance(payload["displays"], list)
     assert isinstance(payload["microphones"], list)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the macOS backend")
+def test_a_refused_screen_recording_grant_is_a_409_not_a_500(monkeypatch):
+    """macOS 15+ answers `getShareableContent` at once with a "declined"
+    error while the TCC prompt is still up; older releases hold the call. Both
+    must reach the page as `unavailable` with the System Settings sentence,
+    not as a 500 that runtime.js files under `bad_request`."""
+    from fused_render_app.capture import _darwin
+
+    class Declined:
+        def localizedDescription(self):
+            return "The user declined TCCs for application"
+
+    import types
+
+    def fake_sck(answer):
+        class SC:
+            getShareableContentWithCompletionHandler_ = staticmethod(answer)
+        return types.SimpleNamespace(SCShareableContent=SC)
+
+    monkeypatch.setattr(_darwin, "SCK",
+                        fake_sck(lambda handler: handler(None, Declined())))
+    with pytest.raises(capture.Unsupported) as e:
+        _darwin._display(None)
+    assert "System Settings" in str(e.value)
+    assert "declined" in str(e.value)
+
+    class Empty:
+        def displays(self):
+            return []
+
+    monkeypatch.setattr(_darwin, "SCK",
+                        fake_sck(lambda handler: handler(Empty(), None)))
+    with pytest.raises(capture.Unsupported) as e:
+        _darwin._display(None)
+    assert "System Settings" in str(e.value)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the macOS backend")
+def test_a_native_handle_never_imports_the_muxer(monkeypatch):
+    """On 15+ `stop` and `failure` must reach the stream's own stop without
+    importing `_darwin_mux` — its module-scope ctypes and protocol lookups are
+    one more thing a future macOS can break between a stream and its stop."""
+    from fused_render_app.capture import _darwin
+
+    class Finished:
+        error = "gone"
+
+    class Handle(_darwin._ScreenHandle):
+        def __init__(self):
+            self.finished = Finished()
+
+    real_import = builtins.__import__
+
+    def no_mux(name, globals=None, locals=None, fromlist=(), level=0):
+        if "_darwin_mux" in name or "_darwin_mux" in (fromlist or ()):
+            raise AssertionError("the muxer was imported for a native handle")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "fused_render_app.capture._darwin_mux",
+                        raising=False)
+    monkeypatch.setattr(builtins, "__import__", no_mux)
+    assert _darwin.failure(Handle()) == "gone"
 
 
 # --------------------------------------------------- the macOS 13-14 recorder

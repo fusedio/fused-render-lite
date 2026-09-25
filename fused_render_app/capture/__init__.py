@@ -536,6 +536,14 @@ def _tick(session: _Session) -> bool:
             _backend().stop(session.handle)
         except Exception:                        # noqa: BLE001 - already failed
             pass
+        # The page still holds a handle and will call `stop()`: it must get
+        # the error record (same shape `stop` returns), not a 404 for a
+        # recording it never ended — `_remember` is what turns a lost take
+        # into the `capture_error` rejection runtime.js promises.
+        result = session.public()
+        result.update(_describe(session.path))
+        result["error"] = died
+        _remember(session.id, result)
         return True
     if _cancel_requested(session):
         try:
