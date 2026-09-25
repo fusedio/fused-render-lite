@@ -29,7 +29,7 @@ import threading
 import time
 import urllib.request
 
-from fused_render_app import paths
+from fused_render_app import engine, paths
 
 logger = logging.getLogger(__name__)
 
@@ -400,20 +400,11 @@ def _error(err_type: str, message: str, detail: str = "") -> dict:
             "stdout": ""}
 
 
-def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S) -> dict:
-    started = time.monotonic()
-    if not os.path.isfile(path):
-        return _error("FileNotFoundError", f"no such Python file: {path}")
-    inst = ensure(app_dir)
-    if inst is not None and inst.status in ("pending", "running"):
-        if not inst.wait(timeout):
-            return _error("EnvironmentNotReady", "the app's environment is still installing")
-    if inst is not None and inst.status == "error":
-        return _error("EnvironmentError",
-                      "the app's environment failed to install: " + (inst.error or ""),
-                      "\n".join(inst.lines[-40:]))
-    python = interpreter_for(app_dir)
-    request = json.dumps({"path": path, "params": params or {}})
+def _run_child(path: str, params: dict, python: str, timeout: float) -> dict:
+    """The built-in worker: `_child.py` spawned per call on the app's venv
+    interpreter. What every run used before the fused engine (`engine.py`), and
+    still the path when the `fused` package is absent or `FUSED_RENDER_APP_ENGINE=child`."""
+    request = json.dumps({"path": path, "params": params})
     try:
         proc = subprocess.run(
             [python, _CHILD], input=request, capture_output=True, text=True,
@@ -439,6 +430,30 @@ def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEO
         result = _error("ExecutorError",
                         f"worker exited with code {proc.returncode} without producing a result",
                         proc.stderr[-4000:])
+    return result
+
+
+def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S) -> dict:
+    started = time.monotonic()
+    if not os.path.isfile(path):
+        return _error("FileNotFoundError", f"no such Python file: {path}")
+    inst = ensure(app_dir)
+    if inst is not None and inst.status in ("pending", "running"):
+        if not inst.wait(timeout):
+            return _error("EnvironmentNotReady", "the app's environment is still installing")
+    if inst is not None and inst.status == "error":
+        return _error("EnvironmentError",
+                      "the app's environment failed to install: " + (inst.error or ""),
+                      "\n".join(inst.lines[-40:]))
+    python = interpreter_for(app_dir)
+    try:
+        use_engine = engine.active()
+    except RuntimeError as e:  # FUSED_RENDER_APP_ENGINE=fused without the package
+        return _error("EngineError", str(e))
+    if use_engine:
+        result = engine.run_python(path, params or {}, python)
+    else:
+        result = _run_child(path, params or {}, python, timeout)
     result.setdefault("duration_ms", round((time.monotonic() - started) * 1000))
     if not result.get("ok"):
         err = result.get("error") or {}

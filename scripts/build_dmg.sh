@@ -107,8 +107,10 @@ rm -f "$DIST_DIR"/*.whl
 "$BUILD_VENV/bin/pip" install --quiet --upgrade build
 "$BUILD_VENV/bin/python" -m build --quiet --wheel --outdir "$DIST_DIR" "$REPO_ROOT"
 WHEEL_PATH="$(ls "$DIST_DIR"/*.whl)"
-echo "==> installing ${WHEEL_PATH##*/} [app] + py2app + dmgbuild + pillow into the build venv"
-"$BUILD_VENV/bin/pip" install --quiet "${WHEEL_PATH}[app]" py2app dmgbuild pillow
+echo "==> installing ${WHEEL_PATH##*/} [app,fused] + py2app + dmgbuild + pillow into the build venv"
+# [fused]: the execution engine and its closure (setup_py2app.py derives the
+# py2app force lists from what this install puts in the venv).
+"$BUILD_VENV/bin/pip" install --quiet "${WHEEL_PATH}[app,fused]" py2app dmgbuild pillow
 # The build venv is reused across builds; make sure THIS wheel's code is what
 # py2app copies, not a cached earlier install of the same version number.
 "$BUILD_VENV/bin/pip" install --quiet --force-reinstall --no-deps --no-cache-dir "${WHEEL_PATH}"
