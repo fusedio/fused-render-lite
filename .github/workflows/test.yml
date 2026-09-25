@@ -47,7 +47,8 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - uses: astral-sh/setup-uv@v9.0.0
-      - run: pip install -e ".[dev]"
+      # [fused] so tests/test_engine.py runs the fused engine, not just skips.
+      - run: pip install -e ".[dev,fused]"
       - run: pytest -q
 
   # The same smoke build fused-render's macos-desktop job runs: build_dmg.sh
