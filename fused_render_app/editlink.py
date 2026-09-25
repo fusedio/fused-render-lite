@@ -3,8 +3,9 @@
 Render App only *runs* a ``.fused``. Editing it means fused-render, the full
 editor, so the button builds a ``fused-render://open?file=<path>`` deep link
 and lets LaunchServices deliver it. fused-render clones the file into its
-workspace (``~/Fused/local/<slug>``, a no-op when the copy is already there)
-and lands on the editable copy — see fused-render's ``deeplink.py``.
+workspace (``~/Fused/local/<slug>``; when a copy is already there it asks
+whether to overwrite it or open it as is) and lands on the editable copy —
+see fused-render's ``deeplink.py``.
 
 Contract with fused-render: the path is percent-encoded ONCE here
 (``quote(path, safe="")``) and unquoted ONCE there. ``&``, ``#``, spaces and

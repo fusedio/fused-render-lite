@@ -51,8 +51,9 @@ Every window's title bar ends in three buttons: Edit, Open in Browser, Home
 (View → Edit in fused-render ⌘⇧E, Open in Browser ⌘⇧L, Home ⌘⇧H). Edit hands
 the window's `.fused` to fused-render, the full editor, as a
 `fused-render://open?file=<path>` deep link: fused-render clones it into its
-workspace (`~/Fused/local/<name>`, a no-op when the copy already exists, so
-edits are never overwritten) and opens the copy for editing. Edit is disabled
+workspace (`~/Fused/local/<name>`) and opens the copy for editing; when a
+copy already exists, fused-render asks whether to overwrite it with this
+`.fused` or open the copy as it is. Edit is disabled
 on Home. Without fused-render installed, a dialog offers to download the
 latest DMG (`render.fused.io/latest.json` → `dmg_url`, falling back to the
 download page) — `editlink.py`.
