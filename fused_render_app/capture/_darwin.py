@@ -204,7 +204,10 @@ def _list_mics() -> list[dict]:
     default_id = str(default.uniqueID()) if default is not None else None
     session_cls = getattr(AVF, "AVCaptureDeviceDiscoverySession", None)
     mic_type = getattr(AVF, "AVCaptureDeviceTypeMicrophone", None)
-    if session_cls is not None and mic_type is not None:
+    # `AVCaptureDeviceTypeMicrophone` is a macOS 14 device type; the binding
+    # exposes the NAME on every release, so a 13 that took this branch would
+    # build a session that matches nothing and report no microphones.
+    if session_cls is not None and mic_type is not None and _os_version() >= (14, 0):
         session = session_cls.discoverySessionWithDeviceTypes_mediaType_position_(
             [mic_type], AVF.AVMediaTypeAudio, 0)       # AVCaptureDevicePositionUnspecified
         devices = list(session.devices())

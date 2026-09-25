@@ -534,33 +534,36 @@ def start(out: str, display, config, spec: dict) -> MuxHandle:
         raise RuntimeError("the writer would not start: "
                            + (handle._writer_error() or "unknown error"))
 
-    content_filter = SCK.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
-        display, [])
-    watch = _StreamWatch.alloc().initWithRecorder_(handle)
-    stream = SCK.SCStream.alloc().initWithFilter_configuration_delegate_(
-        content_filter, config, watch)
-    output = _ScreenOutput.alloc().initWithRecorder_(handle)
-
-    ok, error = stream.addStreamOutput_type_sampleHandlerQueue_error_(
-        output, _TYPE_SCREEN, _SCREEN_Q, None)
-    if not ok:
-        raise RuntimeError(f"could not attach the screen output: {error}")
-    if handle.audio in ("system", "both"):
-        ok, error = stream.addStreamOutput_type_sampleHandlerQueue_error_(
-            output, _TYPE_AUDIO, _AUDIO_Q, None)
-        if not ok:
-            raise RuntimeError(f"could not attach the audio output: {error}")
-
-    handle.stream = stream
-    handle.output = output
-    handle.watch = watch
-
-    if handle.audio in ("mic", "both"):
-        _start_mic(handle, spec)
-
-    started = _Wait("starting the capture", PROMPT_S, prompt=True)
-    stream.startCaptureWithCompletionHandler_(started.done)
+    # From here on the writer holds the output file open: EVERY failure below,
+    # not only a refused `startCapture`, has to cancel it — otherwise a retry
+    # to the same `path` finds the file busy and an empty .mov is left behind.
     try:
+        content_filter = SCK.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+            display, [])
+        watch = _StreamWatch.alloc().initWithRecorder_(handle)
+        stream = SCK.SCStream.alloc().initWithFilter_configuration_delegate_(
+            content_filter, config, watch)
+        output = _ScreenOutput.alloc().initWithRecorder_(handle)
+
+        ok, error = stream.addStreamOutput_type_sampleHandlerQueue_error_(
+            output, _TYPE_SCREEN, _SCREEN_Q, None)
+        if not ok:
+            raise RuntimeError(f"could not attach the screen output: {error}")
+        if handle.audio in ("system", "both"):
+            ok, error = stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                output, _TYPE_AUDIO, _AUDIO_Q, None)
+            if not ok:
+                raise RuntimeError(f"could not attach the audio output: {error}")
+
+        handle.stream = stream
+        handle.output = output
+        handle.watch = watch
+
+        if handle.audio in ("mic", "both"):
+            _start_mic(handle, spec)
+
+        started = _Wait("starting the capture", PROMPT_S, prompt=True)
+        stream.startCaptureWithCompletionHandler_(started.done)
         started.result()
     except Exception:
         stop(handle, keep=False)

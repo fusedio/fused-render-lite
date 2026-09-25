@@ -162,6 +162,51 @@ def test_probe_survives_a_microphone_enumeration_that_raises(monkeypatch):
                             "displays", "microphones"}
 
 
+def test_mic_enumeration_on_thirteen_uses_the_legacy_call(monkeypatch):
+    """`AVCaptureDeviceTypeMicrophone` is macOS 14: the binding exposes the
+    NAME on 13 too, so the gate has to be the OS, not `getattr`. Otherwise 13
+    builds a discovery session that matches nothing and lists no mics."""
+    import types
+
+    from fused_render_app.capture import _darwin
+
+    class Device:
+        def __init__(self, uid, name):
+            self._uid, self._name = uid, name
+
+        def uniqueID(self):
+            return self._uid
+
+        def localizedName(self):
+            return self._name
+
+    class Session:
+        @staticmethod
+        def discoverySessionWithDeviceTypes_mediaType_position_(types_, media, pos):
+            return types.SimpleNamespace(devices=lambda: [])   # 13: matches nothing
+
+    class CaptureDevice:
+        @staticmethod
+        def defaultDeviceWithMediaType_(media):
+            return Device("m0", "Built-in")
+
+        @staticmethod
+        def devicesWithMediaType_(media):
+            return [Device("m0", "Built-in")]
+
+    fake = types.SimpleNamespace(
+        AVCaptureDevice=CaptureDevice, AVMediaTypeAudio="soun",
+        AVCaptureDeviceDiscoverySession=Session,
+        AVCaptureDeviceTypeMicrophone="AVCaptureDeviceTypeMicrophone")
+    monkeypatch.setattr(_darwin, "AVF", fake)
+
+    monkeypatch.setattr(_darwin, "_os_version", lambda: (13, 6))
+    assert [m["id"] for m in _darwin._list_mics()] == ["m0"]
+
+    monkeypatch.setattr(_darwin, "_os_version", lambda: (14, 0))
+    assert _darwin._list_mics() == []        # the session's answer, as asked
+
+
 def test_probe_survives_a_display_enumeration_that_raises(monkeypatch):
     from fused_render_app.capture import _darwin
 

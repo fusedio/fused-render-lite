@@ -1701,12 +1701,17 @@
     let state = "recording";
     let result = null;
     // The PROMISE is memoized, not the settled value: a double-clicked stop
-    // button fires the request twice and the second one 404s. Cleared on
-    // failure so a stop that really failed can be retried.
-    let ending = null;
+    // button fires the request twice and the second one 404s. Memoized PER
+    // ACTION, because the two are not the same request: a cancel() after a
+    // stop() must still reach the server, which deletes the file the stop
+    // kept (cancel-after-stop is a supported ending). A stop() after a
+    // cancel() has nothing left to keep and simply shares the cancel. Cleared
+    // on failure so an ending that really failed can be retried.
+    const ending = { stop: null, cancel: null };
     function end(action) {
-      if (ending) return ending;
-      ending = captureFetch(
+      if (ending[action]) return ending[action];
+      if (action === "stop" && ending.cancel) return ending.cancel;
+      const request = () => captureFetch(
         "/api/capture/" + encodeURIComponent(started.id) + "/" + action)
         .then((done) => {
           state = done.state
@@ -1722,10 +1727,16 @@
           return done;
         })
         .catch((err) => {
-          ending = null;
+          ending[action] = null;
           throw err;
         });
-      return ending;
+      // A cancel while a stop is in flight waits for it: the server parks a
+      // second ending on the first anyway, and the reply order is then the
+      // one the page sees.
+      ending[action] = (action === "cancel" && ending.stop)
+        ? ending.stop.then(request, request)
+        : request();
+      return ending[action];
     }
     const handle = {
       id: started.id,

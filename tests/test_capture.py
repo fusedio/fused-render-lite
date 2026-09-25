@@ -286,6 +286,18 @@ def test_a_missing_directory_is_refused_rather_than_half_recorded(backend,
     assert "no such directory" in J(body)["error"]
 
 
+def test_a_directory_is_refused_rather_than_written_beside(backend, client,
+                                                         tmp_path):
+    """A bare name that is a FOLDER must not gain an extension and land as a
+    sibling file: the check runs on the path as given."""
+    (tmp_path / "clips").mkdir()
+    status, _, body = client.post(
+        "/api/capture/start", {"mode": "screen", "path": str(tmp_path / "clips")})
+    assert status == 400
+    assert "is a directory" in J(body)["error"]
+    assert not (tmp_path / "clips.mov").exists()
+
+
 def test_an_existing_file_is_refused_rather_than_overwritten(backend, client,
                                                             tmp_path):
     """A recording silently replacing last week's take is the one outcome no
@@ -713,6 +725,10 @@ def test_the_runtime_bridge_exposes_capture():
     source = open(os.path.join(ROOT, "fused_render_app", "static", "runtime.js"),
                   encoding="utf-8").read()
     assert "\n    capture,\n" in source          # on the window.fused literal
+    # stop() and cancel() are memoized PER ACTION: a cancel after a stop is a
+    # second request (the server deletes the kept file), not the stop's reply.
+    assert "const ending = { stop: null, cancel: null };" in source
+    assert "ending.stop.then(request, request)" in source
     for method in ("screen:", "audio:", "screenshot:", "sources:", "list:",
                    "attach:"):
         assert method in source, method

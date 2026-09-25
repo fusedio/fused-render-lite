@@ -265,6 +265,11 @@ def _resolve_out(path, base, default_ext: str, *, accept=None,
                 "'path' must be absolute, or relative to a page named by 'base'")
         out = os.path.join(os.path.dirname(base), out)
     out = os.path.realpath(out)
+    # Checked on the path AS GIVEN, before an extension is appended: a bare
+    # "clips" naming a folder must be refused, not written as "clips.mov"
+    # beside it.
+    if os.path.isdir(out):
+        raise CaptureError(f"'path' is a directory: {out}")
     out = _with_ext(out, default_ext, accept or (default_ext,), what)
     if os.path.isdir(out):
         raise CaptureError(f"'path' is a directory: {out}")
