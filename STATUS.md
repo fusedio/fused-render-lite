@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.10.0 | TBD (release build) | — | — | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0 |
 | 0.9.5 | 43.43 MB (43,434,486 B) | −0.00 MB | 99 MB | legacy env drops pyarrow/duckdb; DoodleShooter + OpenRelax regain pyproject.toml (+361 B); no packaging change |
 | 0.9.4 | 43.44 MB (43,438,706 B) | +0.41 MB | 99 MB | legacy env deps (pyarrow/duckdb/httpx); refreshed DoodleShooter + OpenRelax showcase files (OpenRelax ~130 KB → ~432 KB); no packaging change |
 | 0.9.3 | 43.03 MB (43,029,693 B) | −0.00 MB | 99 MB | launcher polish (Render App row / ⌥0, frostier glass); no packaging change |
@@ -70,6 +71,57 @@ only in the `[app]` extra); no bundled data packages (each app's
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
+
+## 0.10.0
+
+Minor: `fused.capture` supported — fused-render's native macOS capture
+copied in (`capture/__init__.py`, `_darwin.py`, `_darwin_mux.py`,
+`_mixdown.py`, runtime.js block), packaging change: the `[app]` extra gains
+`pyobjc-framework-ScreenCaptureKit` + `pyobjc-framework-AVFoundation` (Quartz,
+CoreMedia, CoreAudio as transitives) and the py2app packages list grows to
+match. Verified end to end: screen `.mov`, mic `.m4a`, screenshot `.png`.
+
+Render App-specific: macOS only — any other platform answers `unavailable`
+(409); the browser MediaRecorder / WebSocket streaming transport fused-render
+carries for Windows and Linux is dropped, so `sources()` never reports a
+`client` recorder. Routes live on the stdlib `Handler` (`routes/capture.py`).
+A preview (`_preview=1`) refuses `screen` / `audio` / `screenshot` with
+`bad_request`; `sources` / `list` / `attach` are allowed there. A recording
+is a job row `sys:capture:<id>` (origin Capture, cancellable): ✕ = stop +
+delete, the `maxSeconds` cap (default 30 min) = stop + keep. Files land in
+`~/.fused-render-app/recordings/` unless the page names a `path` (relative
+resolves beside the page). Permissions: Screen Recording is a TCC grant in
+System Settings (no plist key or entitlement); the mic reuses the existing
+`NSMicrophoneUsageDescription` + `audio-input` entitlement.
+
+| member | status | notes |
+| --- | --- | --- |
+| `fused.capture.screen(opts)` | ✅ new | `{display, rect, audio: false\|"mic"\|"system"\|"both", device, cursor, path, maxSeconds, title}` → handle `{id, jobId, path, url, state, stop(), cancel()}`; `.mov` |
+| `fused.capture.audio(opts)` | ✅ new | `{source, path, maxSeconds, title}` → same handle; `.m4a`; a `device` is refused |
+| `fused.capture.screenshot(opts)` | ✅ new | `{display, rect, cursor, path}` → `{path, url, width, height, bytes, mime}`; extension picks png / jpeg; no job row |
+| `fused.capture.sources()` | ✅ new | `{video, audio, systemAudio, screenshot}` each `{available, granted, reason}` + `displays`, `microphones`; never prompts |
+| `fused.capture.list()` | ✅ new | live recordings on this machine, any page's |
+| `fused.capture.attach(id)` | ✅ new | handle for a live recording (reload finds its own) |
+
+Server routes added: `GET /api/capture`, `POST /api/capture/start`,
+`POST /api/capture/{id}/stop`, `POST /api/capture/{id}/cancel`,
+`POST /api/capture/screenshot`.
+
+Hardening after review:
+- logout / shutdown end recordings via `applicationWillTerminate:` (rumps
+  `before_quit`), with a bounded quit budget (`QUIT_STOP_BUDGET_S`, 20 s) so
+  a stalled ScreenCaptureKit stop cannot beachball the menu bar.
+- a refused Screen Recording grant is a 409, not a 500.
+- a recording that dies mid-flight still answers the page's `stop()`.
+- the 13–14 muxer (`_darwin_mux.py`) is never imported on 15+.
+- a second `stop()` / `cancel()` during an in-flight stop waits for it
+  instead of a 404.
+- output paths refuse an existing file and a wrong container extension.
+- mic access is requested before the first take (undetermined → prompt,
+  denied → 409).
+- the start-side TCC wait is bounded under the web view's 60 s fetch timeout.
+- `sources()` degrades per part if one enumeration fails.
+- a missing ScreenCaptureKit API on a future macOS is a 409.
 
 ## 0.9.5
 

@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 2777
 BUNDLE_ID = "io.fused.render.app"  # must match scripts/setup_py2app.py
+# How long quit waits for `capture.stop_all()`: enough for several recordings
+# to finalise (~1.4 s each measured), short enough that logout does not show
+# "app not responding" while ScreenCaptureKit stalls (up to ~135 s per stop).
+QUIT_STOP_BUDGET_S = 20.0
 
 
 def _is_alive(pid: int) -> bool:
@@ -348,6 +352,47 @@ def main() -> None:
 
     server.native_hooks["relaunch"] = relaunch
 
+    def _stop_captures() -> None:
+        """End every recording BEFORE the process goes: each one has a file
+        open and a native stream running, and a .mov only gets its moov atom
+        on stop. Lazy import so a bundle missing ScreenCaptureKit still quits
+        cleanly. Idempotent — `stop_all` on an empty registry is a no-op.
+
+        Runs `stop_all` on a daemon thread and waits at most
+        `QUIT_STOP_BUDGET_S`: the stops are sequential and one stalled
+        ScreenCaptureKit stream can hold a stop for minutes, and this is the
+        main thread — both `quit_app` and `applicationWillTerminate:` — so an
+        unbounded wait beachballs the menu bar for the whole time. Past the
+        budget the process goes anyway (daemon thread, `os._exit` / AppKit's
+        `exit()`); the recordings still live at that point are logged."""
+        try:
+            from fused_render_app import capture
+
+            def _run() -> None:
+                try:
+                    capture.stop_all()
+                except Exception:  # noqa: BLE001 — quitting regardless
+                    logger.debug("capture.stop_all failed during quit",
+                                 exc_info=True)
+
+            t = threading.Thread(target=_run, name="capture-stop-all",
+                                 daemon=True)
+            t.start()
+            t.join(QUIT_STOP_BUDGET_S)
+            if t.is_alive():
+                logger.warning(
+                    "capture.stop_all did not finish within %.0fs; "
+                    "%d recording(s) still live at quit",
+                    QUIT_STOP_BUDGET_S, len(capture.active()) + capture.ending_count())
+        except Exception:  # noqa: BLE001 — quitting regardless
+            logger.debug("capture.stop_all failed during quit", exc_info=True)
+
+    # Logout, shutdown and any `NSApp.terminate:` never reach `quit_app`:
+    # AppKit exits through C `exit()`, which runs no Python `atexit` handler.
+    # rumps emits `before_quit` from `applicationWillTerminate:`, synchronously
+    # and before that exit, so this is the one hook that covers those paths.
+    rumps.events.before_quit.register(lambda: _stop_captures())
+
     def quit_app(_sender) -> None:
         logger.info("quitting")
         # Unload every page and destroy its web view first, so media stops
@@ -359,6 +404,7 @@ def main() -> None:
             except Exception:  # noqa: BLE001 — quitting regardless
                 logger.debug("close_all failed during quit", exc_info=True)
         server.stop_ai()  # evict resident models (kills worker processes), stop the warm claude
+        _stop_captures()
         srv = state.get("server")
         if srv is not None:
             threading.Thread(target=srv.shutdown, daemon=True).start()

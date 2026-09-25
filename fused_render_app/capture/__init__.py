@@ -1,0 +1,824 @@
+"""Native screen, microphone and still capture — the `fused.capture` bridge.
+
+**Platform-neutral half.** This module owns everything that is not per-OS: ids,
+output paths, the session registry, the job row a recording appears as in the
+download manager, and the watchdog thread that ticks it. A backend owns the
+frames and the file, and is asked for a short list — `probe`, `start_screen`,
+`start_audio`, `stop`, `screenshot`, plus the optional `refuse` and `failure` —
+so a backend is a module, not a second design.
+
+**One backend, and it is native.** The Render App runs on macOS only, and
+`_darwin.py` records with ScreenCaptureKit and AVFoundation (`_darwin_mux.py`
+and `_mixdown.py` carry the mic+system audio mix). Native is the right choice
+here rather than a convenience: on macOS the browser cannot capture system audio
+at all, so a page's own `MediaRecorder` could never produce the recording this
+module writes. Any other `sys.platform` is answered with `Unsupported`.
+
+**What the design buys.** The output is a FILE whose path is known before the
+first frame exists, so `fused.ai.transcribe({path})` is the next line rather
+than a blob round-trip through JS; and a recording is a job row, so the
+download manager can show and stop it.
+
+**"Unavailable" always carries a REASON.** Wrong OS, an OS too old
+(`SCRecordingOutput` is macOS 15+, `SCScreenshotManager` 14+, against
+`LSMinimumSystemVersion` 11.0), a missing permission. `sources()` answers all
+of it without ever showing a prompt —
+the prompt belongs to the first real capture, not to a page asking what is
+possible (the same rule the GPU probe follows, SPEC §40).
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+import platform
+import sys
+import threading
+import time
+import uuid
+
+from fused_render_app import jobs
+
+logger = logging.getLogger(__name__)
+
+#: Job ids are server-owned (`jobs.OWNER_SERVER`): the work is this process's,
+#: so the manager's ✕ can really stop it — and a page cannot forge a "done" for
+#: a recording that is still running.
+JOB_PREFIX = jobs.SERVER_ID_PREFIX + "capture:"
+
+#: A recording nobody stops must still end. The page that started it can be
+#: closed, and then the only shell-side control is the ✕, which DISCARDS — so
+#: the cap is the one ending that keeps the file. Hitting it is a stop.
+DEFAULT_MAX_SECONDS = 30 * 60
+MAX_MAX_SECONDS = 4 * 60 * 60
+
+#: How often the watchdog ticks the job row and re-reads `cancel_requested`.
+TICK_S = 1.5
+
+AUDIO_MODES = ("mic", "system", "both")
+
+
+class CaptureError(ValueError):
+    """A bad request — a typo, a mode that does not exist, an unusable rect."""
+
+
+class Unsupported(RuntimeError):
+    """This machine cannot capture, and the message says why."""
+
+
+# --------------------------------------------------------------- the backend
+
+
+def _backend():
+    """The one live backend, or `Unsupported` naming what is missing.
+
+    Dispatch on `sys.platform`: exactly one backend can ever be live in a
+    process, so this is a module lookup and not an interface class standing in
+    front of a single implementation.
+
+    Beyond the four calls, a backend may add three optional hooks —
+    `ext(mode, spec)` for the container it is about to write,
+    `refuse(mode, spec)` for what it cannot honour, and `failure(handle)` for
+    a recording it has already lost.
+    Everything platform-specific, INCLUDING the prose of a refusal, belongs
+    there: a sentence naming System Settings is macOS knowledge, and this
+    module is not the place it is written.
+    """
+    if sys.platform != "darwin":
+        raise Unsupported("fused.capture records natively on macOS only")
+    try:
+        from fused_render_app.capture import _darwin
+    except ImportError as e:
+        # `Unsupported`, not the raw ImportError: the backend imports its Apple
+        # frameworks at module top, and `ScreenCaptureKit.framework` does not
+        # exist before macOS 12.3 — against `LSMinimumSystemVersion` 11.0, so
+        # this is a machine inside the supported range, not only a broken
+        # build. Both read the same from here, and both must answer like a
+        # machine that cannot capture: an ImportError reaching a route is a
+        # 500, and CP-8 promises a 409 naming the reason.
+        raise Unsupported(
+            "native capture could not load its macOS frameworks on macOS "
+            f"{platform.mac_ver()[0] or '?'} — ScreenCaptureKit arrives in "
+            f"macOS 12.3 and recording needs 13 ({e})") from e
+
+    return _darwin
+
+
+def sources() -> dict:
+    """What this machine can capture, and what it is waiting for. Never prompts.
+
+    One method rather than a `capabilities()` beside a `devices()`: the answer to
+    "can I" and the answer to "of what" are read together by every caller, and a
+    payload that carries both cannot describe a machine whose permission and
+    device list disagree. `available` is about the OS and the build; `granted` is
+    about TCC and moves without this process restarting, which is why they are
+    separate booleans rather than one.
+    """
+    try:
+        return _backend().probe()
+    except Unsupported as e:
+        return _unavailable(str(e))
+    except Exception as e:                       # noqa: BLE001 - see below
+        # A PROBE MAY NOT RAISE. Every other caller here is allowed to fail a
+        # request, but this one is read while a page is drawing a record button
+        # — `available: false` with a reason is an answer it can render, and a
+        # 500 is not. The named `Unsupported` above covers what this module
+        # predicts; this covers what it does not (a framework call refusing on
+        # a machine nobody tested), because the promise CP-8 makes is about the
+        # SHAPE, and a promise with an unenumerated hole in it is not one.
+        logger.warning("probing native capture failed", exc_info=True)
+        return _unavailable(
+            "native capture could not be probed on this machine — "
+            f"{e.__class__.__name__}: {e}".rstrip(" -:"))
+
+
+def _unavailable(reason: str) -> dict:
+    """`sources()` for a machine that cannot capture — the same shape, always.
+
+    Shape-identical to the real probe, every key included: a page that reads
+    `sources().screenshot.available` must not throw on the platform where the
+    answer is "no".
+    """
+    return {
+        "video": {"available": False, "granted": False, "reason": reason},
+        "audio": {"available": False, "granted": False, "reason": reason},
+        "systemAudio": {"available": False, "reason": reason},
+        "screenshot": {"available": False, "granted": False, "reason": reason},
+        "displays": [],
+        "microphones": [],
+    }
+
+
+# --------------------------------------------------------------- the registry
+
+
+class _Session:
+    """One live capture: the backend's handle, its job row, its watchdog."""
+
+    def __init__(self, cid: str, mode: str, path: str, handle, spec: dict,
+                 page: str = ""):
+        self.id = cid
+        self.mode = mode
+        self.path = path
+        self.handle = handle
+        self.spec = spec
+        self.started_at = time.time()
+        self.max_seconds = spec["maxSeconds"]
+        self.state = "recording"
+        # Where clicking this row goes in Notifications (SPEC-actionable-
+        # notifications.md): the page that started the capture, from the
+        # `X-Fused-Page` header on the `start` POST — the same channel and
+        # the same spoof-proofing the jobs route already uses for a
+        # page-owned job's own `page` field.
+        self.page = page
+
+    @property
+    def job(self) -> str:
+        return JOB_PREFIX + self.id
+
+    def public(self) -> dict:
+        record = {
+            "id": self.id,
+            "mode": self.mode,
+            "path": self.path,
+            "state": self.state,
+            "seconds": round(max(0.0, time.time() - self.started_at), 2),
+            "maxSeconds": self.max_seconds,
+            "jobId": self.job,
+            "audio": self.spec.get("audio") or False,
+        }
+        return record
+
+    def opening(self) -> dict:
+        """`public()` — kept as its own hook so `start` names the one reply a
+        starting caller gets and `runtime.js` reads one shape. The macOS
+        backend captures natively, so nothing here is withheld from `active()`.
+        """
+        return self.public()
+
+
+_lock = threading.Lock()
+_sessions: dict[str, _Session] = {}
+
+
+def active() -> list[dict]:
+    """Every live recording on this machine — the read side of `list()`.
+
+    Live only: a finished recording is a file, and the page that wants it has
+    the path from `stop()` (or from the job row's detail). Keeping the corpses
+    here would be a second, worse copy of the download manager.
+    """
+    with _lock:
+        return [s.public() for s in _sessions.values() if s.state == "recording"]
+
+
+# ------------------------------------------------------------------ starting
+
+
+def _out_dir() -> str:
+    """Where recordings land: `paths.recordings_dir()` (`<home>/recordings`).
+
+    Under the app's own state root and not beside any page, because the file
+    outlives the tab that asked for it, so it cannot live anywhere tied to a
+    page.
+    """
+    from fused_render_app import paths
+
+    return paths.recordings_dir()
+
+
+def _resolve_out(path, base, default_ext: str, *, accept=None,
+                 what: str = "recording") -> str:
+    """The absolute file to write, from an optional caller `path`.
+
+    A relative `path` resolves beside the CALLING PAGE (`base`), the rule
+    `readFile`/`rawUrl`/`transcribe` already follow (RH-1) — "clip.mov" must not
+    silently mean "beside wherever the server was launched from". No `path` at
+    all lands in `_out_dir()` under a timestamped name.
+
+    Absolute and `~` paths are allowed as given: the page author chose them,
+    and this is a local desktop app writing a file the user asked for. What is
+    checked is the rest —
+
+    * the path is normalised with `realpath`, so a symlinked or `..`-laden
+      spelling names the same file it names everywhere else;
+    * the EXTENSION must be one the backend is about to write (`accept`, by
+      default just `default_ext`): "clip.mp4" holding a QuickTime movie is a
+      file every other tool misreads, so it is refused naming the right one,
+      and a bare "clip" simply gains it;
+    * the parent directory must exist (a recording that cannot be opened
+      should fail before a microphone turns on, not after);
+    * the file must NOT already exist. A recording silently replacing last
+      week's take is the one outcome no caller wants, and the fix — pick
+      another name, or omit `path` for a timestamped one — is cheap.
+    """
+    if path is None or path == "":
+        name = time.strftime("%Y-%m-%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        return os.path.join(_out_dir(), name + default_ext)
+    if not isinstance(path, str) or not path.strip():
+        raise CaptureError("'path' must be a non-empty string when given")
+    out = os.path.expanduser(path.strip())
+    if not os.path.isabs(out):
+        if not isinstance(base, str) or not os.path.isabs(base):
+            raise CaptureError(
+                "'path' must be absolute, or relative to a page named by 'base'")
+        out = os.path.join(os.path.dirname(base), out)
+    out = os.path.realpath(out)
+    # Checked on the path AS GIVEN, before an extension is appended: a bare
+    # "clips" naming a folder must be refused, not written as "clips.mov"
+    # beside it.
+    if os.path.isdir(out):
+        raise CaptureError(f"'path' is a directory: {out}")
+    out = _with_ext(out, default_ext, accept or (default_ext,), what)
+    if os.path.isdir(out):
+        raise CaptureError(f"'path' is a directory: {out}")
+    parent = os.path.dirname(out)
+    if not os.path.isdir(parent):
+        raise CaptureError(f"no such directory: {parent}")
+    if os.path.lexists(out):
+        raise CaptureError(
+            f"'path' already exists — pick another name or omit path: {out}")
+    return out
+
+
+def _with_ext(out: str, default_ext: str, accept, what: str) -> str:
+    """`out` carrying an accepted extension: appended when bare, refused when
+    wrong. There is no `format` option anywhere on this bridge — the extension
+    of the file being written decides the container, so it has to be one the
+    backend will actually write."""
+    ext = os.path.splitext(out)[1].lower()
+    if not ext:
+        return out + default_ext
+    if ext in accept:
+        return out
+    names = (", ".join(accept[:-1]) + " or " + accept[-1] if len(accept) > 1
+             else accept[0])
+    raise CaptureError(f"a {what} is written as {names} — not {ext!r}")
+
+
+def _max_seconds(value) -> int:
+    if value is None or value == "":
+        return DEFAULT_MAX_SECONDS
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        raise CaptureError("'maxSeconds' must be a whole number of seconds")
+    if isinstance(value, bool) or seconds <= 0 or seconds > MAX_MAX_SECONDS:
+        raise CaptureError(
+            f"'maxSeconds' must be between 1 and {MAX_MAX_SECONDS}")
+    return seconds
+
+
+def _audio_mode(value, *, required: bool) -> str | None:
+    """`audio` on a screen recording: false/None, or one of AUDIO_MODES.
+
+    Named values rather than a pair of booleans, and refused rather than
+    coerced: "microphone" instead of "mic" would otherwise record silence and
+    read as the app ignoring the request (the same posture AI-10 takes on
+    `task`).
+    """
+    if value is None or value is False or value == "":
+        if required:
+            raise CaptureError("'source' must be " + _or_list(AUDIO_MODES))
+        return None
+    if value is True:
+        return "mic"
+    if value not in AUDIO_MODES:
+        raise CaptureError(
+            f"'audio' must be false or {_or_list(AUDIO_MODES)}, not {value!r}")
+    return value
+
+
+def _or_list(values) -> str:
+    return ", ".join(repr(v) for v in values[:-1]) + f" or {values[-1]!r}"
+
+
+def _rect(value):
+    if value is None or value == "":
+        return None
+    if (not isinstance(value, (list, tuple)) or len(value) != 4
+            or any(isinstance(n, bool) or not isinstance(n, (int, float))
+                   for n in value)):
+        raise CaptureError("'rect' must be [x, y, width, height] in points")
+    x, y, w, h = (float(n) for n in value)
+    if w <= 0 or h <= 0:
+        raise CaptureError("'rect' width and height must be positive")
+    return (x, y, w, h)
+
+
+def _ext(backend, mode: str, spec: dict) -> str:
+    """The container the backend is about to write, for the default filename.
+
+    Asked rather than assumed: a default `.mov` holding some other container
+    would be a file every other tool misreads. The fallback keeps a backend
+    without the hook (a test double, say) working.
+    """
+    hook = getattr(backend, "ext", None)
+    if hook is None:
+        return ".mov" if mode == "screen" else ".m4a"
+    return hook(mode, spec)
+
+
+def start(mode: str, body: dict, *, page: str = "") -> dict:
+    """Begin a recording. Returns the record — path included — immediately.
+
+    The path is decided HERE, before a single frame exists, which is what lets a
+    caller wire up an `<audio>`/`<video>` (or queue a transcription) without a
+    second lookup, and what lets a page that navigated away still find the file.
+    Same shape as `/api/ai/transcribe`'s reply, for the same reason.
+    """
+    if mode not in ("screen", "audio"):
+        raise CaptureError(f"mode must be 'screen' or 'audio', not {mode!r}")
+    backend = _backend()
+
+    cid = uuid.uuid4().hex[:12]
+    # The id is in the spec so a backend that needs to be FINDABLE by it before
+    # this function returns can register itself under it.
+    spec = {"maxSeconds": _max_seconds(body.get("maxSeconds")), "id": cid,
+            # Which container the caller's encoder would produce, if the page
+            # were the encoder. The native backend writes what it writes and
+            # ignores it; kept so a page's request body has one shape.
+            "container": body.get("container")}
+    if mode == "screen":
+        spec["audio"] = _audio_mode(body.get("audio"), required=False)
+        spec["display"] = body.get("display")
+        spec["rect"] = _rect(body.get("rect"))
+        # Raw, NOT `bool(... , True)`: a backend that cannot honour `cursor`
+        # must be able to tell "the caller asked" from "the caller said
+        # nothing", or every page passing the documented default would be
+        # refused. Each backend applies its own default.
+        spec["cursor"] = body.get("cursor")
+        spec["device"] = body.get("device")
+        out = _resolve_out(body.get("path"), body.get("base"),
+                           _ext(backend, mode, spec))
+    else:
+        # ONE check with ONE message. The first cut of this ran the shared
+        # `_audio_mode` (which names 'mic', 'system' and 'both' as valid) and
+        # then refused two of the three a line later — two sentences
+        # contradicting each other about the same argument.
+        source = body.get("source", "mic")
+        if source not in (None, "", "mic", True):
+            raise CaptureError(
+                "fused.capture.audio records the microphone, so 'source' can "
+                f"only be 'mic', not {source!r} — for system audio record the "
+                "screen with audio: 'system'")
+        spec["audio"] = "mic"
+        spec["device"] = body.get("device")
+        out = _resolve_out(body.get("path"), body.get("base"),
+                           _ext(backend, mode, spec))
+
+    # REFUSED, not ignored (the AI-10/D319 posture) — and refused by the
+    # BACKEND, because what cannot be honoured is the backend's knowledge and
+    # so is the sentence that says where it can be (macOS cannot choose a
+    # microphone for an audio-only recording, and says so).
+    # Asked here, before an id exists, so a refusal is a 400 and not a session
+    # half-created (`refuse` is optional: a backend that honours everything
+    # simply does not define it).
+    # The resolved file, so a backend can refuse a `path` whose extension
+    # contradicts what it is about to write into it.
+    spec["out"] = out
+    refuse = getattr(backend, "refuse", None)
+    if refuse is not None:
+        why = refuse(mode, spec)
+        if why:
+            raise CaptureError(why)
+
+    handle = (backend.start_screen(out, spec) if mode == "screen"
+              else backend.start_audio(out, spec))
+    session = _Session(cid, mode, out, handle, spec, page=page)
+    with _lock:
+        _sessions[cid] = session
+
+    title = body.get("title") or (
+        "Screen recording" if mode == "screen" else "Audio recording")
+    # `origin="Capture"`: `fused.capture.*` is callable from any page's own
+    # script, so no single hosting page names this row's source honestly —
+    # "Capture" names the FEATURE that raised it instead, the same way
+    # `benchmark.py`'s own row names itself "Benchmark" rather than whatever
+    # page happened to start the run.
+    _report(session, state=jobs.RUNNING, title=str(title)[:120],
+            kind="task", unit="s", done=0, total=spec["maxSeconds"],
+            cancellable=True,
+            detail="Recording — ✕ discards it", origin="Capture")
+    threading.Thread(target=_watch, args=(session,), daemon=True,
+                     name=f"capture-{cid}").start()
+    return session.opening()
+
+
+def _report(session: _Session, **fields) -> None:
+    """One job tick, best-effort. Reporting must never break the recording.
+
+    Catches EVERYTHING, which is what that sentence has to mean to be worth
+    stating. The two named exceptions it used to catch are the expected ones,
+    but both call sites are load-bearing in a way a row is not: raising out of
+    the one in `start` registers a session whose watchdog thread was never
+    spawned — a recording with no cap and no ✕ — and raising out of the one in
+    `_watch` costs a tick (see the guard there).
+    """
+    try:
+        jobs.upsert({"id": session.job, **fields}, page=session.page, server=True)
+    except Exception:                            # noqa: BLE001 - a row, not the work
+        logger.warning("reporting the capture job row failed for %s",
+                       session.id, exc_info=True)
+
+
+def _failure(session: _Session) -> str | None:
+    """Has the backend already lost this recording? Best-effort by design.
+
+    A backend without the hook simply never reports one — the watchdog's other
+    two endings are unchanged, so a second platform is not obliged to implement
+    this to be correct.
+    """
+    hook = getattr(_backend(), "failure", None)
+    if hook is None:
+        return None
+    try:
+        return hook(session.handle)
+    except Exception:                            # noqa: BLE001 - a probe
+        return None
+
+
+def _cancel_requested(session: _Session) -> bool:
+    """Has the manager's ✕ been pressed? Best-effort, like `_failure`.
+
+    A registry this cannot read is not a cancel, and must not become one — nor
+    take the watchdog down, which would strand the recording with no cap either
+    (see `_watch`). So an unreadable store answers "no" and the next tick asks
+    again.
+
+    Calls `jobs.list_jobs()` with its default `mark_read=False`: this is our
+    own cancel poll, not a client reading the corner, and marking a terminal
+    row read here would start its retention clock from a poll nobody ever
+    saw — see `list_jobs`'s own docstring.
+    """
+    try:
+        records = jobs.list_jobs()
+    except Exception:                            # noqa: BLE001 - a probe
+        return False
+    for record in records:
+        if record["id"] == session.job:
+            return bool(record.get("cancel_requested"))
+    return False
+
+
+def _watch(session: _Session) -> None:
+    """Tick the row, and enforce the two endings the page never asked for.
+
+    ✕ DISCARDS (the house meaning of cancel, and consistent with every other
+    row); the cap STOPS AND KEEPS, because for a recording whose page is gone
+    the cap is the only ending that does not destroy the content.
+
+    **A tick that raises must not take the thread with it.** Once the page that
+    started a recording is gone, this loop IS the only remaining control — both
+    of them — so a dead watchdog is a microphone nothing can turn off, behind a
+    row that ticks "Recording" forever. Every ending in `_tick` is still a real
+    return; only an unexpected failure is swallowed, and the next tick retries.
+
+    This guard alone is not enough, which is why `_tick` checks the cap FIRST:
+    a probe that fails on EVERY tick (not just one) would otherwise sit in front
+    of the cap forever and the guard would faithfully log it forever.
+    """
+    while True:
+        time.sleep(TICK_S)
+        with _lock:
+            if _sessions.get(session.id) is not session:
+                return          # stopped by its owner; that path reports.
+        try:
+            if _tick(session):
+                return
+        except Exception:                        # noqa: BLE001 - see above
+            logger.warning("the capture watchdog tick failed for %s",
+                           session.id, exc_info=True)
+
+
+def _tick(session: _Session) -> bool:
+    """One watchdog pass. True when this recording has ENDED and nothing is left.
+
+    Split out of `_watch` so the loop has one place to guard: the endings are
+    here, the "never die" is there.
+
+    **The cap is checked first, before anything that can fail**, and that
+    ordering is the guarantee rather than a preference. `DEFAULT_MAX_SECONDS`
+    exists so that a recording nobody stops still ends — a hard promise about
+    turning a microphone off — while the two probes under it are signals about
+    a recording that is still running. A probe that fails on every tick (a
+    backend hook raising, an unreadable job store) would, placed above the cap,
+    strand the recording for as long as the process lives; `_watch`'s guard
+    would log each failure and change nothing. Below it, the same failure costs
+    a message.
+
+    The cost of the order is two ties, both inside one tick and both falling
+    the safe way. A recording that DIES in the tick it reaches its cap ends as
+    "done" rather than "error" — the file was written up to the cap either way,
+    so the row is the only difference. A ✕ pressed in that same tick is missed
+    and the file is KEPT rather than discarded, which is the direction to miss
+    in: the user can delete a recording they have, and cannot recover one this
+    threw away.
+    """
+    elapsed = time.time() - session.started_at
+    if elapsed >= session.max_seconds:
+        try:
+            stop(session.id)
+        except (CaptureError, Unsupported):
+            pass
+        return True
+    # A recording that has already failed must not tick "Recording" for the
+    # rest of its cap: the user would narrate into a file nothing is writing.
+    # Asked before the ✕, because it IS an ending.
+    died = _failure(session)
+    if died:
+        # Same critical section as `stop()`: pop the session AND park an
+        # in-flight marker, so a page `stop()` landing while the dead stream
+        # is being torn down waits for the error record rather than 404ing.
+        with _lock:
+            if _sessions.pop(session.id, None) is None:
+                return True                      # `stop()` beat us to it
+            ending = _ending[session.id] = threading.Event()
+        try:
+            session.state = "error"
+            _report(session, state="error", message=died)
+            try:
+                _backend().stop(session.handle)
+            except Exception:                    # noqa: BLE001 - already failed
+                pass
+            # The page still holds a handle and will call `stop()`: it must
+            # get the error record (same shape `stop` returns), not a 404 for
+            # a recording it never ended — `_remember` is what turns a lost
+            # take into the `capture_error` rejection runtime.js promises.
+            result = session.public()
+            result.update(_describe(session.path))
+            result["error"] = died
+            _remember(session.id, result)
+        finally:
+            with _lock:
+                _ending.pop(session.id, None)
+            ending.set()
+        return True
+    if _cancel_requested(session):
+        try:
+            stop(session.id, discard=True)
+        except (CaptureError, Unsupported):
+            pass
+        return True
+    _report(session, done=round(min(elapsed, session.max_seconds), 1))
+    return False
+
+
+# ------------------------------------------------------------------ stopping
+
+
+#: The last few finished recordings, by id — so an ending that arrives SECOND
+#: gets the answer rather than a 404. The real case: a double-clicked stop
+#: button, or the manager's ✕ and the page's own `stop()` landing in the same
+#: moment. Small and unbounded in neither direction: this is a reply
+#: cache, not a second copy of the download manager, which already holds the
+#: history.
+FINISHED_KEEP = 32
+_finished: dict[str, dict] = {}
+
+#: Recordings whose `stop()` is IN FLIGHT, by id: taken out of `_sessions` but
+#: not yet in `_finished`. The backend's stop can take a while (it waits for
+#: the encoder to finish the file — up to `WAIT_S + FINISH_S` on macOS), and
+#: that window used to be a 404 for every second caller: a double-clicked
+#: button, the cap, the ✕. The event is set once `_finished` holds the reply.
+_ending: dict[str, threading.Event] = {}
+
+
+def _remember(cid: str, result: dict) -> dict:
+    _finished[cid] = result
+    while len(_finished) > FINISHED_KEEP:
+        _finished.pop(next(iter(_finished)), None)
+    return result
+
+
+def ending_count() -> int:
+    """Recordings whose `stop()` is inside the backend right now — no longer
+    `active()`, not yet in `_finished`. A quit budget counts these too."""
+    with _lock:
+        return len(_ending)
+
+
+def _ending_wait_s() -> float:
+    """How long a late caller waits for an in-flight stop: the backend's own
+    ceiling plus a margin, read by name so a test double sets its own."""
+    try:
+        backend = _backend()
+    except Exception:                            # noqa: BLE001 - a bound
+        return 140.0
+    return (float(getattr(backend, "WAIT_S", 120.0))
+            + float(getattr(backend, "FINISH_S", 15.0)) + 5.0)
+
+
+def stop(cid: str, *, discard: bool = False) -> dict:
+    """End a recording. `discard=True` deletes the file — that is cancel.
+
+    Idempotent by construction. The session is removed from the registry under
+    the lock BEFORE the backend is touched, and an in-flight marker (`_ending`)
+    is registered in the same critical section, so a ✕ landing at the same
+    moment as the page's own `stop()` cannot finalise the same file twice. Any
+    later caller finds one of three things:
+
+    * the session — it is the owner, and ends it;
+    * no session but a marker — the owner is still inside the backend's stop;
+      it waits (bounded by the backend's own timeouts) and then answers from
+      `_finished` exactly as if it had arrived a moment later;
+    * no session and no marker — the reply is in `_finished`, or the id never
+      existed.
+
+    A `discard` arriving after some other ending still deletes the file (see
+    the comment below); an in-flight stop it waited on is no different.
+    """
+    with _lock:
+        session = _sessions.pop(cid, None)
+        if session is not None:
+            ending = _ending[cid] = threading.Event()
+        else:
+            ending = _ending.get(cid)
+    if session is None:
+        if ending is not None and not ending.wait(_ending_wait_s()):
+            raise CaptureError(f"capture {cid} is still ending")
+        already = _finished.get(cid)
+        if already is None:
+            raise CaptureError(f"no such capture: {cid}")
+        # A CANCEL that arrives after some other ending still has to delete the
+        # file: the watchdog's cap can end a recording a moment before the
+        # page's cancel request lands, and that ending KEEPS the file. Answering
+        # with the cached "stopped" record would leave the file the caller
+        # asked to destroy sitting on disk, reported as deleted.
+        if discard and already.get("path"):
+            try:
+                os.remove(already["path"])
+            except OSError:
+                pass
+            already = dict(already, state="cancelled", path=None, url=None)
+            _finished[cid] = already
+        return already
+
+    try:
+        return _end(session, discard=discard)
+    finally:
+        # `_remember` has run (or `_end` raised, and there is nothing to wait
+        # for): release every caller parked on the marker, in that order.
+        with _lock:
+            _ending.pop(cid, None)
+        ending.set()
+
+
+def _end(session: _Session, *, discard: bool) -> dict:
+    """The owner's half of `stop()`: the backend, the file, the row, the reply."""
+    cid = session.id
+    error = ""
+    try:
+        _backend().stop(session.handle)
+    except Exception as e:                      # noqa: BLE001 - reported, not raised
+        error = f"{e.__class__.__name__}: {e}".strip().rstrip(":")
+
+    if discard:
+        try:
+            os.remove(session.path)
+        except OSError:
+            pass
+        session.state = "cancelled"
+        _report(session, state="cancelled")
+        result = session.public()
+        result["path"] = None
+        result["url"] = None
+        return _remember(cid, result)
+
+    session.state = "error" if error else "stopped"
+    result = session.public()
+    result.update(_describe(session.path))
+    if error:
+        _report(session, state="error", message=error)
+        result["error"] = error
+    else:
+        _report(session, state="done",
+                detail=os.path.basename(session.path))
+    return _remember(cid, result)
+
+
+def _describe(path: str) -> dict:
+    """The file, as a page needs it: where it is, how to fetch it, how big.
+
+    `url` is the ready-made `/api/fs/raw` address rather than something the
+    caller assembles, the same courtesy `fused.ai.image` pays (D-AI-9).
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    ext = os.path.splitext(path)[1].lower()
+    mime = {".mov": "video/quicktime", ".mp4": "video/mp4",
+            ".webm": "video/webm", ".m4a": "audio/mp4",
+            ".png": "image/png", ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg"}.get(ext, "application/octet-stream")
+    return {"path": path, "url": "/api/fs/raw?path=" + _quote(path),
+            "bytes": size, "mime": mime}
+
+
+def _quote(path: str) -> str:
+    from urllib.parse import quote
+
+    return quote(path, safe="")
+
+
+# --------------------------------------------------------------- the still
+
+
+def screenshot(body: dict) -> dict:
+    """One frame, now. No handle and no job row — it is milliseconds.
+
+    It lives in this namespace rather than at the top level because it shares
+    everything that is hard: the TCC grant, the display list, the rect, the
+    output-path rule. A root-level `fused.screenshot()` would be a second door
+    onto one permission model.
+    """
+    backend = _backend()
+    # There is no `format` option: the extension of the file being written
+    # decides the container (`_with_ext`). A `format` beside a `path` is two
+    # ways to say one thing, and they can disagree — "shot.jpg" holding PNG
+    # bytes is a file every other tool misreads.
+    out = _resolve_out(body.get("path"), body.get("base"), ".png",
+                       accept=(".png", ".jpg", ".jpeg"), what="screenshot")
+    ext = os.path.splitext(out)[1].lower()
+    spec = {
+        "display": body.get("display"),
+        "rect": _rect(body.get("rect")),
+        # Raw, for the reason `start` records: a backend must be able to tell
+        # an explicit `cursor` from a caller who never mentioned one.
+        "cursor": body.get("cursor"),
+        "jpeg": ext in (".jpg", ".jpeg"),
+    }
+    refuse = getattr(backend, "refuse", None)
+    if refuse is not None:
+        why = refuse("screenshot", spec)
+        if why:
+            raise CaptureError(why)
+    shot = backend.screenshot(out, spec)
+    result = _describe(out)
+    result.update(shot)
+    return result
+
+
+# ------------------------------------------------------------------ teardown
+
+
+def stop_all() -> None:
+    """Finalise every live recording — a truncated .mov has no moov atom.
+
+    Called from TWO places, and the `atexit` registration below is the less
+    important of them: the packaged app never reaches it. Every quit surface
+    there ends in `os._exit` (reaching `__cxa_finalize` aborts on a native
+    extension's destructor), which runs no `atexit` handler, so `macapp`'s quit
+    path calls this explicitly before the server shuts down. `atexit` stays as
+    the backstop for a plain `fused_render_app.cli` process that exits normally.
+    """
+    for cid in list(_sessions):
+        try:
+            stop(cid)
+        except Exception:                        # noqa: BLE001 - exiting anyway
+            pass
+
+
+atexit.register(stop_all)
