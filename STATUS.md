@@ -13,7 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
-| 0.10.0 | TBD (release build) | — | — | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0 |
+| 0.10.0 | TBD (release build) | — | — | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0; title-bar Edit button (editlink.py) |
 | 0.9.5 | 43.43 MB (43,434,486 B) | −0.00 MB | 99 MB | legacy env drops pyarrow/duckdb; DoodleShooter + OpenRelax regain pyproject.toml (+361 B); no packaging change |
 | 0.9.4 | 43.44 MB (43,438,706 B) | +0.41 MB | 99 MB | legacy env deps (pyarrow/duckdb/httpx); refreshed DoodleShooter + OpenRelax showcase files (OpenRelax ~130 KB → ~432 KB); no packaging change |
 | 0.9.3 | 43.03 MB (43,029,693 B) | −0.00 MB | 99 MB | launcher polish (Render App row / ⌥0, frostier glass); no packaging change |
@@ -122,6 +122,19 @@ Hardening after review:
 - the start-side TCC wait is bounded under the web view's 60 s fetch timeout.
 - `sources()` degrades per part if one enumeration fails.
 - a missing ScreenCaptureKit API on a future macOS is a 409.
+
+Title-bar Edit button (`editlink.py`, `mainwindow.py`): a third button,
+leftmost of Open in Browser and Home (View → Edit in fused-render, ⌘⇧E),
+hands the window's `.fused` to fused-render as a
+`fused-render://open?file=<path>` deep link (path percent-encoded once);
+fused-render clones it into `~/Fused/local/<name>` (no-op when the copy
+exists) and opens the copy. Disabled on Home; follows in-window navigation.
+The scheme is probed with `NSWorkspace.URLForApplicationToOpenURL:`; when no
+handler exists an alert offers **Download fused-render**
+(`render.fused.io/latest.json` → `dmg_url`, 4 s timeout, download page as
+fallback). Depends on the sibling fused-render PR accepting `file=`: the
+installed FusedRender 0.5.86 lands the link on its clone page's
+"unsupported fused-render link" error until that ships.
 
 ## 0.9.5
 
