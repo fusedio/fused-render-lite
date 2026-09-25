@@ -59,7 +59,6 @@ API (the six supported fused.* calls, plus what the shell needs)
   POST /api/capture/start   {mode, ...}        -> {id, path, ...}   X-Fused-Page names the page
   POST /api/capture/<id>/stop | /cancel        -> the recording (cancel deletes the file); 404 unknown id
   POST /api/capture/screenshot {path?, ...}    -> {path, ...}
-  POST /api/capture/shot-region {rect, dpr}    raw image/png bytes (Cache-Control: no-store)
                             errors: 400 bad request, 409 unsupported on this machine, {error} JSON body
 
 Binds 127.0.0.1 only. Mutating/executing POSTs require ``X-Fused: 1``, which

@@ -68,7 +68,7 @@ import CoreMedia as CM
 import Foundation
 import ScreenCaptureKit as SCK
 
-from fused_render_app.capture._darwin import _AAC, _Wait
+from fused_render_app.capture._darwin import _AAC, PROMPT_S, _Wait
 from fused_render_app.capture._mixdown import Ring, add_clip_into, upmix_mono_to_stereo
 
 #: `kAudioFormatLinearPCM` — a FourCC ('lpcm'), which pyobjc does not name.
@@ -558,7 +558,7 @@ def start(out: str, display, config, spec: dict) -> MuxHandle:
     if handle.audio in ("mic", "both"):
         _start_mic(handle, spec)
 
-    started = _Wait("starting the capture")
+    started = _Wait("starting the capture", PROMPT_S, prompt=True)
     stream.startCaptureWithCompletionHandler_(started.done)
     try:
         started.result()

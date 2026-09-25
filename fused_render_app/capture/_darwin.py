@@ -67,9 +67,24 @@ SCSHOT_MIN = (14, 0)
 #: that was just written.
 FORCE_MUX = "FUSED_CAPTURE_FORCE_MUX"
 
-#: How long to wait for a start/stop/screenshot completion handler. Generous —
-#: a first capture can sit behind the TCC prompt the user has to answer — but
-#: finite, because a request that never answers is worse than one that fails.
+#: Two bounds, because the two ends of a recording answer to different clocks.
+#:
+#: `PROMPT_S` bounds every wait that sits INSIDE a page's `fetch` — listing
+#: displays, asking for the microphone, starting the stream, taking the still —
+#: because a first capture can sit behind a TCC prompt the user has to answer,
+#: and WKWebView gives up on the request at 60 s. A bound above that is a
+#: trap: the page's promise rejects while this thread carries on, registers a
+#: recording nobody holds, and it runs to the 30-minute cap. One request can
+#: stack TWO of these — `screen({audio: "mic"})` on a fresh install waits for
+#: the Screen Recording answer and then the Microphone answer — so the bound
+#: is set for the pair to land under 60 with room for the response to travel.
+#: A prompt answered slower than this gets "try again", and the grant it
+#: produced makes the retry instant.
+PROMPT_S = 25.0
+#: `WAIT_S` bounds the STOP side, which nothing in the browser is waiting on
+#: the same way and which may legitimately need longer (`_darwin_mux` finishing
+#: an `AVAssetWriter`). Also the default `_Wait` timeout, so the muxer's
+#: positional `_Wait(...)` calls keep the bound they were written against.
 WAIT_S = 120.0
 
 #: How long a screen `stop()` waits for the "the movie is written" callback
@@ -106,13 +121,110 @@ def _screen_granted() -> bool:
     return bool(Quartz.CGPreflightScreenCaptureAccess())
 
 
+#: `AVAuthorizationStatus`: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
+_MIC_AUTHORIZED = 3
+_MIC_UNDETERMINED = 0
+
+MIC_GRANT = ("Microphone access is not granted to Render App — allow it in "
+             "System Settings › Privacy & Security › Microphone, then try again")
+
+
+def _mic_status() -> int:
+    return int(AVF.AVCaptureDevice.authorizationStatusForMediaType_(
+        AVF.AVMediaTypeAudio))
+
+
 def _mic_granted() -> bool:
-    return (AVF.AVCaptureDevice.authorizationStatusForMediaType_(
-        AVF.AVMediaTypeAudio) == 3)                      # AVAuthorizationStatusAuthorized
+    """Microphone, asked WITHOUT prompting — `probe()`'s view. Undetermined
+    reads as not granted here; `_ensure_mic` is where it gets asked."""
+    return _mic_status() == _MIC_AUTHORIZED
+
+
+def _ensure_mic() -> None:
+    """Have the microphone grant in hand before a recording that needs it.
+
+    `AVAudioRecorder.record()` on an UNDETERMINED status posts the system
+    prompt and returns True: the take starts, records silence until the user
+    answers, and stops with `state: "stopped"` and no error — the worst of the
+    outcomes, a recording the user has to make twice without being told. So
+    the question is asked first, and the answer is waited for (bounded by
+    `PROMPT_S`, for the reason that constant gives). Denied and restricted are
+    refused with the sentence that names the fix.
+    """
+    from fused_render_app.capture import Unsupported
+
+    status = _mic_status()
+    if status == _MIC_AUTHORIZED:
+        return
+    if status == _MIC_UNDETERMINED:
+        box: dict = {}
+        wait = _Wait("asking for microphone access", PROMPT_S, prompt=True)
+
+        def handler(granted):
+            # A bool, not an error: routing it through `done(error)` would turn
+            # a refusal into "failed: False".
+            box["granted"] = bool(granted)
+            wait.done(None)
+
+        AVF.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+            AVF.AVMediaTypeAudio, handler)
+        try:
+            wait.result()
+        except RuntimeError as e:
+            raise Unsupported(f"{MIC_GRANT} ({e})") from e
+        if box.get("granted"):
+            return
+    raise Unsupported(MIC_GRANT)
+
+
+def _list_displays() -> list[dict]:
+    displays = []
+    err, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
+    if err != 0:
+        raise RuntimeError(f"CGGetActiveDisplayList failed ({err})")
+    main = Quartz.CGMainDisplayID()
+    for display_id in list(ids)[:count]:
+        displays.append({
+            "id": int(display_id),
+            "width": int(Quartz.CGDisplayPixelsWide(display_id)),
+            "height": int(Quartz.CGDisplayPixelsHigh(display_id)),
+            "main": bool(display_id == main),
+        })
+    return displays
+
+
+def _list_mics() -> list[dict]:
+    """Every microphone, default first-flagged. Never prompts.
+
+    `AVCaptureDeviceDiscoverySession` is the supported enumeration;
+    `devicesWithMediaType:` has been deprecated since 10.15 and is kept only as
+    the fallback for a pyobjc that does not expose the session.
+    """
+    default = AVF.AVCaptureDevice.defaultDeviceWithMediaType_(AVF.AVMediaTypeAudio)
+    default_id = str(default.uniqueID()) if default is not None else None
+    session_cls = getattr(AVF, "AVCaptureDeviceDiscoverySession", None)
+    mic_type = getattr(AVF, "AVCaptureDeviceTypeMicrophone", None)
+    if session_cls is not None and mic_type is not None:
+        session = session_cls.discoverySessionWithDeviceTypes_mediaType_position_(
+            [mic_type], AVF.AVMediaTypeAudio, 0)       # AVCaptureDevicePositionUnspecified
+        devices = list(session.devices())
+    else:
+        devices = list(AVF.AVCaptureDevice.devicesWithMediaType_(
+            AVF.AVMediaTypeAudio))
+    return [{
+        "id": str(device.uniqueID()),
+        "name": str(device.localizedName()),
+        "default": str(device.uniqueID()) == default_id,
+    } for device in devices]
 
 
 def probe() -> dict:
-    """`fused.capture.sources()`'s payload. Reads state; changes none."""
+    """`fused.capture.sources()`'s payload. Reads state; changes none.
+
+    Displays and microphones are enumerated SEPARATELY and each failure
+    degrades only its own part: a microphone API that vanishes on some future
+    macOS must not take video, system audio and screenshots down with it.
+    """
     record_old = _too_old(RECORD_MIN)
     shot_old = _too_old(SHOT_MIN)
     granted = _screen_granted()
@@ -121,35 +233,27 @@ def probe() -> dict:
         "the first capture asks for it, or grant it in System Settings › "
         "Privacy & Security › Screen & System Audio Recording")
 
-    displays = []
-    err, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
-    if err == 0:
-        main = Quartz.CGMainDisplayID()
-        for display_id in list(ids)[:count]:
-            displays.append({
-                "id": int(display_id),
-                "width": int(Quartz.CGDisplayPixelsWide(display_id)),
-                "height": int(Quartz.CGDisplayPixelsHigh(display_id)),
-                "main": bool(display_id == main),
-            })
+    try:
+        displays = _list_displays()
+    except Exception as e:
+        displays = []
+        video_reason = video_reason or f"could not list displays ({e})"
 
-    mics = []
-    default = AVF.AVCaptureDevice.defaultDeviceWithMediaType_(AVF.AVMediaTypeAudio)
-    default_id = str(default.uniqueID()) if default is not None else None
-    for device in AVF.AVCaptureDevice.devicesWithMediaType_(AVF.AVMediaTypeAudio):
-        mics.append({
-            "id": str(device.uniqueID()),
-            "name": str(device.localizedName()),
-            "default": str(device.uniqueID()) == default_id,
-        })
+    mic_reason = None
+    try:
+        mics = _list_mics()
+    except Exception as e:
+        mics = []
+        mic_reason = f"could not list microphones ({e})"
 
+    mic_granted = _mic_granted()
     return {
         "video": {"available": not record_old, "granted": granted,
                   "reason": video_reason or None},
-        "audio": {"available": True, "granted": _mic_granted(),
-                  "reason": None if _mic_granted() else
+        "audio": {"available": True, "granted": mic_granted,
+                  "reason": mic_reason or (None if mic_granted else
                   "Microphone permission has not been granted — the first "
-                  "recording asks for it"},
+                  "recording asks for it")},
         "systemAudio": {"available": not record_old,
                         "reason": record_old or None},
         "screenshot": {"available": not shot_old, "granted": granted,
@@ -191,10 +295,19 @@ def refuse(mode: str, spec: dict) -> str | None:
 
 
 class _Wait:
-    """A completion handler as a blocking call, with the error it carried."""
+    """A completion handler as a blocking call, with the error it carried.
 
-    def __init__(self, what: str):
+    `timeout` is per instance (see `PROMPT_S` / `WAIT_S`); `prompt=True` marks a
+    wait that may be sitting behind a permission dialog, so its timeout says
+    so — "did not answer" alone sends the user looking for a bug when the fix
+    is to click Allow.
+    """
+
+    def __init__(self, what: str, timeout: float = WAIT_S,
+                 *, prompt: bool = False):
         self.what = what
+        self.timeout = float(timeout)
+        self.prompt = prompt
         self.event = threading.Event()
         self.error = None
 
@@ -205,11 +318,38 @@ class _Wait:
         self.event.set()
 
     def result(self) -> None:
-        if not self.event.wait(WAIT_S):
+        if not self.event.wait(self.timeout):
+            hint = (" — the permission prompt was not answered in time; answer "
+                    "it, then try again" if self.prompt else "")
             raise RuntimeError(f"{self.what} did not answer within "
-                               f"{int(WAIT_S)}s")
+                               f"{int(self.timeout)}s{hint}")
         if self.error:
             raise RuntimeError(f"{self.what} failed: {self.error}")
+
+
+def _need(obj, name: str, what: str) -> None:
+    """Refuse with `Unsupported` when `obj` lacks `name` — an API this macOS
+    build does not provide — instead of letting an `AttributeError` become a
+    500 the page files under `bad_request`.
+
+    `name` is the pyobjc spelling (`setCaptureMicrophone_`). A module or class
+    attribute that pyobjc's lazy lookup cannot find is `None` here; an ObjC
+    class or instance is additionally asked `respondsToSelector:` with the
+    colon spelling, because pyobjc can carry a selector in its metadata that
+    the runtime class never implemented on this release.
+    """
+    present = getattr(obj, name, None) is not None
+    responds = getattr(obj, "respondsToSelector_", None)
+    if present and callable(responds) and "_" in name:
+        try:
+            present = bool(responds(name.replace("_", ":").encode()))
+        except Exception:                                # pragma: no cover
+            present = True
+    if not present:
+        from fused_render_app.capture import Unsupported
+
+        raise Unsupported(f"{what} needs {name.replace('_', ':')}, which this "
+                          "macOS build does not provide")
 
 
 def _settle(path: str, timeout: float = FINISH_S) -> bool:
@@ -262,7 +402,7 @@ def _display(display_id) -> object:
     capture, where the user has just asked for one.
     """
     box: dict = {}
-    wait = _Wait("listing displays")
+    wait = _Wait("listing displays", PROMPT_S, prompt=True)
 
     def handler(content, error):
         box["content"] = content
@@ -381,11 +521,19 @@ def _configure(display, spec, *, cursor_default: bool = True,
     audio = spec.get("audio")
     if audio in ("system", "both"):
         config.setCapturesAudio_(True)
+    if audio in ("mic", "both"):
+        # Before either microphone path, so the muxer's `AVCaptureSession` is
+        # never opened on an undetermined grant either.
+        _ensure_mic()
     # `captureMicrophone` is macOS 15, and on the `_darwin_mux` path the
     # microphone comes from an `AVCaptureSession` at every version — asking the
     # stream for it as well would mix the same voice into the movie twice.
-    if (audio in ("mic", "both") and stream_mic
-            and config.respondsToSelector_(b"setCaptureMicrophone:")):
+    # On the stream path a missing selector is REFUSED: a recording that
+    # silently drops the microphone the caller asked for is one the user has
+    # to make twice.
+    if audio in ("mic", "both") and stream_mic:
+        _need(config, "setCaptureMicrophone_",
+              "recording the microphone with the screen")
         config.setCaptureMicrophone_(True)
         # The one place a specific microphone CAN be chosen — see
         # `start_audio`'s note about why audio-only cannot.
@@ -432,12 +580,18 @@ class _ScreenHandle:
 def start_screen(out: str, spec: dict) -> _ScreenHandle:
     """Start recording a display to `out` (.mov). Returns when frames flow."""
     _require_record()
-    display = _display(spec.get("display"))
     if _use_mux():
         from fused_render_app.capture import _darwin_mux
 
+        display = _display(spec.get("display"))
         return _darwin_mux.start(
             out, display, _configure(display, spec, stream_mic=False), spec)
+
+    # Asked before `_display`, which may raise the TCC prompt: a machine that
+    # cannot record must not be asked for a grant it then cannot use.
+    _need(SCK, "SCRecordingOutput", "screen recording")
+    _need(SCK, "SCRecordingOutputConfiguration", "screen recording")
+    display = _display(spec.get("display"))
 
     content_filter = SCK.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
         display, [])
@@ -458,7 +612,7 @@ def start_screen(out: str, spec: dict) -> _ScreenHandle:
     if not ok:
         raise RuntimeError(f"could not attach the recording output: {error}")
 
-    started = _Wait("starting the capture")
+    started = _Wait("starting the capture", PROMPT_S, prompt=True)
     stream.startCaptureWithCompletionHandler_(started.done)
     started.result()
     # The delegate is kept alive by the handle: pyobjc holds no strong reference
@@ -498,7 +652,12 @@ def start_audio(out: str, spec: dict) -> _AudioHandle:
     rejects `device` here and says where it does work — a screen recording's
     `audio: "mic"`, which goes through `SCStreamConfiguration` and does take a
     device id. `sources().microphones[].default` is the one this will use.
+
+    The grant is settled FIRST (`_ensure_mic`): `record()` on an undetermined
+    status posts the prompt and returns True, which used to hand the user a
+    silent take with `state: "stopped"` and no error.
     """
+    _ensure_mic()
     url = Foundation.NSURL.fileURLWithPath_(out)
     settings = {
         AVF.AVFormatIDKey: _AAC,
@@ -648,9 +807,15 @@ def screenshot(out: str, spec: dict) -> dict:
 
         raise Unsupported("screenshots " + old)
 
-    display = _display(spec.get("display"))
     if _too_old(SCSHOT_MIN):
-        return _cg_shot(out, display, spec)
+        return _cg_shot(out, _display(spec.get("display")), spec)
+
+    # Before `_display`, which may prompt — see `start_screen`.
+    _need(SCK, "SCScreenshotManager", "screenshots")
+    _need(SCK.SCScreenshotManager,
+          "captureImageWithFilter_configuration_completionHandler_",
+          "screenshots")
+    display = _display(spec.get("display"))
 
     content_filter = SCK.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
         display, [])
@@ -659,7 +824,7 @@ def screenshot(out: str, spec: dict) -> dict:
                         cursor_default=False)
 
     box: dict = {}
-    wait = _Wait("taking the screenshot")
+    wait = _Wait("taking the screenshot", PROMPT_S, prompt=True)
 
     def handler(image, error):
         box["image"] = image

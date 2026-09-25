@@ -77,11 +77,10 @@ def _backend():
     process, so this is a module lookup and not an interface class standing in
     front of a single implementation.
 
-    Beyond the four calls, a backend may add four optional hooks —
+    Beyond the four calls, a backend may add three optional hooks —
     `ext(mode, spec)` for the container it is about to write,
-    `refuse(mode, spec)` for what it cannot honour, `failure(handle)` for a
-    recording it has already lost, and `locate(rect, dpr)` for mapping a
-    browser-measured screen rect onto one of its displays (`shot_region`).
+    `refuse(mode, spec)` for what it cannot honour, and `failure(handle)` for
+    a recording it has already lost.
     Everything platform-specific, INCLUDING the prose of a refusal, belongs
     there: a sentence naming System Settings is macOS knowledge, and this
     module is not the place it is written.
@@ -229,13 +228,30 @@ def _out_dir() -> str:
     return paths.recordings_dir()
 
 
-def _resolve_out(path, base, default_ext: str) -> str:
+def _resolve_out(path, base, default_ext: str, *, accept=None,
+                 what: str = "recording") -> str:
     """The absolute file to write, from an optional caller `path`.
 
     A relative `path` resolves beside the CALLING PAGE (`base`), the rule
     `readFile`/`rawUrl`/`transcribe` already follow (RH-1) — "clip.mov" must not
     silently mean "beside wherever the server was launched from". No `path` at
     all lands in `_out_dir()` under a timestamped name.
+
+    Absolute and `~` paths are allowed as given: the page author chose them,
+    and this is a local desktop app writing a file the user asked for. What is
+    checked is the rest —
+
+    * the path is normalised with `realpath`, so a symlinked or `..`-laden
+      spelling names the same file it names everywhere else;
+    * the EXTENSION must be one the backend is about to write (`accept`, by
+      default just `default_ext`): "clip.mp4" holding a QuickTime movie is a
+      file every other tool misreads, so it is refused naming the right one,
+      and a bare "clip" simply gains it;
+    * the parent directory must exist (a recording that cannot be opened
+      should fail before a microphone turns on, not after);
+    * the file must NOT already exist. A recording silently replacing last
+      week's take is the one outcome no caller wants, and the fix — pick
+      another name, or omit `path` for a timestamped one — is cheap.
     """
     if path is None or path == "":
         name = time.strftime("%Y-%m-%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -248,13 +264,32 @@ def _resolve_out(path, base, default_ext: str) -> str:
             raise CaptureError(
                 "'path' must be absolute, or relative to a page named by 'base'")
         out = os.path.join(os.path.dirname(base), out)
-    out = os.path.abspath(out)
+    out = os.path.realpath(out)
+    out = _with_ext(out, default_ext, accept or (default_ext,), what)
     if os.path.isdir(out):
         raise CaptureError(f"'path' is a directory: {out}")
     parent = os.path.dirname(out)
     if not os.path.isdir(parent):
         raise CaptureError(f"no such directory: {parent}")
+    if os.path.lexists(out):
+        raise CaptureError(
+            f"'path' already exists — pick another name or omit path: {out}")
     return out
+
+
+def _with_ext(out: str, default_ext: str, accept, what: str) -> str:
+    """`out` carrying an accepted extension: appended when bare, refused when
+    wrong. There is no `format` option anywhere on this bridge — the extension
+    of the file being written decides the container, so it has to be one the
+    backend will actually write."""
+    ext = os.path.splitext(out)[1].lower()
+    if not ext:
+        return out + default_ext
+    if ext in accept:
+        return out
+    names = (", ".join(accept[:-1]) + " or " + accept[-1] if len(accept) > 1
+             else accept[0])
+    raise CaptureError(f"a {what} is written as {names} — not {ext!r}")
 
 
 def _max_seconds(value) -> int:
@@ -528,22 +563,32 @@ def _tick(session: _Session) -> bool:
     # Asked before the ✕, because it IS an ending.
     died = _failure(session)
     if died:
+        # Same critical section as `stop()`: pop the session AND park an
+        # in-flight marker, so a page `stop()` landing while the dead stream
+        # is being torn down waits for the error record rather than 404ing.
         with _lock:
-            _sessions.pop(session.id, None)
-        session.state = "error"
-        _report(session, state="error", message=died)
+            if _sessions.pop(session.id, None) is None:
+                return True                      # `stop()` beat us to it
+            ending = _ending[session.id] = threading.Event()
         try:
-            _backend().stop(session.handle)
-        except Exception:                        # noqa: BLE001 - already failed
-            pass
-        # The page still holds a handle and will call `stop()`: it must get
-        # the error record (same shape `stop` returns), not a 404 for a
-        # recording it never ended — `_remember` is what turns a lost take
-        # into the `capture_error` rejection runtime.js promises.
-        result = session.public()
-        result.update(_describe(session.path))
-        result["error"] = died
-        _remember(session.id, result)
+            session.state = "error"
+            _report(session, state="error", message=died)
+            try:
+                _backend().stop(session.handle)
+            except Exception:                    # noqa: BLE001 - already failed
+                pass
+            # The page still holds a handle and will call `stop()`: it must
+            # get the error record (same shape `stop` returns), not a 404 for
+            # a recording it never ended — `_remember` is what turns a lost
+            # take into the `capture_error` rejection runtime.js promises.
+            result = session.public()
+            result.update(_describe(session.path))
+            result["error"] = died
+            _remember(session.id, result)
+        finally:
+            with _lock:
+                _ending.pop(session.id, None)
+            ending.set()
         return True
     if _cancel_requested(session):
         try:
@@ -567,6 +612,13 @@ def _tick(session: _Session) -> bool:
 FINISHED_KEEP = 32
 _finished: dict[str, dict] = {}
 
+#: Recordings whose `stop()` is IN FLIGHT, by id: taken out of `_sessions` but
+#: not yet in `_finished`. The backend's stop can take a while (it waits for
+#: the encoder to finish the file — up to `WAIT_S + FINISH_S` on macOS), and
+#: that window used to be a 404 for every second caller: a double-clicked
+#: button, the cap, the ✕. The event is set once `_finished` holds the reply.
+_ending: dict[str, threading.Event] = {}
+
 
 def _remember(cid: str, result: dict) -> dict:
     _finished[cid] = result
@@ -575,18 +627,52 @@ def _remember(cid: str, result: dict) -> dict:
     return result
 
 
+def ending_count() -> int:
+    """Recordings whose `stop()` is inside the backend right now — no longer
+    `active()`, not yet in `_finished`. A quit budget counts these too."""
+    with _lock:
+        return len(_ending)
+
+
+def _ending_wait_s() -> float:
+    """How long a late caller waits for an in-flight stop: the backend's own
+    ceiling plus a margin, read by name so a test double sets its own."""
+    try:
+        backend = _backend()
+    except Exception:                            # noqa: BLE001 - a bound
+        return 140.0
+    return (float(getattr(backend, "WAIT_S", 120.0))
+            + float(getattr(backend, "FINISH_S", 15.0)) + 5.0)
+
+
 def stop(cid: str, *, discard: bool = False) -> dict:
     """End a recording. `discard=True` deletes the file — that is cancel.
 
-    Idempotent-ish by construction: the session is removed from the registry
-    under the lock BEFORE the backend is touched, so a ✕ landing at the same
-    moment as the page's own `stop()` cannot finalise the same file twice — and
-    the loser of that race is answered from `_finished` instead of being told
-    its own recording never existed.
+    Idempotent by construction. The session is removed from the registry under
+    the lock BEFORE the backend is touched, and an in-flight marker (`_ending`)
+    is registered in the same critical section, so a ✕ landing at the same
+    moment as the page's own `stop()` cannot finalise the same file twice. Any
+    later caller finds one of three things:
+
+    * the session — it is the owner, and ends it;
+    * no session but a marker — the owner is still inside the backend's stop;
+      it waits (bounded by the backend's own timeouts) and then answers from
+      `_finished` exactly as if it had arrived a moment later;
+    * no session and no marker — the reply is in `_finished`, or the id never
+      existed.
+
+    A `discard` arriving after some other ending still deletes the file (see
+    the comment below); an in-flight stop it waited on is no different.
     """
     with _lock:
         session = _sessions.pop(cid, None)
+        if session is not None:
+            ending = _ending[cid] = threading.Event()
+        else:
+            ending = _ending.get(cid)
     if session is None:
+        if ending is not None and not ending.wait(_ending_wait_s()):
+            raise CaptureError(f"capture {cid} is still ending")
         already = _finished.get(cid)
         if already is None:
             raise CaptureError(f"no such capture: {cid}")
@@ -604,6 +690,19 @@ def stop(cid: str, *, discard: bool = False) -> dict:
             _finished[cid] = already
         return already
 
+    try:
+        return _end(session, discard=discard)
+    finally:
+        # `_remember` has run (or `_end` raised, and there is nothing to wait
+        # for): release every caller parked on the marker, in that order.
+        with _lock:
+            _ending.pop(cid, None)
+        ending.set()
+
+
+def _end(session: _Session, *, discard: bool) -> dict:
+    """The owner's half of `stop()`: the backend, the file, the row, the reply."""
+    cid = session.id
     error = ""
     try:
         _backend().stop(session.handle)
@@ -671,15 +770,13 @@ def screenshot(body: dict) -> dict:
     onto one permission model.
     """
     backend = _backend()
-    out = _resolve_out(body.get("path"), body.get("base"), ".png")
+    # There is no `format` option: the extension of the file being written
+    # decides the container (`_with_ext`). A `format` beside a `path` is two
+    # ways to say one thing, and they can disagree — "shot.jpg" holding PNG
+    # bytes is a file every other tool misreads.
+    out = _resolve_out(body.get("path"), body.get("base"), ".png",
+                       accept=(".png", ".jpg", ".jpeg"), what="screenshot")
     ext = os.path.splitext(out)[1].lower()
-    if ext not in (".png", ".jpg", ".jpeg"):
-        # There is no `format` option: the extension of the file being written
-        # decides the container. A `format` beside a `path` is two ways to say
-        # one thing, and they can disagree — "shot.jpg" holding PNG bytes is a
-        # file every other tool misreads.
-        raise CaptureError(
-            f"a screenshot is written as .png, .jpg or .jpeg — not {ext or out!r}")
     spec = {
         "display": body.get("display"),
         "rect": _rect(body.get("rect")),
@@ -697,63 +794,6 @@ def screenshot(body: dict) -> dict:
     result = _describe(out)
     result.update(shot)
     return result
-
-
-def shot_region(body: dict) -> bytes:
-    """One frame of a SCREEN REGION, as PNG bytes — no file left behind.
-
-    The export path's capture (SPEC AF-11): the shell hands over the rect of an
-    element as the BROWSER measures it — `window.screenX` + chrome + the
-    element's box, in CSS pixels of the screen (DIPs) — plus the page's
-    `devicePixelRatio`, and gets back the pixels under it. It is not on the
-    `fused.capture` bridge because it answers a different question from
-    `screenshot()`: not "write a still to a path" but "what does this box look
-    like right now", where a file in `<home>/recordings` for every export
-    would be litter the user never asked for. So the backend still writes a
-    file — that is the one door it has — but into a temp path that is read and
-    unlinked before this returns.
-
-    Which display, and in which units, is the backend's knowledge (`locate`):
-    macOS measures displays in points, which ARE DIPs, so `dpr` is unused there
-    (it stays in the contract for a backend that measures in physical pixels).
-    The backend also REFUSES a rect that is not fully inside one display rather
-    than clipping it — an export button on a half-off-screen window would
-    otherwise bake a sliver into the artifact as its permanent thumbnail, and
-    a valid PNG is something no later check can catch. Refusal is a
-    `CaptureError`, which the caller turns into "export without a preview".
-    """
-    import tempfile
-
-    rect = _rect(body.get("rect"))
-    if rect is None:
-        raise CaptureError("'rect' is required")
-    try:
-        dpr = float(body.get("dpr") or 1.0)
-    except (TypeError, ValueError):
-        raise CaptureError("'dpr' must be a number") from None
-    if not (0.25 <= dpr <= 8):
-        raise CaptureError(f"'dpr' is out of range: {dpr}")
-    backend = _backend()
-    locate = getattr(backend, "locate", None)
-    if locate is not None:
-        display, local = locate(rect, dpr)
-    else:
-        display, local = None, rect
-    fd, out = tempfile.mkstemp(prefix="fused-shot-", suffix=".png")
-    os.close(fd)
-    try:
-        spec = {"path": out, "rect": list(local)}
-        # Only when a backend named one.
-        if display is not None:
-            spec["display"] = display
-        screenshot(spec)
-        with open(out, "rb") as fh:
-            return fh.read()
-    finally:
-        try:
-            os.remove(out)
-        except OSError:
-            pass
 
 
 # ------------------------------------------------------------------ teardown

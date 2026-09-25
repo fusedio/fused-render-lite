@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -89,6 +90,7 @@ class FakeBackend:
 
     def stop(self, handle):
         handle.stopped = True
+        handle.stops = getattr(handle, "stops", 0) + 1
 
     def failure(self, handle):
         return handle.error
@@ -106,10 +108,12 @@ def backend(monkeypatch):
     jobs.reset()
     capture._sessions.clear()
     capture._finished.clear()
+    capture._ending.clear()
     yield fake
     for cid in list(capture._sessions):
         capture._sessions.pop(cid, None)
     capture._finished.clear()
+    capture._ending.clear()
     jobs.reset()
 
 
@@ -216,7 +220,6 @@ def test_a_request_a_typo_deserves_an_answer_about_is_refused_before_recording(
 
 def test_the_mutating_routes_carry_the_x_fused_guard(client):
     for path in ("/api/capture/start", "/api/capture/screenshot",
-                 "/api/capture/shot-region",
                  "/api/capture/abc/stop", "/api/capture/abc/cancel"):
         status, _, _ = client.post(path, {}, headers=NO_GUARD)
         assert status == 403, path
@@ -281,6 +284,41 @@ def test_a_missing_directory_is_refused_rather_than_half_recorded(backend,
         {"mode": "audio", "path": str(tmp_path / "nope" / "a.m4a")})
     assert status == 400
     assert "no such directory" in J(body)["error"]
+
+
+def test_an_existing_file_is_refused_rather_than_overwritten(backend, client,
+                                                            tmp_path):
+    """A recording silently replacing last week's take is the one outcome no
+    caller wants; the fix (another name, or no `path`) is cheap."""
+    keep = tmp_path / "keep.m4a"
+    keep.write_bytes(b"last week")
+    status, _, body = client.post("/api/capture/start",
+                                  {"mode": "audio", "path": str(keep)})
+    assert status == 400
+    assert "already exists" in J(body)["error"]
+    assert keep.read_bytes() == b"last week"
+    assert backend.handles == []
+
+
+def test_a_path_whose_extension_contradicts_the_container_is_refused(
+        backend, client, tmp_path):
+    """"clip.mp4" holding a QuickTime movie is a file every other tool
+    misreads, so the refusal names the container the backend writes."""
+    status, _, body = client.post("/api/capture/start",
+                                  {"mode": "screen",
+                                   "path": str(tmp_path / "clip.mp4")})
+    assert status == 400
+    error = J(body)["error"]
+    assert ".mov" in error and ".mp4" in error
+    assert backend.handles == []
+
+
+def test_a_bare_name_gains_the_backends_extension(backend, client, tmp_path):
+    _, _, body = client.post("/api/capture/start",
+                             {"mode": "screen", "path": str(tmp_path / "clip")})
+    started = J(body)
+    assert started["path"] == str(tmp_path / "clip.mov")
+    assert os.path.exists(started["path"])
 
 
 # ---------------------------------------------------------------- the endings
@@ -383,6 +421,87 @@ def test_a_cancel_after_a_stop_still_deletes_the_file(backend, client):
     _, _, body = client.post(f"/api/capture/{started['id']}/cancel", {})
     gone = J(body)
     assert gone["path"] is None and gone["state"] == "cancelled"
+    assert not os.path.exists(started["path"])
+
+
+def test_a_stop_that_lands_while_the_first_is_finishing_waits_for_it(
+        backend, client, monkeypatch):
+    """The backend's stop can take a while (it waits for the encoder to finish
+    the file), and the session leaves the registry BEFORE that wait. A second
+    stop landing inside the window — a double-clicked button, the ✕, the cap —
+    used to be a 404 for a recording that was ending fine. Now it waits on
+    the in-flight marker and gets the same reply, and the backend is asked to
+    stop exactly once."""
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_stop(handle):
+        entered.set()
+        assert release.wait(5), "the test never released the backend"
+        handle.stopped = True
+        handle.stops = getattr(handle, "stops", 0) + 1
+
+    monkeypatch.setattr(backend, "stop", slow_stop)
+    # Small bounds, so a broken wait fails the test in seconds, not minutes.
+    backend.WAIT_S, backend.FINISH_S = 1.0, 0.5
+    _, _, body = client.post("/api/capture/start", {"mode": "audio"})
+    started = J(body)
+    url = f"/api/capture/{started['id']}/stop"
+
+    first: list = []
+    worker = threading.Thread(target=lambda: first.append(client.post(url, {})))
+    worker.start()
+    assert entered.wait(5)                      # the first is inside the backend
+    assert capture.active() == []               # and the session is already gone
+    second: list = []
+    late = threading.Thread(target=lambda: second.append(client.post(url, {})))
+    late.start()
+    late.join(timeout=0.3)
+    assert late.is_alive()                      # parked on the marker, not a 404
+    release.set()
+    worker.join(timeout=5)
+    late.join(timeout=5)
+    assert not worker.is_alive() and not late.is_alive()
+
+    (s1, _, b1), (s2, _, b2) = first[0], second[0]
+    assert s1 == s2 == 200, (b1, b2)
+    assert J(b1)["id"] == J(b2)["id"] == started["id"]
+    assert J(b1)["state"] == J(b2)["state"] == "stopped"
+    assert J(b1)["path"] == J(b2)["path"] == started["path"]
+    assert backend.handles[0].stops == 1
+    assert capture._ending == {}                # the marker is cleared after
+
+
+def test_a_cancel_that_lands_while_a_stop_is_finishing_still_discards(
+        backend, client, monkeypatch):
+    """The waiting caller is answered like any late caller: a cancel deletes
+    the file even though the ending it waited on kept it."""
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_stop(handle):
+        entered.set()
+        release.wait(5)
+        handle.stopped = True
+
+    monkeypatch.setattr(backend, "stop", slow_stop)
+    backend.WAIT_S, backend.FINISH_S = 1.0, 0.5
+    _, _, body = client.post("/api/capture/start", {"mode": "audio"})
+    started = J(body)
+    worker = threading.Thread(
+        target=client.post, args=(f"/api/capture/{started['id']}/stop", {}))
+    worker.start()
+    assert entered.wait(5)
+    gone: list = []
+    late = threading.Thread(target=lambda: gone.append(
+        client.post(f"/api/capture/{started['id']}/cancel", {})))
+    late.start()
+    late.join(timeout=0.3)
+    assert late.is_alive()                      # parked on the marker
+    release.set()
+    worker.join(timeout=5)
+    late.join(timeout=5)
+    status, _, body = gone[0]
+    assert status == 200
+    assert J(body)["state"] == "cancelled" and J(body)["path"] is None
     assert not os.path.exists(started["path"])
 
 
@@ -584,21 +703,6 @@ def test_the_screenshots_container_follows_its_filename(backend, client,
                                   {"path": str(tmp_path / "shot.gif")})
     assert status == 400
     assert ".png, .jpg or .jpeg" in J(body)["error"]
-
-
-def test_shot_region_answers_png_bytes_and_leaves_no_file(backend, client,
-                                                          app_home):
-    """The shell's export capture: bytes back, nothing in recordings."""
-    status, headers, body = client.post("/api/capture/shot-region",
-                                        {"rect": [0, 0, 10, 10], "dpr": 2})
-    assert status == 200, body
-    assert headers.get("Content-Type", "").startswith("image/png")
-    assert headers.get("Cache-Control") == "no-store"
-    assert body == b"png"
-    recordings = app_home / "recordings"
-    assert not recordings.exists() or os.listdir(recordings) == []
-    status, _, body = client.post("/api/capture/shot-region", {"dpr": 1})
-    assert status == 400 and "'rect' is required" in J(body)["error"]
 
 
 # ------------------------------------------------------------- the bridge doc

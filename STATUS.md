@@ -92,8 +92,7 @@ delete, the `maxSeconds` cap (default 30 min) = stop + keep. Files land in
 `~/.fused-render-app/recordings/` unless the page names a `path` (relative
 resolves beside the page). Permissions: Screen Recording is a TCC grant in
 System Settings (no plist key or entitlement); the mic reuses the existing
-`NSMicrophoneUsageDescription` + `audio-input` entitlement. A `shot-region`
-route is present for future shell use, no page verb yet.
+`NSMicrophoneUsageDescription` + `audio-input` entitlement.
 
 | member | status | notes |
 | --- | --- | --- |
@@ -106,7 +105,24 @@ route is present for future shell use, no page verb yet.
 
 Server routes added: `GET /api/capture`, `POST /api/capture/start`,
 `POST /api/capture/{id}/stop`, `POST /api/capture/{id}/cancel`,
-`POST /api/capture/screenshot`, `POST /api/capture/shot-region`.
+`POST /api/capture/screenshot`.
+
+Hardening after review:
+- logout / shutdown end recordings via `applicationWillTerminate:` (rumps
+  `before_quit`), with a bounded quit budget (`QUIT_STOP_BUDGET_S`, 20 s) so
+  a stalled ScreenCaptureKit stop cannot beachball the menu bar.
+- a refused Screen Recording grant is a 409, not a 500.
+- a recording that dies mid-flight still answers the page's `stop()`.
+- the 13–14 muxer (`_darwin_mux.py`) is never imported on 15+.
+- a second `stop()` / `cancel()` during an in-flight stop waits for it
+  instead of a 404.
+- output paths refuse an existing file and a wrong container extension.
+- mic access is requested before the first take (undetermined → prompt,
+  denied → 409).
+- the start-side TCC wait is bounded under the web view's 60 s fetch timeout.
+- `sources()` degrades per part if one enumeration fails.
+- a missing ScreenCaptureKit API on a future macOS is a 409.
+
 ## 0.9.5
 
 Patch: legacy env sheds pyarrow/duckdb; showcase containers regain their

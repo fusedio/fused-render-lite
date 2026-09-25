@@ -19,7 +19,7 @@ from __future__ import annotations
 from urllib.parse import unquote
 
 from fused_render_app import capture
-from fused_render_app._web import APIRouter, Body, Header, Response
+from fused_render_app._web import APIRouter, Body, Header
 from fused_render_app.routes.common import _error, _require_fused
 
 router = APIRouter()
@@ -111,28 +111,3 @@ def api_capture_screenshot(body: dict = Body(...),
         return _error(str(e), status=409)
     except Exception as e:                      # noqa: BLE001
         return _internal(e)
-
-
-@router.post("/api/capture/shot-region")
-def api_capture_shot_region(body: dict = Body(...),
-                            x_fused: str | None = Header(default=None)):
-    """The pixels under a browser-measured screen rect, as a PNG body.
-
-    The shell's export capture (SPEC AF-11): `{rect: [x, y, w, h], dpr}` in
-    the browser's own screen units, bytes back — no file in recordings and no
-    `fused.capture` surface. Errors are the ordinary JSON `_error` shape, so a
-    caller branches on `res.ok` alone.
-    """
-    guard = _require_fused(x_fused)
-    if guard is not None:
-        return guard
-    try:
-        png = capture.shot_region(body)
-    except capture.CaptureError as e:
-        return _error(str(e), status=400)
-    except capture.Unsupported as e:
-        return _error(str(e), status=409)
-    except Exception as e:                      # noqa: BLE001
-        return _internal(e)
-    return Response(content=png, media_type="image/png",
-                    headers={"Cache-Control": "no-store"})
