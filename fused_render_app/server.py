@@ -74,7 +74,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine, engine_host, env, fetch, hotkey, icon_color, launcher, showcase, jobs, paths
 from fused_render_app.update import mac as mac_update
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
@@ -965,7 +965,12 @@ def start_ai() -> None:
                      ("reaper", ai_routes.supervisor.start_reaper),
                      ("hardware", ai_routes.supervisor.start_hardware_refresh),
                      ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
-                     ("background-apps", _start_background_apps)):
+                     ("background-apps", _start_background_apps),
+                     # Importing the fused backend costs seconds and pulls
+                     # pandas/numpy into this process; pay it here, off the
+                     # request path, so the first runPython does not stall.
+                     ("engine-warm", lambda: threading.Thread(
+                         target=engine.warm, name="fused-engine-warm", daemon=True).start())):
         try:
             fn()
         except Exception:  # noqa: BLE001

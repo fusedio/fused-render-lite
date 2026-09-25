@@ -15,6 +15,20 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# The fused execution engine (engine.py). Optional: without it runPython runs
+# on the built-in worker (_child.py). The packaged .app installs it
+# (build_dmg.sh) so the DMG runs scripts the way fused-render does.
+#
+# Bare `fused`, not fused-render's `fused[ai,aws]`: Render App installs every
+# optional dependency on demand into per-app venvs, and the local execute path
+# (`LocalPythonComputeBackend._execute_sync`) was verified to run on the bare
+# wheel (2.9.3b9) with no boto3/anthropic/pyarrow present. `mcp<2` for the
+# same reason fused-render pins it: fused's own floor admits mcp 2.x, where
+# `mcp.server.fastmcp` no longer exists and `import fused` dies.
+fused = [
+    'fused==2.9.3b9 ; python_version >= "3.11"',
+    'mcp<2 ; python_version >= "3.11"',
+]
 # The macOS shell (macapp.py + mainwindow.py). Only the packaged .app installs it.
 app = [
     "rumps",

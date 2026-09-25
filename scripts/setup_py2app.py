@@ -81,6 +81,124 @@ def _stdlib_split():
 
 STDLIB_PACKAGES, STDLIB_INCLUDES = _stdlib_split()
 
+
+# --- the fused engine ([fused] extra) --------------------------------------
+# Derived from the build venv the way fused-render's setup derives [bundled]:
+# the transitive closure of the extra's distributions, split by what each
+# top-level import name IS on disk. py2app treats the two differently and
+# getting it wrong is silent: a C extension forced via `packages` is copied as
+# `lib/python3.12/<name>.py`, which shadows the real thing (`_duckdb` is the
+# canonical case). Empty lists when the extra is not installed, so a build
+# venv without it still packages a fused-less app.
+
+# Top-level names that must never be forced via `packages`: PEP 420 namespace
+# packages (no `__init__.py`) break py2app's package bootstrap.
+NEVER_FORCE_AS_PACKAGE = {"__pycache__"}
+# Bare C extensions that belong in `includes`, never `packages`.
+FORCE_AS_INCLUDE = {"_duckdb", "_cffi_backend"}
+
+
+def _norm_dist(name):
+    return name.lower().replace("_", "-")
+
+
+def _req_name(requirement):
+    name = requirement.split("[")[0]
+    for sep in ("<", ">", "=", "!", "~", " ", "(", ";"):
+        name = name.split(sep)[0]
+    return _norm_dist(name.strip())
+
+
+def _fused_distributions():
+    """The distributions `[fused]` declares (names only)."""
+    import tomllib
+
+    with open(os.path.join(REPO_ROOT, "pyproject.toml"), "rb") as fh:
+        pyproject = tomllib.load(fh)
+    declared = pyproject["project"]["optional-dependencies"].get("fused", [])
+    return [_req_name(d) for d in declared]
+
+
+def _runtime_requires(dist):
+    """Runtime deps of `dist`, skipping extras and unsatisfied markers."""
+    out = []
+    for raw in dist.requires or []:
+        spec = raw
+        if ";" in raw:
+            head, marker = raw.split(";", 1)
+            if "extra" in marker:
+                continue  # optional extra: not installed, not needed
+            try:
+                from packaging.markers import Marker
+
+                if not Marker(marker.strip()).evaluate():
+                    continue
+            except Exception:
+                pass
+            spec = head
+        name = _req_name(spec)
+        if name:
+            out.append(name)
+    return out
+
+
+def fused_force_lists():
+    """`(packages, includes)` contributed by `[fused]`, derived from the venv."""
+    import importlib.metadata as importlib_metadata
+    import sysconfig
+
+    _paths = sysconfig.get_paths()
+    site_dirs = []
+    for scheme in ("purelib", "platlib"):
+        d = _paths.get(scheme)
+        if d and d not in site_dirs:
+            site_dirs.append(d)
+    installed = {}
+    for dist in importlib_metadata.distributions():
+        name = dist.metadata["Name"] if dist.metadata else None
+        if name:
+            installed[_norm_dist(name)] = dist
+
+    seen, stack = set(), list(_fused_distributions())
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        dist = installed.get(name)
+        if dist is None:
+            continue  # not in the build venv: marker-gated, extra-only, or [fused] absent
+        seen.add(name)
+        stack.extend(_runtime_requires(dist))
+
+    top_level = {}
+    for import_name, dist_names in importlib_metadata.packages_distributions().items():
+        for dist_name in dist_names:
+            top_level.setdefault(_norm_dist(dist_name), set()).add(import_name)
+
+    packages, includes = set(), set()
+    for name in seen:
+        for import_name in top_level.get(name, ()):
+            if import_name in NEVER_FORCE_AS_PACKAGE:
+                continue
+            if import_name in FORCE_AS_INCLUDE:
+                includes.add(import_name)
+                continue
+            path = next(
+                (p for p in (os.path.join(s, import_name) for s in site_dirs)
+                 if os.path.isdir(p)),
+                None,
+            )
+            if path is not None:
+                if os.path.exists(os.path.join(path, "__init__.py")):
+                    packages.add(import_name)
+                # else: a namespace package -- skip rather than break the bootstrap
+            else:
+                includes.add(import_name)
+    return sorted(packages), sorted(includes)
+
+
+FUSED_PACKAGES, FUSED_INCLUDES = fused_force_lists()
+
 OPTIONS = {
     "argv_emulation": False,  # macapp.py owns AppKit file-open handling directly
     "iconfile": ICONFILE,
@@ -88,16 +206,17 @@ OPTIONS = {
     # extension, half `_metadata.py`, and a traced import can leave the
     # metadata behind — which surfaces as delegate blocks arriving without a
     # signature inside the built app only.
-    "packages": ["fused_render_app", "rumps", "WebKit"] + STDLIB_PACKAGES,
-    "includes": STDLIB_INCLUDES,
+    "packages": ["fused_render_app", "rumps", "WebKit"] + STDLIB_PACKAGES + FUSED_PACKAGES,
+    "includes": STDLIB_INCLUDES + FUSED_INCLUDES,
     "resources": [os.path.join(REPO_ROOT, "fused_render_app", "static")],
     # Third-party only: the stdlib is shipped whole (STDLIB_EXCLUDED is the
     # only list that trims it). PIL is imported lazily by runner-side modules
     # that only ever run inside a runner's own venv; the build venv has pillow
     # for the icon, and without this exclude py2app follows those imports and
     # ships 17 MB of pillow + libjpeg/libtiff/liblzma (which also fails strict
-    # codesign).
-    "excludes": ["setuptools", "pip", "PIL", "pillow", "packaging"],
+    # codesign). `packaging` is no longer excluded: the fused engine requires
+    # it (and the derivation above lists it when [fused] is installed).
+    "excludes": ["setuptools", "pip", "PIL", "pillow"],
     "no_report_missing_conditional_import": True,
     "plist": {
         "CFBundleIdentifier": "io.fused.render.app",

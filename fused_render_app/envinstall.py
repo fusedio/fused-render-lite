@@ -463,10 +463,18 @@ def script_python_ready() -> bool:
 
 
 def reset_script_python_cache() -> None:
-    """Forget the resolution. For tests, and for after an interpreter download."""
+    """Forget the resolution. For tests, and for after an interpreter download.
+
+    Also drops the engine's backend singleton: it was constructed with the old
+    resolution as `python_executable`, and `_python_executable()` reads that
+    back off the live instance -- a stale one would key venvs differently from
+    the loader that builds them."""
     global _script_python
     with _script_python_lock:
         _script_python = _UNRESOLVED
+    from fused_render_app import engine
+
+    engine.reset_backend()
 
 
 def venv_key_for(project_dir: str) -> str:

@@ -4,6 +4,28 @@ One section per version: what the `fused.*` runtime supports, what it does
 not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 (`app size` line and `done:` line), macOS arm64, ad-hoc signed.
 
+## Unreleased: fused engine (draft PR, not merged)
+
+`fused.runPython` can run through the `fused` package's
+`LocalPythonComputeBackend` (`engine.py`), the way fused-render runs it, with
+`_child.py` as the fallback when the package is absent. The DMG installs the
+`[fused]` extra (bare `fused==2.9.3b9`, no `[ai,aws]`). Measured before the
+PR, in a fresh 3.12 venv on macOS arm64 (gzip of site-packages as the ULFO
+proxy; CI's macos-desktop job prints the real number):
+
+| install | site-packages | dists | gzip | est. DMG |
+| --- | --- | --- | --- | --- |
+| 0.9.5 (no engine) | — | 0 runtime deps | — | 43.43 MB |
+| + bare `fused==2.9.3b9` | +161 MB | 63 | +45.6 MB | ~89 MB |
+| + `fused[ai,aws]` (what fused-render bundles; NOT this PR) | +320 MB | 75 | +98.5 MB | ~142 MB |
+
+The bare wheel's hard requirements carry duckdb (44 MB .so), pandas (41),
+numpy (22), cryptography (13). Importing the backend takes ~9 s cold and loads
+pandas/numpy/aiohttp/pydantic into the server process, so `server.start_ai`
+warms it on a thread. **Merge gate: the `fused` package must get very small
+first** (another team is cutting its dependency set); until then this stays a
+draft and 0.9.x ships without it.
+
 ## Size by version
 
 Shipped size = the DMG attached to the GitHub release (built by CI on
