@@ -9,22 +9,31 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 `fused.runPython` can run through the `fused` package's
 `LocalPythonComputeBackend` (`engine.py`), the way fused-render runs it, with
 `_child.py` as the fallback when the package is absent. The DMG installs the
-`[fused]` extra (bare `fused==2.9.3b9`, no `[ai,aws]`). Measured before the
-PR, in a fresh 3.12 venv on macOS arm64 (gzip of site-packages as the ULFO
-proxy; CI's macos-desktop job prints the real number):
+`[fused]` extra (bare `fused==2.9.3b10`, no `[aws,mcp]`).
 
-| install | site-packages | dists | gzip | est. DMG |
+**Local build with the extra (2026-09-28, `build_dmg.sh` on the python.org
+framework 3.12, ad-hoc signed, macOS arm64): DMG 51.76 MB (51,758,851 B),
+.app unpacked 129 MB. That is +8.3 MB on the DMG and +30 MB unpacked over
+0.9.5**; `Contents/Resources/lib/python3.12` went from ~28 MB to 58 MB. The
+bundled interpreter imports the backend in 0.5 s.
+
+How the candidates compared before picking b10 (fresh 3.12 venvs, gzip of
+site-packages as the ULFO proxy):
+
+| install | site-packages | dists | gzip | DMG |
 | --- | --- | --- | --- | --- |
-| 0.9.5 (no engine) | — | 0 runtime deps | — | 43.43 MB |
-| + bare `fused==2.9.3b9` | +161 MB | 63 | +45.6 MB | ~89 MB |
-| + `fused[ai,aws]` (what fused-render bundles; NOT this PR) | +320 MB | 75 | +98.5 MB | ~142 MB |
+| 0.9.5 (no engine) | — | 0 runtime deps | — | 43.43 MB shipped |
+| + bare `fused==2.9.3b10` (this PR) | +26 MB | 45 | +7.1 MB | **51.76 MB measured** |
+| + bare `fused==2.9.3b9` (first draft of this PR) | +161 MB | 63 | +45.6 MB | ~89 MB est. |
+| + `fused[ai,aws]==2.9.3b9` (what fused-render bundled then) | +320 MB | 75 | +98.5 MB | ~142 MB est. |
 
-The bare wheel's hard requirements carry duckdb (44 MB .so), pandas (41),
-numpy (22), cryptography (13). Importing the backend takes ~9 s cold and loads
-pandas/numpy/aiohttp/pydantic into the server process, so `server.start_ai`
-warms it on a thread. **Merge gate: the `fused` package must get very small
-first** (another team is cutting its dependency set); until then this stays a
-draft and 0.9.x ships without it.
+2.9.3b10 (2026-09-25) moved numpy/pandas/pyarrow/duckdb/mcp out of the core
+set; what is left is fastapi/uvicorn/aiohttp/pydantic/requests/keyring-sized.
+Importing the backend went from ~9 s cold (b9, pandas+numpy loaded) to ~0.14 s
+(b10, 678 modules). `server.start_ai` still warms it on a thread. **Merge
+gate: the `fused` package must get very small first**; b10 is most of the
+way, the remaining ~7 MB compressed is the fastapi/uvicorn/aiohttp server
+stack that Render App itself does not use.
 
 ## Size by version
 
