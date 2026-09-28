@@ -4,6 +4,43 @@ One section per version: what the `fused.*` runtime supports, what it does
 not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 (`app size` line and `done:` line), macOS arm64, ad-hoc signed.
 
+## Unreleased: fused engine (draft PR, not merged)
+
+`fused.runPython` can run through the `fused` package's
+`LocalPythonComputeBackend` (`engine.py`), the way fused-render runs it, with
+`_child.py` as the fallback when the package is absent. The DMG installs the
+`[fused]` extra (bare `fused==2.9.3b10`, no `[aws,mcp]`).
+
+**Local builds with the extra (2026-09-28, `build_dmg.sh` on the python.org
+framework 3.12, ad-hoc signed, macOS arm64):**
+
+| base | DMG | .app unpacked | `Resources/lib/python3.12` |
+| --- | --- | --- | --- |
+| 0.9.5 + fused | 51.76 MB (51,758,851 B) | 129 MB | 58 MB |
+| 0.10.0 + fused (rebased on `d2ed3d2`) | 52.09 MB (52,094,015 B) | 132 MB | 61 MB |
+
+Against 0.9.5's shipped 43.43 MB that is +8.3 MB on the DMG and +30 MB
+unpacked for the engine; the further +0.3 MB is 0.10.0's own capture
+frameworks, not fused. The bundled interpreter imports the backend in 0.5 s.
+
+How the candidates compared before picking b10 (fresh 3.12 venvs, gzip of
+site-packages as the ULFO proxy):
+
+| install | site-packages | dists | gzip | DMG |
+| --- | --- | --- | --- | --- |
+| 0.9.5 (no engine) | — | 0 runtime deps | — | 43.43 MB shipped |
+| + bare `fused==2.9.3b10` (this PR) | +26 MB | 45 | +7.1 MB | **51.76 MB measured** |
+| + bare `fused==2.9.3b9` (first draft of this PR) | +161 MB | 63 | +45.6 MB | ~89 MB est. |
+| + `fused[ai,aws]==2.9.3b9` (what fused-render bundled then) | +320 MB | 75 | +98.5 MB | ~142 MB est. |
+
+2.9.3b10 (2026-09-25) moved numpy/pandas/pyarrow/duckdb/mcp out of the core
+set; what is left is fastapi/uvicorn/aiohttp/pydantic/requests/keyring-sized.
+Importing the backend went from ~9 s cold (b9, pandas+numpy loaded) to ~0.14 s
+(b10, 678 modules). `server.start_ai` still warms it on a thread. **Merge
+gate: the `fused` package must get very small first**; b10 is most of the
+way, the remaining ~7 MB compressed is the fastapi/uvicorn/aiohttp server
+stack that Render App itself does not use.
+
 ## Size by version
 
 Shipped size = the DMG attached to the GitHub release (built by CI on

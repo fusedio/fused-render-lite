@@ -15,6 +15,21 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# The fused execution engine (engine.py). Optional: without it runPython runs
+# on the built-in worker (_child.py). The packaged .app installs it
+# (build_dmg.sh) so the DMG runs scripts the way fused-render does.
+#
+# Bare `fused`, not fused-render's `fused[aws,mcp]`: Render App installs every
+# optional dependency on demand into per-app venvs, and the local execute path
+# (`LocalPythonComputeBackend._execute_sync`) was verified to run on the bare
+# wheel with no boto3/anthropic/pyarrow/pandas/mcp present. 2.9.3b10 is the
+# release that moved numpy/pandas/pyarrow/duckdb/mcp out of the core set
+# (19 core dists, ~26 MB installed vs ~161 MB for b9); no `mcp<2` pin here
+# because mcp is no longer pulled in at all (fused-render keeps it for its
+# MCP panel, which Render App does not have).
+fused = [
+    'fused==2.9.3b10 ; python_version >= "3.11"',
+]
 # The macOS shell (macapp.py + mainwindow.py). Only the packaged .app installs it.
 app = [
     "rumps",
