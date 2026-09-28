@@ -11,11 +11,17 @@ not, and what the build weighs. Sizes come from `bash scripts/build_dmg.sh`
 `_child.py` as the fallback when the package is absent. The DMG installs the
 `[fused]` extra (bare `fused==2.9.3b10`, no `[aws,mcp]`).
 
-**Local build with the extra (2026-09-28, `build_dmg.sh` on the python.org
-framework 3.12, ad-hoc signed, macOS arm64): DMG 51.76 MB (51,758,851 B),
-.app unpacked 129 MB. That is +8.3 MB on the DMG and +30 MB unpacked over
-0.9.5**; `Contents/Resources/lib/python3.12` went from ~28 MB to 58 MB. The
-bundled interpreter imports the backend in 0.5 s.
+**Local builds with the extra (2026-09-28, `build_dmg.sh` on the python.org
+framework 3.12, ad-hoc signed, macOS arm64):**
+
+| base | DMG | .app unpacked | `Resources/lib/python3.12` |
+| --- | --- | --- | --- |
+| 0.9.5 + fused | 51.76 MB (51,758,851 B) | 129 MB | 58 MB |
+| 0.10.0 + fused (rebased on `d2ed3d2`) | 52.09 MB (52,094,015 B) | 132 MB | 61 MB |
+
+Against 0.9.5's shipped 43.43 MB that is +8.3 MB on the DMG and +30 MB
+unpacked for the engine; the further +0.3 MB is 0.10.0's own capture
+frameworks, not fused. The bundled interpreter imports the backend in 0.5 s.
 
 How the candidates compared before picking b10 (fresh 3.12 venvs, gzip of
 site-packages as the ULFO proxy):
