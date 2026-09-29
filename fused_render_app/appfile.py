@@ -14,6 +14,16 @@ a file carrying a stable app id, ``.fused`` is a symlink to
 
 No trust gate: opening a .fused runs its Python. Same posture as opening any
 folder of pages someone sent you.
+
+A plain FOLDER is accepted too (``is_app_dir``): a directory whose entry is
+its first non-hidden direct-child ``.html`` carrying ``<meta name="fused-app">``
+— fused-render's own workspace rule (``app_listing.app_entry``; the marker is
+the only signal, ``index.html`` has no special status). ``~/Fused/local/<app>``
+folders, what fused-render edits, open in place: nothing is extracted, the
+folder IS the app dir, and its ``.fused`` state dir stays where fused-render
+put it (never symlinked into ``fused_data``). Every ``appfile.*`` reader
+(icon, preview, app id, extract dir) answers for a folder as for a file, so
+the dock, the launcher and the home page need no second code path.
 """
 from __future__ import annotations
 
@@ -84,6 +94,12 @@ def app_id_of(fused_path: str, manifest: dict | None = None) -> str | None:
     exporter that stamped the page but not its index still identifies the
     app. Never raises."""
     try:
+        if manifest is None and os.path.isdir(fused_path):
+            entry = dir_entry(fused_path)
+            if entry is None:
+                return None
+            with open(entry, "rb") as f:
+                return app_id_from_text(f.read(_APP_ID_SCAN_BYTES))
         if manifest is None:
             manifest = read_manifest(fused_path)
         v = manifest.get("app_id")
@@ -110,6 +126,90 @@ def has_fused_meta(html_path: str) -> bool:
             return bool(_META_RE.search(f.read(64 * 1024)))
     except OSError:
         return False
+
+
+# ---- folder apps -------------------------------------------------------------
+
+_TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
+_TITLE_SCAN_BYTES = 64 * 1024
+
+
+def dir_entry(dir_path: str) -> str | None:
+    """A folder's entry page: the FIRST non-hidden direct-child ``.html``
+    (name order) carrying ``<meta name="fused-app">``, absolute; None when
+    no page declares itself (a folder of untagged html is NOT an app) or the
+    dir cannot be listed. fused-render's ``app_listing.app_entry`` rule, so
+    a folder resolves to the same page here and there (one difference: the
+    marker is looked for in the first 64 KiB, `has_fused_meta`, where
+    fused-render scans 4 KiB — a page tagged that deep is an app here only)."""
+    try:
+        children = os.listdir(dir_path)
+    except OSError:
+        return None
+    for c in sorted(children):
+        if c.startswith(".") or not c.lower().endswith(".html"):
+            continue
+        p = os.path.join(dir_path, c)
+        if os.path.isfile(p) and has_fused_meta(p):
+            return os.path.abspath(p)
+    return None
+
+
+def is_app_dir(path: str) -> bool:
+    """Whether ``path`` is a directory that `dir_entry` resolves."""
+    return os.path.isdir(path) and dir_entry(path) is not None
+
+
+def dir_title(entry: str) -> str | None:
+    """The entry page's ``<title>``, whitespace-collapsed and html-unescaped,
+    or None when absent/empty."""
+    try:
+        with open(entry, "rb") as f:
+            head = f.read(_TITLE_SCAN_BYTES)
+    except OSError:
+        return None
+    m = _TITLE_RE.search(head)
+    if not m:
+        return None
+    import html as _html
+
+    text = " ".join(_html.unescape(m.group(1).decode("utf-8", "replace")).split())
+    return text or None
+
+
+def dir_name(dir_path: str, entry: str | None = None) -> str:
+    """The folder app's display name: its entry's ``<title>``, else the
+    folder's base name."""
+    entry = entry or dir_entry(dir_path)
+    title = dir_title(entry) if entry else None
+    return title or os.path.basename(os.path.normpath(dir_path)) or "app"
+
+
+def open_app_dir(dir_path: str) -> dict:
+    """Open a folder app in place: the same envelope as `open_app_file`
+    (``dir`` is the folder itself, ``reused`` always True — nothing is
+    extracted). Raises AppFileError when the folder declares no entry.
+
+    The ``.fused`` state dir is scaffolded LOCALLY (`ensure_dot_fused` with
+    no app id): the folder is fused-render's, and linking its state into
+    ``fused_data/<app_id>`` would move files out of that workspace."""
+    # realpath, not abspath: ``env`` keys the venv on this dir, and
+    # ``server.app_dir_for`` (the runPython side) answers a realpath — a
+    # symlinked ``~/Fused`` must not build two venvs for one app.
+    dir_path = os.path.realpath(dir_path)
+    entry = dir_entry(dir_path)
+    if entry is None:
+        raise AppFileError(
+            f"{dir_path} is not a fused app folder: no .html in it carries "
+            "<meta name=\"fused-app\">")
+    ensure_dot_fused(dir_path, None)
+    return {"dir": dir_path, "entry": entry, "name": dir_name(dir_path, entry),
+            "reused": True, "app_id": app_id_of(dir_path)}
+
+
+def open_app(path: str) -> dict:
+    """`open_app_dir` for a directory, `open_app_file` for anything else."""
+    return open_app_dir(path) if os.path.isdir(path) else open_app_file(path)
 
 
 def _entry_problem(entry: object) -> bool:
@@ -232,6 +332,10 @@ def extract_dir_for(fused_path: str) -> str | None:
     notification click has to find the window showing the .fused that folder
     came from. Cheap on repeat calls (`_file_key` memoises on size+mtime)."""
     fused_path = os.path.abspath(fused_path)
+    if os.path.isdir(fused_path):
+        # realpath, as `open_app_dir` answers ``dir``: a job row's page is
+        # under that, and jobnotify compares the two as strings.
+        return os.path.realpath(fused_path) if is_app_dir(fused_path) else None
     try:
         manifest = read_manifest(fused_path)
         name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"
@@ -444,6 +548,9 @@ def icon_override_paths(fused_path: str) -> list[str] | None:
     is memoised on the file's (size, mtime)."""
     try:
         fused_path = os.path.abspath(fused_path)
+        if os.path.isdir(fused_path):
+            # A folder app's icon lives in the folder: same candidates, no extract.
+            return [os.path.join(fused_path, n) for n in ICON_NAMES]
         if not os.path.isfile(fused_path):
             return None
         base = _extract_base(fused_path, read_manifest(fused_path))
@@ -536,6 +643,8 @@ def icon_bytes(fused_path: str) -> bytes | None:
     """
     try:
         fused_path = os.path.abspath(fused_path)
+        if os.path.isdir(fused_path):
+            return _override_icon_bytes([os.path.join(fused_path, n) for n in ICON_NAMES])
         if not os.path.isfile(fused_path):
             return None
         manifest = read_manifest(fused_path)
@@ -566,6 +675,8 @@ def preview_override_path(fused_path: str) -> str | None:
     or not it exists yet), or None if the file is unreadable."""
     try:
         fused_path = os.path.abspath(fused_path)
+        if os.path.isdir(fused_path):
+            return os.path.join(fused_path, PREVIEW_NAME)
         if not os.path.isfile(fused_path):
             return None
         return os.path.join(_extract_base(fused_path, read_manifest(fused_path)), PREVIEW_NAME)
@@ -606,6 +717,8 @@ def preview_bytes(fused_path: str) -> bytes | None:
     """
     try:
         fused_path = os.path.abspath(fused_path)
+        if os.path.isdir(fused_path):
+            return _override_bytes([os.path.join(fused_path, PREVIEW_NAME)], preview_cap)
         if not os.path.isfile(fused_path):
             return None
         manifest = read_manifest(fused_path)

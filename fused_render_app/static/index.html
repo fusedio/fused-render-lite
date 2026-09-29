@@ -93,8 +93,7 @@
   .wrap { width: min(760px, 100%); min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; justify-items: center; }
   .showcase { width: 100%; min-width: 0; }
   .showcase[hidden] { display: none; }
-  .showcase h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); text-align: left; }
-  .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; display: flex; justify-content: center; align-items: center; }
+  .showcase h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); text-align: left; }  .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; display: flex; justify-content: center; align-items: center; }
   .version[hidden] { display: none; }
   .version a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
   .version a:hover { color: var(--fg); text-decoration: underline; }
@@ -112,7 +111,7 @@
   .rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
   .rail::-webkit-scrollbar-track { background: transparent; }
   .card {
-    flex: 0 0 150px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
+    flex: 0 0 150px; min-width: 0; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
     padding: 0; background: transparent; border: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left;
   }
   .card .shot {
@@ -236,8 +235,7 @@
     <div class="rail"></div>
     <button class="rail-nav next" type="button" title="Next" aria-label="Scroll apps right">&#8250;</button>
   </div>
-</section>
-<div class="version" id="version" hidden>
+</section><div class="version" id="version" hidden>
   <span class="line">
     <a href="https://github.com/fusedio/fused-render" target="_blank" rel="noopener" title="fused-render on GitHub" aria-label="fused-render on GitHub" class="gh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
     <a id="version-label" href="https://github.com/fusedio/fused-render-lite/releases" target="_blank" rel="noopener" title="Release notes"></a>
@@ -418,12 +416,13 @@
     };
   }
 
-  // One list: recent apps (what the menu-bar dock remembers, newest first)
-  // and then the showcase apps packaged with the app that are not among them
-  // — the server computes both halves (showcase.home()). A fresh install is
-  // all showcase; an opened showcase app moves to the front and leaves the
-  // tail. Re-fetched whenever the page comes back into view, so an app
-  // opened or a file deleted meanwhile shows up without a reload.
+  // One rail, three tiers by recency: recent apps (what the menu-bar dock
+  // remembers, newest first), then the folder apps in fused-render's
+  // workspace (~/Fused/local, newest first) not yet opened, then the
+  // showcase apps packaged with the app not yet opened — the server computes
+  // all three (showcase.home()). Opening anything moves it to the front.
+  // Re-fetched whenever the page comes back into view, so an app opened or
+  // a file deleted meanwhile shows up without a reload.
   const rail = railOf(document.getElementById("showcase"));
   let loadSeq = 0;
   async function loadHome() {
@@ -437,7 +436,7 @@
       return;
     }
     if (seq !== loadSeq) return; // a newer load is in flight
-    rail.fill([...(data.recent || []), ...(data.showcase || [])]);
+    rail.fill([...(data.recent || []), ...(data.local || []), ...(data.showcase || [])]);
   }
   loadHome();
   window.addEventListener("pageshow", (e) => { if (e.persisted) loadHome(); });

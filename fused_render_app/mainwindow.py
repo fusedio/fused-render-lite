@@ -605,7 +605,7 @@ class _Window:
         navigation (`app_file` moves with the page)."""
         button = getattr(self, "edit_button", None)
         if button is not None:
-            button.setEnabled_(self.app_file is not None)
+            button.setEnabled_(editlink.can_edit(self.app_file))
 
     def _place(self) -> None:
         """Size and position the new window.
@@ -798,7 +798,7 @@ class _MenuTarget(NSObject):
         installed, offer its latest DMG instead."""
         w = self._m.key()
         app_file = w.app_file if w is not None else None
-        if not app_file:
+        if not editlink.can_edit(app_file):
             return  # Home, or no window: the button is disabled there anyway
         workspace = NSWorkspace.sharedWorkspace()
         handler = workspace.URLForApplicationToOpenURL_(_nsurl(editlink.PROBE_URL))

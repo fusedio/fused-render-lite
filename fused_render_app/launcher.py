@@ -36,7 +36,7 @@ import tempfile
 import threading
 import urllib.parse
 
-from fused_render_app import dock_store, hotkey, paths, showcase
+from fused_render_app import dock_store, hotkey, localapps, paths, showcase
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,8 @@ def settings() -> dict:
 
 def registry(running=frozenset()) -> list[dict]:
     """Every app the launcher can open, Dock order first (pinned in user
-    order, then recent), then the showcase apps not already there.
+    order, then recent), then the ``~/Fused/local`` folder apps and the
+    showcase apps not already there.
 
     Rows: ``{file, name, title, description, pinned, running, showcase,
     hasIcon, iconVersion}``; ``title`` is the showcase sidecar's when the
@@ -178,16 +179,19 @@ def registry(running=frozenset()) -> list[dict]:
     """
     listing = showcase.list_showcase()
     by_file = {os.path.abspath(r["file"]): r for r in listing}
+    local = localapps.list_local()
+    local_by_file = {r["file"]: r for r in local}
     rows = []
     seen = set()
     for a in dock_store.list_apps(running):
         ex = by_file.get(a["file"])
+        loc = local_by_file.get(a["file"])
         seen.add(a["file"])
         rows.append({
             "file": a["file"],
             "name": a["name"],
-            "title": ex["title"] if ex else a["name"],
-            "description": ex["description"] if ex else "",
+            "title": ex["title"] if ex else (loc["title"] if loc else a["name"]),
+            "description": ex["description"] if ex else (loc["description"] if loc else ""),
             "pinned": bool(a["pinned"]),
             "running": bool(a["running"]),
             "showcase": ex is not None,
@@ -195,6 +199,23 @@ def registry(running=frozenset()) -> list[dict]:
             "iconVersion": a["iconVersion"],
         })
     running_abs = {os.path.abspath(f) for f in running}
+    for r in local:
+        file = r["file"]
+        if file in seen:
+            continue
+        seen.add(file)
+        has_icon, icon_version, _p, _pv = dock_store._card_info(file)
+        rows.append({
+            "file": file,
+            "name": r["name"],
+            "title": r["title"],
+            "description": r["description"],
+            "pinned": False,
+            "running": file in running_abs,
+            "showcase": False,
+            "hasIcon": has_icon,
+            "iconVersion": icon_version,
+        })
     for r in listing:
         file = os.path.abspath(r["file"])
         if file in seen:

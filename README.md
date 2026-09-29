@@ -192,6 +192,37 @@ app's extract dir) also shows in the menu-bar dock: hovering the app's tile
 opens the name bubble with the picture above the name
 (`GET /api/dock/preview`; 8 MB cap, PNG only).
 
+## Local apps (`~/Fused/local`)
+
+The folder apps fused-render edits — one folder per app under
+`~/Fused/local/` (`FUSED_RENDER_DIR` overrides the `~/Fused` root, as in
+fused-render) — run here without an export. The home page's one rail lists
+them after the apps already opened and before the unopened showcase (recent,
+then local newest first, then showcase), and the ⌥Space launcher searches
+them with everything else. What makes a folder an app is
+fused-render's own rule (`localapps.py`, `appfile.dir_entry`): its first
+non-hidden direct-child `.html`, in name order, carrying
+`<meta name="fused-app">`; a folder with no marked page is not listed.
+
+Opening one is the same `/open?_file=<folder>` path as a `.fused`, but
+nothing is extracted: the folder itself is the app dir. `runPython` runs in a
+venv built from the folder's `pyproject.toml` under
+`~/.fused-render-app/venvs/` (fused-render's own `.venv` in the folder is not
+reused; `uv sync` may refresh the folder's `uv.lock`), an app without one
+gets the legacy set. The card's title is the entry's `<title>` (the folder
+name when absent) and its description the folder's `metadata.json` `description`
+when there is one; `preview.png` and `icon.svg` / `icon.png` in the folder
+serve the card, the dock tile and the hover bubble. The app's `.fused` state
+dir stays in the folder, never linked into `fused_data/`: it is
+fused-render's workspace, and the state must stay where the editor reads it.
+Once opened, the folder is a Recent / dock entry like any file (it leaves
+the dock when its marked page goes away). The title-bar Edit button is
+disabled for a folder app — the folder already IS the editable copy, so open
+it in fused-render directly. `fused-render-app <folder>` opens one from the
+command line, and a folder path pasted into the home page's path field works
+too. Finder does not hand folders to the app (the bundle registers only the
+`.fused` document type).
+
 ## Python environments
 
 No packages are bundled. The DMG ships one CPython 3.12 (py2app's real
