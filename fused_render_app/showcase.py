@@ -23,9 +23,10 @@ Recent and leaves the Showcase tail; once the dock evicts it (``MAX_RECENT``)
 it falls back into the tail. Nothing is stored for this: it is computed from
 ``dock_store.list_apps()`` (which also prunes deleted files) on every request.
 
-A third row, ``local``, lists the folder apps in fused-render's workspace
+A third list, ``local``, holds the folder apps in fused-render's workspace
 (``localapps.list_local()``, ``~/Fused/local/<app>``) not already in Recent:
-what the user is editing in fused-render runs here without an export.
+what the user is editing in fused-render runs here without an export. The
+page draws one rail: recent, then local, then showcase.
 """
 from __future__ import annotations
 

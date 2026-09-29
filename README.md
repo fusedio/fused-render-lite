@@ -196,9 +196,10 @@ opens the name bubble with the picture above the name
 
 The folder apps fused-render edits — one folder per app under
 `~/Fused/local/` (`FUSED_RENDER_DIR` overrides the `~/Fused` root, as in
-fused-render) — run here without an export. The home page lists them in a
-second rail, **Local apps**, newest folder first, and the ⌥Space launcher
-searches them with everything else. What makes a folder an app is
+fused-render) — run here without an export. The home page's one rail lists
+them after the apps already opened and before the unopened showcase (recent,
+then local newest first, then showcase), and the ⌥Space launcher searches
+them with everything else. What makes a folder an app is
 fused-render's own rule (`localapps.py`, `appfile.dir_entry`): its first
 non-hidden direct-child `.html`, in name order, carrying
 `<meta name="fused-app">`; a folder with no marked page is not listed.
