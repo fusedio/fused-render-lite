@@ -13,7 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
-| 0.10.0 | TBD (release build) | — | — | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0; title-bar Edit button (editlink.py) |
+| 0.10.0 | 43.85 MB (43,845,977 B) | +0.41 MB | 103 MB | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0; title-bar Edit button (editlink.py) |
 | 0.9.5 | 43.43 MB (43,434,486 B) | −0.00 MB | 99 MB | legacy env drops pyarrow/duckdb; DoodleShooter + OpenRelax regain pyproject.toml (+361 B); no packaging change |
 | 0.9.4 | 43.44 MB (43,438,706 B) | +0.41 MB | 99 MB | legacy env deps (pyarrow/duckdb/httpx); refreshed DoodleShooter + OpenRelax showcase files (OpenRelax ~130 KB → ~432 KB); no packaging change |
 | 0.9.3 | 43.03 MB (43,029,693 B) | −0.00 MB | 99 MB | launcher polish (Render App row / ⌥0, frostier glass); no packaging change |
@@ -71,6 +71,26 @@ only in the `[app]` extra); no bundled data packages (each app's
 sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
+
+## 0.10.1
+
+Patch: two features land, no packaging change to the Python side; the DMG
+build gains a bun step (React shell).
+
+- **Claude sessions and tasks (#41)**: fused-render's Claude cluster ported —
+  chat engine (`templates/claude`), tasks / schedule / cron / drafts / queue
+  / store / watch modules and their routers, copied verbatim via
+  `scripts/sync_claude_tasks.py`. Pages get the `fused.tasks` block in
+  `runtime.js` (D890). The React shell (`frontend/`, pruned to the lite entry)
+  ships as `static/shell-dist/` built by `scripts/build_shell.sh` (bun) from
+  `dev.sh` and `build_dmg.sh`; `/tasks` and `/chat` answer 503 without it.
+  Window → Tasks (⌘⇧T). State lives under `~/.fused-render-app/claude-sessions`,
+  apart from fused-render's.
+- **Local folder apps (#40)**: `~/Fused/local/<app>` folders run in place
+  (`localapps.py`, folder branches in `appfile.py`), listed on the home page in
+  a **Local apps** rail and in the ⌥Space launcher. The folder's `.fused` state
+  stays in the folder; venv under `~/.fused-render-app/venvs/`. Edit button
+  disabled for folder windows.
 
 ## 0.10.0
 
