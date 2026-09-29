@@ -58,6 +58,27 @@ on Home. Without fused-render installed, a dialog offers to download the
 latest DMG (`render.fused.io/latest.json` → `dmg_url`, falling back to the
 download page) — `editlink.py`.
 
+### Claude tasks
+
+Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens fused-render's
+Tasks page — the same React page (List / Board / Cards / Calendar, filters,
+New task, the side peek with the chat in it): `frontend/` is the slice of
+fused-render's frontend those two routes import (copied verbatim, pruned to
+the import closure, no tests), built into `static/shell-dist/` by
+`scripts/build_shell.sh`, with Render App's own entry (`frontend/lite.html`,
+`src/lite.tsx`, `src/LiteApp.tsx`) hosting two routes: `/tasks`, and
+`/chat?_file=<folder>` — fused-render's native chat beside the folder's app
+(the explorer-style `/explorer/view/<path>?_side=claude` links the page
+makes open the same chat). A task is one `claude` session run by
+fused-render's chat engine, copied into the package
+(`fused_render_app/templates/claude/`): permission cards, follow-ups into a
+live session, snapshots, scheduling. Pages get the same thing
+programmatically as `fused.tasks.*` (fused-render D890). State lives under
+`~/.fused-render-app/claude-sessions/`, apart from fused-render's own; the
+transcripts are Claude Code's, under `~/.claude/projects`. Re-sync from a
+fused-render checkout with `scripts/sync_claude_tasks.py <path> --runtime
+--frontend`.
+
 ⌥Space (change it in Settings — the gear on the home page — or from the
 search panel's footer; right-click the menu-bar item → "Search Apps…" opens
 it without a shortcut) drops a Spotlight-like search panel: empty, it lists the

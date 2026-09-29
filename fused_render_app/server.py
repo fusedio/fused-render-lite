@@ -84,10 +84,26 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, localapps, showcase, jobs, paths
-from fused_render_app.update import mac as mac_update
-from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
+
+# BEFORE the routers import: the copied Claude sessions / tasks modules
+# (tasks_store, drafts, routes/claude_sessions) derive their state dir from
+# FUSED_RENDER_HOME at import time. Render App keeps that state under its own
+# home, apart from fused-render's `~/.fused-render/claude-sessions/` —
+# assigned, not defaulted, so a shell that exported fused-render's dev value
+# cannot make this app write into fused-render's store.
+os.environ["FUSED_RENDER_HOME"] = paths.home()
+
+from fused_render_app.update import mac as mac_update  # noqa: E402
+from fused_render_app._web import (APIRouter, HTTPException, Request, Response, StreamingResponse,
+                                   call_on_loop, call_route, parse_multipart, run_async)
 from fused_render_app.routes import ai_relay, ai_routes
 from fused_render_app.routes import capture as capture_routes
+from fused_render_app.routes import claude_artifacts as claude_artifacts_routes
+from fused_render_app.routes import claude_sessions as claude_sessions_routes
+from fused_render_app.routes import drafts as drafts_routes
+from fused_render_app.routes import queue_events as queue_events_routes
+from fused_render_app.routes import schedule as schedule_routes
+from fused_render_app.routes import tasks as tasks_routes
 
 AI_ROUTER = APIRouter()
 AI_ROUTER.include_router(ai_relay.router)
@@ -95,6 +111,15 @@ AI_ROUTER.include_router(ai_routes.router)
 # Not AI, but the same FastAPI-shaped shim: `_dispatch` walks this one router
 # for every path the explicit `do_GET`/`do_POST` tables do not name.
 AI_ROUTER.include_router(capture_routes.router)
+# Claude sessions / tasks, copied from fused-render (routes/tasks.py and
+# friends): the Tasks listing, its long-poll, scheduled messages, drafts, the
+# queue-event ear for session_host / permission_server, session history.
+AI_ROUTER.include_router(tasks_routes.router)
+AI_ROUTER.include_router(claude_sessions_routes.router)
+AI_ROUTER.include_router(queue_events_routes.router)
+AI_ROUTER.include_router(schedule_routes.router)
+AI_ROUTER.include_router(drafts_routes.router)
+AI_ROUTER.include_router(claude_artifacts_routes.router)
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +147,19 @@ def _js(value: str) -> str:
     ``<``/``>`` alone, so a query value carrying ``</script>`` would end the
     block. Escape them."""
     return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+
+
+def is_shipped_template(py: str) -> bool:
+    """Whether ``py`` is one of the package's own template scripts
+    (`templates/claude/agent.py`, `app.py`, `artifacts.py`, ...)."""
+    try:
+        real = os.path.realpath(py)
+        return os.path.commonpath([real, os.path.realpath(TEMPLATES_DIR)]) == os.path.realpath(TEMPLATES_DIR)
+    except ValueError:
+        return False
 
 
 def app_dir_for(path: str) -> str | None:
@@ -222,6 +260,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(showcase.home())
             if route == "/api/showcase/preview":
                 return self._showcase_preview(q)
+            if route in ("/tasks", "/chat") or route.startswith("/explorer/"):
+                # `/explorer/view/<path>?_side=claude&session_id=…` is the
+                # address fused-render's task rows and Recent lists link to;
+                # the shell page routes it to the same chat as `/chat`.
+                return self._shell_page()
+            if route == "/api/prefs":
+                # fused-render's Preferences store, read by the chat and the
+                # Tasks page for their switches. Render App has no Preferences
+                # page, so every switch is fused-render's default: the native
+                # React chat on, the task side peek on, the project queue off,
+                # no default model.
+                return self._json({"model": {"default": ""}, "chat": {"native": True},
+                                   "queue": {"enabled": False}, "task_peek": {"enabled": True}})
+            if route == "/api/config":
+                return self._json(self._config())
+            if route == "/api/current-apps":
+                # fused-render's "Current apps" desk; the Tasks peek previews a
+                # task's app from it (current_apps.list_apps).
+                from fused_render_app import current_apps
+
+                return self._json({"apps": current_apps.list_apps()})
             if route == "/dock":
                 return self._static("dock.html")
             if route == "/launcher":
@@ -260,8 +319,29 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET  # noqa: N815
 
+    def do_PUT(self):  # noqa: N802
+        self._router_only("PUT")
+
+    def do_DELETE(self):  # noqa: N802
+        self._router_only("DELETE")
+
+    def _router_only(self, method: str) -> None:
+        """PUT / DELETE exist only on the copied routers (drafts, session
+        defaults); nothing hand-written answers them."""
+        url = urllib.parse.urlsplit(self.path)
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
+        try:
+            if self._dispatch(method, url.path, q):
+                return
+            self._error("not found", 404)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("%s %s failed", method, self.path)
+            self._error(f"internal error: {exc}", 500)
+
     def do_POST(self):  # noqa: N802
-        route = urllib.parse.urlsplit(self.path).path
+        url = urllib.parse.urlsplit(self.path)
+        route = url.path
+        q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         try:
             if route == "/api/open":
                 return self._api_open()
@@ -271,6 +351,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_drop()
             if route == "/api/run":
                 return self._api_run()
+            if route.startswith("/api/current-apps/"):
+                # The desk's writes (open / read / add / archive / rename): the
+                # peek stamps "opened" on every open. Render App keeps no desk,
+                # so each answers the current listing unchanged.
+                if not self._guarded():
+                    return
+                from fused_render_app import current_apps
+
+                return self._json({"ok": True, "opened": False, "opened_at": time.time(),
+                                   "apps": current_apps.list_apps()})
+            if route == "/api/capture/shot-region":
+                # fused-render's region still for the chat's Comment mode; the
+                # legacy chat page reads a 409 as "no still on this platform"
+                # and stops asking. Render App has no region capture yet.
+                return self._guarded() and self._json({"error": "unsupported"}, 409)
             if route == "/api/fs/write":
                 return self._fs_write()
             if route == "/api/fs/upload":
@@ -300,7 +395,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._guarded():
                     return
                 return background_routes.proxy(self, m.group(1), m.group(2), "POST", self._body())
-            if self._dispatch("POST", route, {}):
+            if self._dispatch("POST", route, q):
                 return
             self._error("not found", 404)
         except Exception as exc:  # noqa: BLE001
@@ -332,6 +427,41 @@ class Handler(BaseHTTPRequestHandler):
         # can point the browser here, and opening a .fused runs its Python.
         page = page.replace("__FILE_JSON__", _js(file)).replace("__URL_JSON__", _js(url))
         self._html(page)
+
+    @staticmethod
+    def _config() -> dict:
+        """`GET /api/config`: what fused-render's React shell reads at boot
+        (frontend `Config`). The fields the Tasks page and the chat use; the
+        rest name what Render App does not have (no mounts, no native folder
+        picker from the server, no onboarding)."""
+        home = os.path.expanduser("~")
+        return {
+            "start_dir": home,
+            "home": home,
+            "fused_dir": os.path.join(home, "Fused"),
+            "version": __version__,
+            "installed_version": None,
+            "dev": os.environ.get("FUSED_RENDER_DEV") == "1",
+            "engine": "builtin",
+            "mounts_root": "",
+            "cache_dir": paths.home(),
+            "native_dir_picker": False,
+            "render_app": True,
+        }
+
+    def _shell_page(self) -> None:
+        """`/tasks` and `/chat?_file=<folder>&session_id=…`: fused-render's
+        React shell, built from `frontend/` (its Tasks page and native Claude
+        chat, verbatim) into `static/shell-dist/lite.html` — the page routes
+        on `location.pathname` itself (frontend/src/LiteApp.tsx). Assets
+        resolve through `/static/shell-dist/`. Not built: say how, like
+        fused-render's server does."""
+        path = os.path.join(STATIC_DIR, "shell-dist", "lite.html")
+        if not os.path.isfile(path):
+            return self._error("React shell not built (fused_render_app/static/shell-dist/ "
+                               "missing). Run scripts/build_shell.sh.", 503)
+        with open(path, "r", encoding="utf-8") as f:
+            self._html(f.read())
 
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
@@ -582,8 +712,18 @@ class Handler(BaseHTTPRequestHandler):
             if not html:
                 return self._error("'py' is relative but 'html' was not provided")
             py = os.path.normpath(os.path.join(os.path.dirname(html), py))
-        app_dir = app_dir_for(py) or app_dir_for(html or "") or os.path.dirname(py)
-        result = env.run_python(py, params if isinstance(params, dict) else {}, app_dir)
+        clean = params if isinstance(params, dict) else {}
+        if is_shipped_template(py):
+            # The chat engine (`templates/claude/agent.py` and friends) ships
+            # inside the package and is stdlib-only: it runs on the app's own
+            # interpreter, never on an app venv — a pyproject-less dir would
+            # otherwise route it to the shared legacy venv and pay a `uv sync`
+            # before the first poll (fused-render's executor does the same,
+            # D72: `[sys.executable, _child.py]`).
+            result = env.run_python_trusted(py, clean)
+        else:
+            app_dir = app_dir_for(py) or app_dir_for(html or "") or os.path.dirname(py)
+            result = env.run_python(py, clean, app_dir)
         result["resolved_py"] = py
         self._json(result)
 
@@ -668,14 +808,25 @@ class Handler(BaseHTTPRequestHandler):
         if fn is None:
             return False
         body = None
-        if method == "POST":
-            body = self._json_body()
-            if body is None:
-                body = {}
+        files: dict = {}
+        if method in ("POST", "PUT", "DELETE"):
+            ctype = self.headers.get("Content-Type") or ""
+            if ctype.lower().startswith("multipart/form-data"):
+                fields, files = parse_multipart(ctype, self._body())
+                body = fields
+            else:
+                body = self._json_body()
+                if body is None:
+                    body = {}
         request = Request(method, route, dict(self.headers.items()), q)
         try:
             result = call_route(fn, body=body, headers=dict(self.headers.items()), query=q,
-                                path_params=path_params or {}, request=request)
+                                path_params=path_params or {}, request=request, files=files)
+        except HTTPException as exc:
+            # FastAPI's own rendering of a raised HTTPException: its status,
+            # `{"detail": ...}` — the copied routers raise them for 400/404/409.
+            self._json({"detail": exc.detail, "error": exc.detail}, exc.status_code)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.exception("%s %s failed", method, route)
             self._error(f"internal error: {exc}", 500)
@@ -791,6 +942,14 @@ class Handler(BaseHTTPRequestHandler):
             "size": None if is_dir else st.st_size,
             "mtime": st.st_mtime,
             "writable": os.access(path, os.W_OK),
+            # fused-render's registry-resolved template modes for a path
+            # (SPEC PT-8). Render App has one: the Claude chat, offered on
+            # every path. The React chat reads only the entry's DIRECTORY
+            # (`resolveAgentDir` -> `<dir>/agent.py`); the legacy page the
+            # path names is not shipped, the native chat never loads it.
+            "templates": [{"mode": "claude",
+                           "path": os.path.join(TEMPLATES_DIR, "claude", "template.html"),
+                           "icon": os.path.join(TEMPLATES_DIR, "claude", "icon.svg")}],
         }
 
     def _fs_stat(self, q: dict) -> None:
@@ -933,6 +1092,22 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     # script) finds the server through `<FUSED_RENDER_HOME_DIR>/server.json`
     # — `origin` to call and `shared` to sys.path for fused_ai/background_app.
     os.environ["FUSED_RENDER_HOME_DIR"] = paths.home()
+    # The Claude sessions / tasks state (`tasks_store.STATE_DIR`, `drafts`,
+    # agent.py's `_state_file`) reads FUSED_RENDER_HOME: point it at this app's
+    # home so Render App and fused-render keep separate task numbers, read
+    # marks and session settings rather than writing into each other's
+    # `~/.fused-render/claude-sessions/`.
+    os.environ["FUSED_RENDER_HOME"] = paths.home()
+    # agent.py resolves the CLI through FUSED_RENDER_CLAUDE_BIN, then PATH;
+    # the relay through FUSED_RENDER_APP_CLAUDE_BIN first. Export the one
+    # binary this process resolved so both spawn the same `claude`.
+    try:
+        from fused_render_app import claude_health
+        bin_path = claude_health.resolve()
+        if bin_path and not os.environ.get("FUSED_RENDER_CLAUDE_BIN"):
+            os.environ["FUSED_RENDER_CLAUDE_BIN"] = bin_path
+    except Exception:  # noqa: BLE001 — no CLI is the chat's problem, not the server's
+        logger.debug("claude CLI not resolved at startup", exc_info=True)
     write_server_json(srv.server_address[1], host)
     return srv
 
@@ -976,6 +1151,19 @@ def _start_background_apps() -> None:
                      name="background-apps-resurrect", daemon=True).start()
 
 
+def _start_tasks() -> None:
+    """The Claude sessions / tasks background work, as fused-render's
+    `server/app.py` startup events wire it: the Tasks change-watcher thread
+    (`tasks_watch.start`), the scheduled-messages loop (`schedule.start`), the
+    project-queue factory (`tasks._wire_manager`, already registered at
+    import) and one thread warming the transcript caches (`tasks.warm`)."""
+    from fused_render_app import schedule, tasks_watch
+
+    tasks_watch.start()
+    schedule.start()
+    threading.Thread(target=tasks_routes.warm, daemon=True, name="fused-tasks-warm").start()
+
+
 def start_ai() -> None:
     """The AI subsystem's background threads, as fused-render wires them at
     startup: the warm Claude process, the idle-model reaper, hardware and
@@ -985,7 +1173,8 @@ def start_ai() -> None:
                      ("reaper", ai_routes.supervisor.start_reaper),
                      ("hardware", ai_routes.supervisor.start_hardware_refresh),
                      ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
-                     ("background-apps", _start_background_apps)):
+                     ("background-apps", _start_background_apps),
+                     ("tasks", _start_tasks)):
         try:
             fn()
         except Exception:  # noqa: BLE001

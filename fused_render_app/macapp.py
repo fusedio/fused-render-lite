@@ -418,11 +418,19 @@ def main() -> None:
         def __init__(self):
             super().__init__("Render App", icon=icon if os.path.isfile(icon) else None,
                              template=True, quit_button=None)
-            self.menu = ["Open in app", "Open in browser", "Open app logs", "Quit"]
+            self.menu = ["Open in app", "Tasks", "Open in browser", "Open app logs", "Quit"]
 
         @rumps.clicked("Open in app")
         def open_in_app(self, _sender):
             show_home()
+
+        @rumps.clicked("Tasks")
+        def open_tasks(self, _sender):
+            manager = state.get("windows")
+            if manager is not None:
+                manager.show_tasks()
+            else:
+                webbrowser.open(f"http://127.0.0.1:{port}/tasks")
 
         @rumps.clicked("Open in browser")
         def open_browser(self, _sender):
@@ -476,6 +484,7 @@ def main() -> None:
                     actions={"show_home": show_home,
                              # The launcher is built after the Dock: resolve at click time.
                              "show_launcher": lambda: state["launcher"] and state["launcher"].show(),
+                             "show_tasks": lambda: state["windows"].show_tasks(),
                              "open_browser": lambda: webbrowser.open(open_url(port, None)),
                              "open_logs": lambda: subprocess.run(
                                  ["open", "-R", paths.log_path()], check=False),

@@ -787,6 +787,9 @@ class _MenuTarget(NSObject):
         else:
             self._m.open(self._m.home_url)
 
+    def showTasks_(self, _s):
+        self._m.show_tasks()
+
     def openInBrowser_(self, _s):
         w = self._m.key()
         webbrowser.open((w and w.current_url()) or self._m.home_url)
@@ -941,6 +944,22 @@ class WindowManager:
             front.show()
         else:
             self.open(self.home_url)
+
+    @property
+    def tasks_url(self) -> str:
+        """The Tasks page (static/tasks.html): every Claude task on this
+        machine, with its chat beside the list."""
+        return f"http://127.0.0.1:{self.port}/tasks"
+
+    def show_tasks(self) -> None:
+        """Window → Tasks (⌘⇧T) and the menu-bar item: a window already on
+        the Tasks page comes to the front, else one opens. Main thread."""
+        for w in reversed(self._windows):
+            url = w.current_url() or ""
+            if urllib.parse.urlsplit(url).path == "/tasks":
+                w.show()
+                return
+        self.open(self.tasks_url)
 
     def show_home(self) -> None:
         """Dock semantics for the Home tile: a window already showing Home
@@ -1110,6 +1129,8 @@ def _build_main_menu(target) -> NSMenu:
     window_menu = submenu("Window", [
         item("Minimize", b"performMiniaturize:", "m", tgt=None),
         item("Zoom", b"performZoom:", tgt=None),
+        sep(),
+        item("Tasks", b"showTasks:", "T", CMD | _SHIFT),
         sep(),
         item("Bring All to Front", b"arrangeInFront:", tgt=None),
     ], main)

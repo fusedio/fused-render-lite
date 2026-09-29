@@ -60,6 +60,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v9.0.0
+      # The React shell (frontend/, fused-render's Tasks page + Claude chat)
+      # is built by scripts/build_shell.sh inside build_dmg.sh.
+      - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

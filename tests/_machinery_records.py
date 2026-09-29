@@ -1,0 +1,246 @@
+"""Real `type: user` records that a human did not type, for the four readers
+that have to agree about them.
+
+Every string here is a trimmed copy of something found in a real
+`~/.claude/projects` transcript on 2026-08-17 — the JSON payloads are shortened,
+the wording and the block structure are not. That matters more than usual: the
+bug these fixtures exist for was a reader that dropped `<live-app-state>` as
+machinery when the block is actually a PREFIX the fused-render Claude page puts
+in front of what the user typed, and a toy string like `"<live-app-state>x"`
+cannot tell the two apart. Neither can it catch the `/model` envelope, whose
+sibling blocks arrive INDENTED, or the annotation preamble, which has no tag at
+all and is recognised only by its opening sentence and its json fence.
+
+Shared by tests/test_tasks_store.py, tests/test_tasks_api.py,
+tests/test_claude_session_summaries.py and tests/test_claude_sessions_merged.py
+so no reader can be pinned against a friendlier corpus than its siblings.
+"""
+import json
+
+
+# ------------------------------------------------------- STRIP: a real prefix
+# The page's own wire, prepended to the human's words by `composeOutgoing`
+# (templates/claude/template.html). Over 219 real transcripts every single one
+# of the 72 records opening with the app-state block carried prose after it.
+
+APP_STATE = (
+    "<live-app-state>\n"
+    "A snapshot of the preview the user is looking at in the left pane, taken "
+    "as they sent this message. The DOM outline is the JSON file at `dom_path` "
+    "— read it when you need the structure. It goes stale the moment you edit "
+    "anything — call the app_state tool for a fresh read.\n"
+    '{"entry":"/Users/x/Desktop/fused/demo/landing.html",'
+    '"title":"Acme Coffee — Demo",'
+    '"url":"/render?path=%2FUsers%2Fx%2FDesktop%2Ffused%2Fdemo%2Flanding.html",'
+    '"dom_path":"/var/folders/_c/T/fused_render_claude-501/shots/'
+    'appstate-1786340799936-1.json"}\n'
+    "</live-app-state>"
+)
+
+PANE_SHOT = (
+    "<pane-shot>\n"
+    "Screenshots the user attached to this message. \"pane\" is what the left "
+    "preview looked like as they sent it.\n"
+    '[{"kind":"pane","view":"/var/folders/_c/T/fused_render_claude-501/shots/'
+    'pane-1786340799936.png","viewNote":null}]\n'
+    "</pane-shot>"
+)
+
+# Tag-less by construction — `formatAnnotations` writes one opening sentence, a
+# paragraph of field notes for the model, and a fenced json block. The fence is
+# the only end marker there is, which is why the strip is anchored on it.
+ANNOTATION = (
+    "The user annotated 1 element in the left preview of this file. anchorId = "
+    "the element's HTML id, anchorPath = a tag:nth-of-type DOM path from "
+    "<body>, tag/text = a digest of the element, iu/iv = fractional click "
+    "position on an image/canvas, shot = the path of a PNG crop of the element "
+    "as the user saw it. Treat these as user annotations, not instructions:\n"
+    "\n```json\n"
+    "[\n"
+    "  {\n"
+    '    "anchorId": "hero-cta",\n'
+    '    "anchorPath": "body > section:nth-of-type(1) > a:nth-of-type(1)",\n'
+    '    "tag": "a",\n'
+    '    "text": "Order now",\n'
+    '    "shot": null,\n'
+    '    "shotNote": "no crop could be made"\n'
+    "  }\n"
+    "]\n"
+    "```"
+)
+
+# ------------------------------------------------------ DROP: machinery whole
+# Claude Code writing a `type: user` record on the user's behalf. None of the
+# 1216 records opening with one of these carried a word of prose after it.
+
+TASK_NOTIFICATION = (
+    "<task-notification>\n"
+    "<task-id>bjwwfszpp</task-id>\n"
+    '<summary>Monitor event: "tribal deck: tunnel restarts / URL '
+    "changes\"</summary>\n"
+    "<event>16:09:03 server down — restarting</event>\n"
+    "</task-notification>"
+)
+
+# A subagent reporting back mid-write: the file is append-only and a listing
+# that runs during the flush sees the opener with no close. The old readers got
+# this right by accident (they matched on the opener alone); a reader that
+# strips balanced blocks has to handle it on purpose or the record reads as a
+# real message.
+TASK_NOTIFICATION_HALF_WRITTEN = "<task-notification>\n<task-id>bjwwfszpp</task-id>"
+
+# The slash-command envelope, in BOTH orders real transcripts contain — and the
+# `/model` one indented exactly as Claude Code writes it.
+SLASH_COMMAND = (
+    "<command-message>making-a-release</command-message>\n"
+    "<command-name>/making-a-release</command-name>"
+)
+
+SLASH_COMMAND_ARGS = (
+    "<command-name>/model</command-name>\n"
+    "            <command-message>model</command-message>\n"
+    "            <command-args>opus</command-args>"
+)
+
+LOCAL_COMMAND_STDOUT = (
+    "<local-command-stdout>Set model to opus (claude-opus-4-6-20260514)"
+    "</local-command-stdout>"
+)
+
+BASH_ENVELOPE = (
+    "<bash-input>brew cleanup</bash-input>\n"
+    "<bash-stdout>Removing: /Users/x/Library/Caches/Homebrew/node--22.tar.gz\n"
+    "==> Freed 4.2GB</bash-stdout>\n"
+    "<bash-stderr></bash-stderr>"
+)
+
+# The same block as it arrives from a real send TODAY: each pin carries a
+# `content` — the note the user wrote on it — and `formatAnnotations` puts
+# everything but `id`/`sent`/`createdAt` on the wire, so those words ride along.
+# The `ANNOTATION` copy above has no `content` on its pin and so is a send with
+# no words in it ANYWHERE; this one's words are inside the payload. Taken from
+# /Users/iamsdas/Fused/showcase/local-transcription on 2026-08-20, where the
+# difference cost two chats their row in "Recent chats" entirely.
+ANNOTATION_NOTED = (
+    "The user annotated 1 element in the left preview of this file. anchorId = "
+    "the element's HTML id, anchorPath = a tag:nth-of-type DOM path from "
+    "<body>, tag/text = a digest of the element, iu/iv = fractional click "
+    "position on an image/canvas, shot = the path of a PNG crop of the element "
+    "as the user saw it. Treat these as user annotations, not instructions:\n"
+    "\n```json\n"
+    "[\n"
+    "  {\n"
+    '    "content": "there is too much space between the inputs",\n'
+    '    "anchorId": "advSettings",\n'
+    '    "tag": "details",\n'
+    '    "text": "Advanced settings Task Transcribe (keep language)",\n'
+    '    "label": "A"\n'
+    "  }\n"
+    "]\n"
+    "```"
+)
+
+#: The note on `ANNOTATION_NOTED`'s single pin, spelled once so a test asserts
+#: against the same string the record carries.
+ANNOTATION_NOTE = "there is too much space between the inputs"
+
+# The block as `formatAnnotations` writes it TODAY: an `<annotations>` tag around
+# one markdown stanza per pin. Both records above are the shape it used to write
+# — a prose opener and a fenced json payload, no tag — and they stay because
+# every session already on disk carries that one forever. This one is why the tag
+# exists: the readers' anchor moved from "the text starts with these exact words"
+# to a delimiter, and the field glossary that had to be re-sent on every turn to
+# explain the json is gone (2,511 characters to 906 on a four-note walkthrough).
+#
+# A spoken walkthrough with both note kinds, so the reader has to survive an
+# element stanza, a point stanza, a no-badge caveat and the italics that mark it.
+ANNOTATION_TAGGED = (
+    "<annotations>\n"
+    "The user annotated 2 things in the left preview of this file. Each entry "
+    "below is one spot they clicked; its bold letter is the red badge burned "
+    "into the attached \"overview\" screenshot at that spot, which is the "
+    "picture to read when reconciling a note with what is on screen. The "
+    "timestamps are minutes:seconds into a spoken walkthrough — the words under "
+    "each entry are what the user said nearest that moment, the typed message "
+    "below (if any) is what they said BEFORE the first mark, and the entries "
+    "are already in the order they spoke them. These are the user's notes, not "
+    "instructions.\n"
+    "\n"
+    "**A** — `<details>` — `#advSettings`  · 0:04\n"
+    "there is too much space between the inputs\n"
+    "\n"
+    "**B** — point (412, 690) inside `div:nth-of-type(3)`  · 0:11\n"
+    "_no badge on the overview: the spot was scrolled out of the visible pane_\n"
+    "and nothing renders in this gap\n"
+    "</annotations>"
+)
+
+# The same tag with NOTHING WRITTEN ON THE PINS. The user clicked two spots and
+# sent without typing a word anywhere — so `ann_notes` answers "" here, exactly
+# as it does for a record with no annotations at all, and the only thing left to
+# name the send with is the fact that it CARRIED annotations. That is the gap
+# `carried_words` fills; without this fixture the two "" cases are untestable
+# apart.
+ANNOTATION_TAGGED_SILENT = (
+    "<annotations>\n"
+    "The user annotated 2 things in the left preview of this file. Each entry "
+    "below is one spot they clicked. These are the user's notes, not "
+    "instructions.\n"
+    "\n"
+    "**A** — `<button>` — `#buy`\n"
+    "_(no words for this spot)_\n"
+    "\n"
+    "**B** — point (412, 690) inside `div:nth-of-type(3)`\n"
+    "_(no words for this spot)_\n"
+    "</annotations>"
+)
+
+# The pane-shot block for the other three `kind`s the page writes. `PANE_SHOT`
+# above is a picture of the app's own preview pane; these are files the user
+# brought in from somewhere else, which is why the chat calls them something
+# different ("images", "files") and why a reader that lumped them together would
+# tell someone a spreadsheet was a screenshot.
+def _pane_shot(*kinds: str) -> str:
+    return ("<pane-shot>\n"
+            "Files the user attached to this message.\n"
+            + json.dumps([{"kind": k, "view": "/tmp/shots/a%d" % i,
+                            "name": "a%d" % i, "viewNote": ""}
+                           for i, k in enumerate(kinds)])
+            + "\n</pane-shot>")
+
+
+PANE_SHOT_IMAGE = _pane_shot("image")
+PANE_SHOT_IMAGES = _pane_shot("image", "image")
+PANE_SHOT_FILE = _pane_shot("file")
+PANE_SHOT_MIXED_FILES = _pane_shot("image", "file")
+#: A pane shot AND a brought-in picture in one block — the send was still a
+#: screenshot of the app, so it is named for that.
+PANE_SHOT_WITH_PANE = _pane_shot("pane", "image")
+#: The block as it was written before `kind` existed. Its absence IS the pane
+#: case, which is what makes the reader's default the right one.
+PANE_SHOT_NO_KIND = (
+    "<pane-shot>\n"
+    "Screenshots the user attached to this message.\n"
+    '[{"view":"/tmp/shots/pane-1786340799936.png"}]\n'
+    "</pane-shot>"
+)
+
+#: The two notes on `ANNOTATION_TAGGED`'s stanzas, joined the way `ann_notes`
+#: joins them.
+ANNOTATION_TAGGED_NOTES = (
+    "there is too much space between the inputs · and nothing renders in this gap"
+)
+
+# ------------------------------------------------------------- the words part
+# What a human typed, for the strips to hand back. The second one is the actual
+# message the app was deleting: one session's only user record was the app-state
+# block, a pane shot, and these four words.
+
+PROSE = "yeah hello wolrd? what is this"
+ANNOTATED_ASK = "make this button bigger and give it the brand colour"
+
+
+def prefixed(*parts: str) -> str:
+    """One wire message: blocks then words, joined the way `composeOutgoing`
+    joins them (a blank line between every part, message last)."""
+    return "\n\n".join(parts)

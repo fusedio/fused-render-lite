@@ -1,0 +1,75 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const src = (p) => fileURLToPath(new URL("./src/" + p, import.meta.url));
+
+// Single source of truth is fused_render/__init__.py's __version__ (same
+// extraction as scripts/setup_py2app.py). Baked into the bundle so the shell
+// can compare itself against the server's /api/config version and prompt a
+// refresh when the tab outlives an update.
+const BUILD_VERSION = /(?:^|\n)__version__\s*=\s*"([^"]+)"/.exec(
+  readFileSync(fileURLToPath(new URL("../fused_render_app/__init__.py", import.meta.url)), "utf8"),
+)[1];
+
+// Build output ships inside the Python package (like the vendored template
+// libs): `pip install` needs no node. The server serves the built shell for
+// `/`, `/view/*` and `/embed/*`; assets resolve via the absolute base below.
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  define: {
+    __BUILD_VERSION__: JSON.stringify(BUILD_VERSION),
+  },
+  resolve: {
+    alias: {
+      "@shell": src("shell"),
+      "@platform": src("platform"),
+      "@apps": src("apps"),
+      "@assets": src("assets"),
+    },
+  },
+  base: "/static/shell-dist/",
+  build: {
+    outDir: "../fused_render_app/static/shell-dist",
+    emptyOutDir: true,
+    rollupOptions: {
+      // Render App: ONE page, the lite entry (lite.html -> src/lite.tsx): the
+      // Tasks page and the Claude chat. fused-render's own two entries
+      // (index.html, lan.html) stay in the tree verbatim, unbuilt.
+      input: {
+        lite: fileURLToPath(new URL("./lite.html", import.meta.url)),
+      },
+      output: {
+        // Third-party deps change far less often than the app itself — their
+        // own chunk means a shell code change doesn't bust the browser's
+        // cache of react/react-dom/driver.js on every rebuild.
+        // NO `markdown` GROUP HERE, deliberately. Naming a package in
+        // `manualChunks` makes its chunk a STATIC node of the entry graph, so
+        // marked + DOMPurify + highlight.js shipped as a `modulepreload` on
+        // BOTH entries — 75 kB gzipped downloaded by Home, Preferences, Mounts,
+        // Scheduled and the LAN phone grid to render no chat at all. (Naming CJS
+        // packages also hoisted rollup's commonjs interop helper in there, which
+        // is how even the LAN entry came to pull it.) The split the chat wants
+        // is a DYNAMIC one, and it lives where the decision is: `ChatMount`
+        // imports `ClaudeChat` behind `React.lazy`, so rollup gives the whole
+        // native chat and its markdown stack a chunk of their own and no route
+        // fetches it until a chat actually mounts.
+        manualChunks: {
+          vendor: ["react", "react-dom", "driver.js"],
+        },
+      },
+    },
+  },
+  server: {
+    // `npm run dev` proxies API/render traffic to a running fused-render
+    // server for hot-reload development of the shell itself.
+    proxy: {
+      "/api": "http://127.0.0.1:1777",
+      "/render": "http://127.0.0.1:1777",
+      "/static": "http://127.0.0.1:1777",
+      "/template-assets": "http://127.0.0.1:1777",
+    },
+  },
+});

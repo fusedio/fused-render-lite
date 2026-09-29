@@ -281,6 +281,9 @@ class _Target(NSObject):
     def openBrowser_(self, _s):
         self._c.actions["open_browser"]()
 
+    def showTasks_(self, _s):
+        self._c.actions["show_tasks"]()
+
     def openLogs_(self, _s):
         self._c.actions["open_logs"]()
 
@@ -627,6 +630,8 @@ class DockController:
         item("Open Launcher", b"openLauncher:")
         if self.actions.get("show_launcher"):
             item("Search Apps…", b"showSearch:")
+        if self.actions.get("show_tasks"):
+            item("Tasks…", b"showTasks:")
         item("Open in Browser", b"openBrowser:")
         menu.addItem_(NSMenuItem.separatorItem())
         item("Open App Logs", b"openLogs:")

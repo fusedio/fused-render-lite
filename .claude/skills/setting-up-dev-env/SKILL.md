@@ -7,10 +7,15 @@ description: Use when setting up a fused-render-app (Render App) checkout or git
 
 ## Overview
 
-A fresh checkout/worktree needs one thing: a **Python 3.12 venv** with the
-`[dev,app]` extras. It is gitignored (`.venv/`), so it does not carry into a
-worktree. There is no frontend build — the placeholder page and `runtime.js`
-are static files served per request.
+A fresh checkout/worktree needs two things: a **Python 3.12 venv** with the
+`[dev,app]` extras (gitignored `.venv/`, so it does not carry into a
+worktree), and the **React shell build** — `frontend/` is fused-render's
+frontend copied verbatim (the Tasks page and the native Claude chat) plus
+Render App's entry (`lite.html`, `src/lite.tsx`, `src/LiteApp.tsx`), built
+with bun into `fused_render_app/static/shell-dist/` (gitignored). `dev.sh`
+builds it when missing; `scripts/build_shell.sh` rebuilds it; `cd frontend &&
+bun run watch` rebuilds on edit. The home page, dock, launcher and
+`runtime.js` stay hand-written static files served per request.
 
 ## Running the Dev Server
 
@@ -66,7 +71,7 @@ raise the floor in the script or the workflow.
 | `dev` extra | pytest |
 | `app` extra | rumps + pyobjc, the menu-bar shell (`macapp.py`); only the packaged .app installs it, but the dev venv carries it so `macapp` imports in tests |
 | uv | the server shells out to uv for app venvs; `env.uv_bin()` accepts the bundled copy, a uv ≥ 0.8 on PATH, or downloads a pinned one into `~/.fused-render-app/bin` (dev: under `FUSED_RENDER_APP_HOME`) |
-| No frontend | nothing to `npm install`; `runtime.js` is hand-written |
+| bun | builds the React shell (`frontend/`, fused-render's) into `static/shell-dist/` — `/tasks` and `/chat` answer 503 without it; `brew install oven-sh/bun/bun`. `runtime.js` and the other pages stay hand-written |
 
 Remote layout: `origin` is fusedio/fused-render-lite; `main` is the release branch.
 The `origin` remote is fusedio/fused-render — never push there.

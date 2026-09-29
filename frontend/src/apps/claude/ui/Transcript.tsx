@@ -1,0 +1,1045 @@
+// The scrollport (T:12752-13060).
+//
+// A PLAIN DIV, not `ScrollArea`: the follow-bottom rules below read
+// `scrollTop`/`scrollHeight`/`clientHeight` off the scroller itself and write
+// `scrollTop` back, and every one of the gesture distinctions depends on those
+// being the element the browser actually scrolls.
+//
+// Three rules, and each exists because the obvious version of it leaked:
+//   * follow is GESTURE-based and threshold-free for wheel and touch. A 20px
+//     drag stays inside any "near bottom" window, so geometry read the touch as
+//     re-arming the follow it was trying to break;
+//   * a scroll CLAMP is not a gesture. The tail shrinks all the time (a chip
+//     resolving to a smaller image, the working line leaving at run end), and
+//     reading the browser's clamp as "the reader moved up" was the other way
+//     the follow died mid-turn;
+//   * growth is OBSERVED, not announced. Most of what lands in a live turn
+//     grows AFTER the append that scrolled — a chip that expands when its
+//     output arrives, a code block growing as the highlighter runs, a picture
+//     that only takes up room once it loads — so a ResizeObserver answers all
+//     of them with the one flag.
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
+
+import { Skeleton } from "@platform/shadcn/ui/skeleton";
+import { cn } from "@platform/lib/utils";
+
+import type { ChatController, ChatState, UserTurn } from "../protocol/controller-api";
+import type { PermissionMode, Segment } from "../protocol/types";
+import { CardStack, type CardActions } from "./CardStack";
+import { useHoldTail } from "./cardPolicy";
+import { TroubleView } from "./TroubleView";
+import type { Viewable } from "./attachApi";
+import { isOneLiner, Turn } from "./Turn";
+import { WorkingLine } from "./WorkingLine";
+import "../styles/transcript.css";
+
+/** T:12754 — how close to the tail re-arms the follow. */
+const NEAR_BOTTOM_PX = 60;
+/** T:12848 — long enough to be seen after the scroll settles, short enough that
+ *  it is plainly a flare and not a mode. */
+export const ANCHOR_FLARE_MS = 1600;
+/** T:12912 — a restored turn's pictures load after their turn is on screen, and
+ *  every one above the anchor slides it off. Re-centre at a few decaying points
+ *  rather than continuously. */
+export const ANCHOR_SETTLE_MS = [120, 400, 1000];
+
+/** Where the typer is pointed, and what it has drawn (protocol/segments.ts
+ *  `streamingTailOf` + protocol/typer.ts `TyperFrame`). */
+export interface TranscriptTail {
+  /** The turn the typer is attached to. */
+  turnKey: string;
+  /** The growing segment's index, or -1 for a turn's flat body. */
+  index: number;
+  text: string;
+  cursor: boolean;
+}
+
+export interface TranscriptProps {
+  state: ChatState;
+  actions: CardActions & Pick<ChatController, "stopRun">;
+  /** The live permission mode from poll — gates a perm card's escalation. */
+  liveMode?: PermissionMode;
+  /** The typewriter's current frame, or absent when nothing is streaming. */
+  tail?: TranscriptTail | null;
+  /** The picker's `permission` param, for a plan card's landing mode. */
+  pickerMode?: string;
+  /** `?msg=<transcript record uuid>` at boot (T:12844). */
+  msgAnchor?: string | null;
+  /** Fired after the one attempt, landed or not: the param comes off the URL
+   *  (`null`, not `""`) so a copied address carries no dangling `&msg=`. */
+  onAnchorSpent?: () => void;
+  onShowSent?: (turn: UserTurn) => void;
+  /** A queued / not-sent bubble was clicked: pull it back into the box
+   *  (`TurnProps.onPullPending`). */
+  onPullPending?: (key: string) => void;
+  /** PR2: a receipt's thumbnail or glyph opens the full-size viewer. */
+  onOpenShot?: (shot: Viewable) => void;
+  /** "preview" / "app" — the word a receipt's nouns use (`PaneState.paneNoun`). */
+  paneNoun?: string;
+  /** What the app was doing, for a trouble card's report. */
+  what?: string;
+  /** Whether a scheduled message is still pending on this conversation
+   *  (`useSchedule.blocked`) — the limit card's "a follow-up is scheduled"
+   *  sentence is only true while it is. */
+  comebackPending?: boolean;
+  /**
+   * THE FOLLOW FLAG, LENT OUT (T:12758, T:17211-17213).
+   *
+   * A caller outside this file that wants the tail re-pinned must go through
+   * the same `followBottom` every write site in here goes through, or it
+   * re-introduces the bug the flag exists to prevent: writing `scrollTop =
+   * scrollHeight` off a raw `.chat-logwrap` lookup yanks a reader who has
+   * scrolled up. The schedule banner is the one such caller (it SHRINKS the
+   * scrollport as it appears, so it has to correct a pinned log), and it
+   * cannot read the pinned-ness itself either — geometry is wrong here in both
+   * directions, which is why this is a flag and not a threshold.
+   *
+   * Filled with the flag-guarded `followBottom` while the scrollport is
+   * mounted, `null` when it is not.
+   */
+  followRef?: MutableRefObject<(() => void) | null>;
+  /** The recap line (ui/RecapFold), drawn after the last turn INSIDE the log so
+   *  it scrolls with the conversation — Claude Code prints its `※ recap:` as
+   *  the last line of the transcript, and so does this. */
+  recap?: ReactNode;
+}
+
+export const Transcript = memo(function Transcript({
+  state,
+  actions,
+  liveMode,
+  tail,
+  pickerMode,
+  msgAnchor,
+  onAnchorSpent,
+  onShowSent,
+  onPullPending,
+  onOpenShot,
+  paneNoun,
+  what,
+  comebackPending,
+  followRef,
+  recap,
+}: TranscriptProps) {
+  const port = useRef<HTMLDivElement>(null);
+  const log = useRef<HTMLDivElement>(null);
+  const followTail = useRef(true);
+  const [flare, setFlare] = useState<string | null>(null);
+  // Keyed by the anchor it was spent on, not a boolean: the chat does not
+  // remount between two task-list clicks, and a latch that never re-armed made
+  // the second message link a no-op (owner E2E R1, F2).
+  const anchorSpent = useRef<string | null>(null);
+  const stopSettle = useRef<(() => void) | null>(null);
+
+  // ── the follow flag and the gestures that move it ────────────────────────
+  useEffect(() => {
+    const wrap = port.current;
+    if (!wrap) return;
+    const nearBottom = () =>
+      wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < NEAR_BOTTOM_PX;
+    // A wheel/trackpad flick upward is an unambiguous "let me read", so it
+    // drops the follow with NO distance threshold — that is what makes it
+    // impossible for the next frame's write to out-race the gesture.
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) followTail.current = false;
+    };
+    // A finger dragging DOWN scrolls the content up: the same "let me read", and
+    // tracked across touchmove rather than read off the scrollport, because
+    // asking geometry here re-introduced exactly that race.
+    let touchY: number | null = null;
+    const onTouchStart = (e: TouchEvent) => {
+      touchY = e.touches[0] ? e.touches[0].clientY : null;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0] ? e.touches[0].clientY : null;
+      if (y !== null && touchY !== null && y > touchY + 2) followTail.current = false;
+      touchY = y;
+    };
+    // Everything else that moves the scrollport — scrollbar drag, keyboard, a
+    // scrollIntoView, our own writes. `lastTop`/`lastHeight` tell a reader
+    // moving UP apart from the browser CLAMPING scrollTop because the content
+    // got shorter; a clamp is not a gesture.
+    //
+    // …AND A SHRINK RE-ARMS NOTHING EITHER (Akshil 2026-09-15). A fold makes
+    // `.chat-log` SHORTER — the wall that folds behind the newest reply when a
+    // conversation is opened loses several screenfuls at once, and one click on
+    // a mark can lose a screenful — and a reader parked 200px up was suddenly
+    // within `NEAR_BOTTOM_PX` of a tail that had moved up to meet them. Geometry read that as "they are at the bottom", re-armed
+    // the follow, and the very next write yanked them to the tail of a
+    // conversation they were reading the middle of. Both halves of this branch
+    // are therefore gated on `h >= lastHeight`: a shrink is not a gesture in
+    // either direction. A reader who WAS following is untouched — the flag is
+    // already true and nothing here turns it off — so the fold still carries
+    // them down with the new reply.
+    let lastTop = 0;
+    let lastHeight = 0;
+    const onScroll = () => {
+      const top = wrap.scrollTop;
+      const h = wrap.scrollHeight;
+      if (h >= lastHeight) {
+        if (top < lastTop - 1) followTail.current = false;
+        else if (nearBottom()) followTail.current = true;
+      }
+      lastTop = top;
+      lastHeight = h;
+    };
+    const followBottom = () => {
+      if (followTail.current) wrap.scrollTop = wrap.scrollHeight;
+    };
+    // Lent to the schedule banner, which must ask the flag rather than write
+    // `scrollTop` itself (see `followRef`).
+    if (followRef) followRef.current = followBottom;
+    wrap.addEventListener("wheel", onWheel, { passive: true });
+    wrap.addEventListener("touchstart", onTouchStart, { passive: true });
+    wrap.addEventListener("touchmove", onTouchMove, { passive: true });
+    wrap.addEventListener("scroll", onScroll, { passive: true });
+    // Belt and braces for the one growth a ResizeObserver can miss: a replaced
+    // element that reserves its box up front paints into a box that never
+    // changes size, and any LAYOUT its load shifts may land in the frame the
+    // observer already answered. `load` does not bubble, hence the capture.
+    wrap.addEventListener("load", followBottom, true);
+    // Writing scrollTop cannot resize anything, so this observer cannot
+    // re-enter itself.
+    const grown =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(followBottom);
+    if (grown && log.current) grown.observe(log.current);
+    // AND THE SCROLLPORT ITSELF, not only the log (#10). The landing bottom-
+    // anchor fires when the turns are laid out — and on a history landing with
+    // attachment chips the COMPOSER is still growing under it, so the port lost
+    // 66px of height a frame later and the conversation came to rest that far
+    // short of the bottom. The log never changed size, so the observer above
+    // never heard about it. The port shrinking IS the growth, seen from the
+    // other side; the flag decides what to do about it exactly as before, so a
+    // reader who has scrolled up is not moved by a chip mounting.
+    if (grown) grown.observe(wrap);
+    return () => {
+      wrap.removeEventListener("wheel", onWheel);
+      wrap.removeEventListener("touchstart", onTouchStart);
+      wrap.removeEventListener("touchmove", onTouchMove);
+      wrap.removeEventListener("scroll", onScroll);
+      wrap.removeEventListener("load", followBottom, true);
+      grown?.disconnect();
+      if (followRef) followRef.current = null;
+    };
+  }, [followRef]);
+
+  // A new turn is the reader asking for the tail again: sending re-arms the
+  // follow that scrolling up turned off, so the answer to what they just asked
+  // streams in front of them (T:13466-13470). Layout effect, so the write lands
+  // in the frame the turn was painted in.
+  const lastTurnKey = state.turns.length ? state.turns[state.turns.length - 1].key : "";
+  const userTurns = state.turns.filter((t) => t.role === "user").length;
+  useLayoutEffect(() => {
+    followTail.current = true;
+    if (port.current) port.current.scrollTop = port.current.scrollHeight;
+  }, [userTurns]);
+  useLayoutEffect(() => {
+    // Everything the reader did NOT ask for goes through the flag.
+    if (followTail.current && port.current) port.current.scrollTop = port.current.scrollHeight;
+  }, [lastTurnKey, state.rev]);
+  const openCards = openCardIds(state.permissions);
+
+  // ── THE ANSWERED CARD'S RECEIPT COMES INTO VIEW (T:14738-14742) ───────────
+  //
+  // Answering a card while scrolled up to re-read the reply moved it out of the
+  // bottom stack and into its turn — and left the "✓ Allowed" receipt off
+  // screen, so the click had no visible consequence at all. T is careful about
+  // the scope: "Following the tail is the log's own rule while a run streams;
+  // otherwise the most this may do is keep the card the user was just looking at
+  // on screen — scrolling a reader who is somewhere else entirely would be the
+  // move yanking the page." Hence both conditions, `!followTail && wasVisible`.
+  //
+  // `wasVisible` has to be read BEFORE the move, and T can: it does the
+  // `appendChild` itself. React re-renders the row in its new place, so by the
+  // time a layout effect runs the old box is gone — which is why visibility is
+  // sampled for the OPEN cards on every commit and read back on the transition.
+  // Cheap: open cards are 0 or 1 in almost every state, and the run is blocked
+  // while there is one.
+  const cardWasVisible = useRef(new Map<string, boolean>());
+  const wereOpen = useRef<string[]>([]);
+  useLayoutEffect(() => {
+    const wrap = port.current;
+    const open = state.permissions
+      .filter((p) => p && p.id && (!p.decision || !p.parkedIn))
+      .map((p) => p.id);
+    // The transition, off the PREVIOUS commit's open set: a row that was open
+    // and is now filed into a turn.
+    //
+    // PER PARKED CARD, with no whole-pass gate on the open set (PR3 review,
+    // finding #4). `!open.length` was the first answer to Bugbot PR #1074 — one
+    // poll can both answer a card and open the next one, and the open card is
+    // the hard block, so the receipt must not be the last thing to move the
+    // viewport. But it also silenced the reveal for the reported case itself:
+    // answering ONE of two open cards left the other open, so the receipt of
+    // the card just clicked never came into view.
+    //
+    // T has no such gate. It gets the priority from ORDER instead:
+    // `syncPermissions` calls `parkResolvedCard` per resolved card and
+    // `pinOpenCards` after the loop, so the open card's scroll always lands
+    // last. This file now reads the same way — the open-card effect below is
+    // declared AFTER this one, which is the order layout effects run in.
+    if (wrap && !followTail.current) {
+      const parked = new Set(
+        state.permissions.filter((p) => p && p.id && p.decision && p.parkedIn).map((p) => p.id),
+      );
+      for (const id of wereOpen.current) {
+        if (!parked.has(id)) continue;
+        if (!cardWasVisible.current.get(id)) continue;
+        const el = findCard(log.current, id);
+        // `block: "nearest"` and nothing else, exactly as T has it: the least
+        // the browser can do to make the receipt reachable, rather than
+        // centring it and moving a reader who did not ask to be moved.
+        if (el) el.scrollIntoView({ block: "nearest" });
+      }
+    }
+    // …and re-sample for the next commit.
+    const seen = new Map<string, boolean>();
+    if (wrap) {
+      const portBox = wrap.getBoundingClientRect();
+      for (const id of open) {
+        const el = findCard(log.current, id);
+        if (!el) continue;
+        const box = el.getBoundingClientRect();
+        seen.set(id, box.bottom > portBox.top && box.top < portBox.bottom);
+      }
+    }
+    cardWasVisible.current = seen;
+    wereOpen.current = open;
+  }, [state.permissions, state.rev]);
+
+  // An open card is a HARD BLOCK: the run cannot continue without the user, so a
+  // reader who has scrolled away is waiting on something they cannot see. One of
+  // the few places that scrolls unconditionally (T:14652-14663).
+  //
+  // DECLARED LAST OF THE THREE, and that placement is load-bearing: it is
+  // `pinOpenCards` running after `parkResolvedCard`'s loop (T:14774), so a poll
+  // that both answers a card and opens the next one ends at the card the run is
+  // blocked on rather than at the receipt — a receipt is a courtesy, an open
+  // card is the block.
+  //
+  // KEYED ON THE IDS, not the COUNT: T scrolls per card MOUNT, and one card
+  // resolving while another opens in the same poll leaves the count unchanged —
+  // so the new card, which the run is blocked on, never brought the scrollport
+  // to itself.
+  useLayoutEffect(() => {
+    if (openCards && port.current) port.current.scrollTop = port.current.scrollHeight;
+  }, [openCards]);
+
+  // ── ONE SCROLLER, NEVER TWO (R3-4) ───────────────────────────────────────
+  //
+  // The pin used to be capped at 70% of the scrollport, which bought a second
+  // scrollbar on every card taller than that — the transcript's behind the
+  // card's, side by side, and the reader's wheel answered by whichever box the
+  // pointer happened to be over (owner: "remove the 70% cap — it causes double
+  // scroll"). The cap is gone: a pinned card may now be as tall as the whole
+  // scrollport, and a card TALLER than that becomes the only thing that scrolls.
+  //
+  // Which of those two states we are in cannot be asked in CSS, so it is
+  // MEASURED — overflow, off the two boxes, never a breakpoint or a fraction.
+  // A card that fits leaves the transcript scrollable, because that is what the
+  // pin is for: re-reading the reply the card is asking about. A card that does
+  // not fit covers the transcript completely, so locking it costs the reader
+  // nothing and takes the second scrollbar away.
+  const pin = useRef<HTMLDivElement>(null);
+  const [pinFull, setPinFull] = useState(false);
+  /** Where the transcript was when the lock went on. `overflow: hidden` clamps
+   *  `scrollTop` to 0, and handing back the TOP of a conversation the reader was
+   *  part-way down is its own bug — so the offset is parked across the lock and
+   *  put back when the card is answered. */
+  const parkedTop = useRef(0);
+  const locked = useRef(false);
+  useEffect(() => {
+    const box = pin.current;
+    const wrap = port.current;
+    if (!box || !wrap || !openCards) {
+      setPinFull(false);
+      locked.current = false;
+      return;
+    }
+    const measure = () => {
+      // `+ 1` because both numbers are rounded off fractional layout, and a
+      // half-pixel is not an overflow worth locking a scroller for.
+      const full = box.scrollHeight > wrap.clientHeight + 1;
+      // Read BEFORE the class lands: by the time an effect keyed on `pinFull`
+      // runs, the browser has already clamped this to 0.
+      if (full && !locked.current) parkedTop.current = wrap.scrollTop;
+      locked.current = full;
+      setPinFull(full);
+    };
+    measure();
+    // OBSERVED, not measured once: a card grows after it mounts (an "Other"
+    // field opening, a diff arriving, a question's options wrapping), which is
+    // the same argument the follow-bottom rules make above.
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [openCards]);
+  useLayoutEffect(() => {
+    const wrap = port.current;
+    if (!wrap || pinFull || !parkedTop.current) return;
+    wrap.scrollTop = parkedTop.current;
+    parkedTop.current = 0;
+  }, [pinFull]);
+
+  // ── the first paint lands at the bottom (#26) ────────────────────────────
+  //
+  // "Opening a session with an open card flashes the top of the chat then
+  // scrolls down." Every rule above writes `scrollTop` in a LAYOUT effect, which
+  // is before paint — but only for the tree that has already laid out. A
+  // restored session paints its turns first (`historyLoading` false is the frame
+  // the turns arrive in) and the pictures, highlighted code blocks and expanded
+  // chips inside them keep GROWING for several frames after; each of those is
+  // answered by the ResizeObserver, and the reader watches the transcript walk
+  // down to the tail.
+  //
+  // So the log is not painted at all until the first of those writes has landed:
+  // `is-settling` is `visibility: hidden` (it still lays out — that is the point),
+  // and it comes off in the same layout effect that scrolls, so no frame is ever
+  // shown at the top. `settled` starts TRUE where there is no layout to wait for
+  // (a test renderer, SSR): hiding a tree that can never be measured would hide
+  // it for good.
+  //
+  // AND THE SAME RULE COVERS ADOPTION (R2-11). On the cards wall a tile that is
+  // waiting on a question painted its transcript first, scrolled itself to the
+  // bottom, and only then — when `adoptLiveRun` had found the run and its first
+  // poll had delivered the permission row — grew the card, which moved
+  // everything again: two flashes for one open. `state.adopting` is the run
+  // controller saying "there may still be a live run to attach to here", so the
+  // log stays hidden across that window and the card and the turns arrive in the
+  // same frame.
+  //
+  // READ STRUCTURALLY, not off the type: the flag is the protocol layer's to
+  // add and this file must not have to land in the same commit. Absent, it is
+  // `undefined` — which is not `true`, so a controller that never publishes it
+  // behaves exactly as before.
+  const adopting = (state as { adopting?: boolean }).adopting === true;
+  const [settled, setSettled] = useState(() => typeof ResizeObserver === "undefined");
+  const firstBottom = useRef(false);
+  useLayoutEffect(() => {
+    if (firstBottom.current || state.historyLoading || adopting) return;
+    firstBottom.current = true;
+    if (port.current) port.current.scrollTop = port.current.scrollHeight;
+    setSettled(true);
+  }, [state.historyLoading, adopting, state.rev]);
+
+  // ── ?msg= anchor ─────────────────────────────────────────────────────────
+  // EVERYTHING here degrades to silence: no param, a uuid from another
+  // transcript, a uuid whose record this page does not render — each ends with
+  // the chat exactly as it would have been, because landing at the bottom of
+  // the right conversation is a far better failure than a throw on a stale link.
+  // Read through a ref, not a dependency: the callback is rebuilt every render
+  // by the host, and re-running this effect for it tore down the flare's own
+  // timer while `anchorSpent` blocked ever rescheduling it — so the halo never
+  // faded.
+  const spend = useRef(onAnchorSpent);
+  spend.current = onAnchorSpent;
+  useEffect(() => {
+    // AN EMPTY LOG THAT HAS NOT LOADED YET IS NOT A TRANSCRIPT TO SPEND ON.
+    // `transcriptGen === 0` with no turns is the first render, before the
+    // host's boot effect flips `historyLoading` on: spending the anchor there
+    // landed it on an empty log every time a task page opened from a message
+    // link (owner E2E R1, F2). A conversation started with Send never bumps
+    // the generation but HAS turns, so it is not held back (Bugbot #1099).
+    if (
+      !msgAnchor ||
+      anchorSpent.current === msgAnchor ||
+      state.historyLoading ||
+      (state.transcriptGen === 0 && state.turns.length === 0)
+    )
+      return;
+    // Spent on the first transcript it is offered, landed or not: left armed, a
+    // uuid that matched nothing here would flare whichever turn of a DIFFERENT
+    // conversation happened to carry that id.
+    anchorSpent.current = msgAnchor;
+    const wrap = port.current;
+    const el = findTurn(log.current, msgAnchor);
+    spend.current?.();
+    if (!el || !wrap) return;
+    // AND THE FOLLOW GOES OFF. The reader has asked to be somewhere that is not
+    // the tail, and the flag's other writer is a ResizeObserver — a picture
+    // loading above the anchor would otherwise pull them straight back down,
+    // which is the same fight `settleAnchor` exists to win.
+    followTail.current = false;
+    const still =
+      typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    scrollToAnchor(el, still);
+    stopSettle.current = settleAnchor(wrap, el, still);
+    setFlare(msgAnchor);
+  }, [msgAnchor, state.historyLoading, state.transcriptGen, state.turns.length]);
+  // The flare's own effect, keyed on the flare: one timer per halo, torn down
+  // only when the halo it belongs to goes.
+  useEffect(() => {
+    if (!flare) return;
+    const off = window.setTimeout(() => setFlare(null), ANCHOR_FLARE_MS);
+    return () => window.clearTimeout(off);
+  }, [flare]);
+  useEffect(() => () => stopSettle.current?.(), []);
+
+
+  const onStop = useCallback(() => void actions.stopRun(), [actions]);
+
+  // WHERE each parked card sits INSIDE its turn (#18). Passing a `<CardStack/>`
+  // to every turn regardless would defeat `Turn`'s own memo — a fresh child
+  // element per render is a changed prop — and most turns never hold one.
+  const parked = useMemo(() => parkPlan(state.turns, state.permissions), [
+    state.turns,
+    state.permissions,
+  ]);
+
+  // ── WHICH REPLIES ARE FOLDED (design.md §B) ──────────────────────────────
+  //
+  // A finished conversation is a wall of replies the reader has already read,
+  // and the one they came back for is the last one. So every SETTLED assistant
+  // turn lands folded except the newest, and the live turn is never folded.
+  //
+  // AND THAT IS THE ONLY MOMENT THE RULE SPEAKS (Akshil 2026-09-17). The fold
+  // used to RE-DERIVE every render, so each new reply shut the one before it —
+  // and that is wrong for the case the log is actually used in: a reader who is
+  // present, asking and answering, is having a CONVERSATION. Looking back at
+  // what was said a minute ago is part of it, and the page kept closing the
+  // minute-old answer under them ("I just asked a simple question and my
+  // previous question got disappear").
+  //
+  // So the rule fires ONCE, on open, and then never again: every settled reply
+  // lands folded except the newest, and from that frame on NOTHING in this
+  // component changes a fold. A reply that arrives live arrives OPEN and stays
+  // open; an older one stays exactly as it was. The only thing that moves a
+  // fold after the seed is a click, and the only thing that folds the wall
+  // again is opening the conversation again — a reload, a new tab, or picking
+  // it out of the history (`transcriptGen`, below).
+  //
+  // WHICH MAKES EVERY STATE STICKY, so the four are really "who put it there":
+  // `default-*` is the seed's doing, `manual-*` the reader's. Nothing reads the
+  // difference any more except this comment and the tests — kept because the
+  // seed is the one write that must not land on a turn the reader has already
+  // touched, and because "the rule's, or mine?" is the question any future
+  // change to the fold has to answer first.
+  //
+  // A REF PLUS A BUMP, not `useState`: the map is seeded during render, and
+  // every other turn's props have to stay identical across the click, or
+  // `Turn`'s memo — the thing that keeps a settled reply's markdown from being
+  // re-parsed on every 400 ms poll — misses for the whole log. Session-local by
+  // construction: a fresh mount is a fresh map.
+  const folds = useRef(new Map<string, FoldState>());
+  /** Turn key → the key its fold is remembered by (`foldKey`). The toggle is ONE
+   *  stable callback for the whole log — a fresh closure per row would defeat
+   *  `Turn`'s memo — so it is handed the turn's own key and resolves it here. */
+  const foldIds = useRef(new Map<string, string>());
+  /** Has the one-and-only pass run for this conversation? Until it has, the log
+   *  on screen is still arriving; after it, the fold map is the reader's alone.
+   *  Cleared with the maps when another session is opened. */
+  const seeded = useRef(false);
+  const [, bumpFold] = useState(0);
+  // A DIFFERENT CONVERSATION IS A DIFFERENT MAP (review #1). This component is
+  // not remounted when the host opens another session, and a restored turn's
+  // key is POSITIONAL (`protocol/history.ts`, `"h:" + i`) — so every fold of
+  // the 20-turn history on screen a moment ago applied itself, row for row, to
+  // the 12-turn one that replaced it, and the reply the reader came back for
+  // landed folded while an older one sat open.
+  //
+  // `transcriptGen` and not `sessionId`: the id also changes when the first
+  // poll of a brand-new chat reports one, mid-run (`noteSessionId`,
+  // controller-api `transcriptGen`), and clearing there would re-fold a reply
+  // the reader had just opened. The generation is bumped by `openSession` and
+  // by nothing else — the same event `resetCardPolicy` hangs on.
+  const foldsGen = useRef(state.transcriptGen);
+  if (foldsGen.current !== state.transcriptGen) {
+    foldsGen.current = state.transcriptGen;
+    folds.current.clear();
+    foldIds.current.clear();
+    seeded.current = false;
+  }
+  const lastAssistant = lastAssistantKey(state.turns);
+  // The open card is drawn in the tail pin, but the turn it belongs to is the
+  // one the run is blocked in — and NOT, as this read for one release, whichever
+  // reply happens to be newest (review #2): a card answered against a chip five
+  // turns back un-folded the turn at the bottom instead, which is a turn the
+  // reader had folded and nothing to do with the block.
+  //
+  // READ BEFORE THE FOLD IS DERIVED, because the derivation has to know about it
+  // (Akshil 2026-09-15). An unanswered card is the one thing on screen to do,
+  // and the next reply to start streaming made its turn "not the newest" — so
+  // the rule derived `default-closed` underneath it. `pendingCard` kept the turn
+  // DRAWN open for as long as the card stood, which meant the reply snapped shut
+  // the instant the reader pressed Allow, in the same gesture. A blocked turn is
+  // therefore open by the rule too; once its card is answered it is an ordinary
+  // reply again and the next response folds it like any other.
+  const blocked = blockedTurnKey(state.turns, state.permissions);
+  const blockedTurn = blocked ? state.turns.find((t) => t.key === blocked) : undefined;
+  const blockedFold = blockedTurn ? foldKey(blockedTurn) : null;
+  // A LIVE TURN IS RE-KEYED WHEN ITS RUN ENDS, and its fold does not follow it
+  // (known, review): a streaming reply is keyed `a:N` and comes back from
+  // `refreshHistory` keyed by its transcript uuid, so a reply the reader shut
+  // mid-run is a turn this map has never seen and lands OPEN. It is the one
+  // place a fold moves without a click. Left as is deliberately — the old rule
+  // lost the same click, it merely hid the loss by re-folding everything but
+  // the newest, and re-opening shows the reader something rather than taking it
+  // away. Fixing it properly means carrying the uuid onto the live turn in the
+  // controller, which is a change to what a turn IS, not to who folds it.
+  //
+  // THE SEED WAITS FOR THE TRANSCRIPT (`historyLoading`). Folding against the
+  // turns that happen to be on screen mid-restore would freeze the wrong
+  // answer open — the cached prefix's last reply, not the conversation's — and
+  // every row the fetch then added would count as "arrived live" and land open.
+  // `historyLoading` stays up through a `fromCache` paint for exactly this
+  // reason (run-controller `restore`), and a brand-new chat has it down with no
+  // turns at all, which seeds an empty map: nothing to fold, everything the
+  // reader says from there is live and open.
+  //
+  // AND IT NEEDS A CONVERSATION TO BE ABOUT (`turns.length`, review). The
+  // controller's INITIAL state is `historyLoading: false` with no turns
+  // (run-controller `emptyState`), which is a frame every mount paints before
+  // any restore starts — so the seed burnt itself on an empty map, and the one
+  // boot road that does not go through `openSession` (a bare `?run=`, which
+  // re-attaches without a session id, and the `sending` bail beside it) then
+  // replayed its whole transcript with no pass left to fold it. An empty log has
+  // nothing to decide anyway.
+  const opening = !seeded.current && !state.historyLoading && state.turns.length > 0;
+  // …AND NOTHING IS WRITTEN WHILE IT WAITS. A turn on screen during the restore
+  // is not "a turn that arrived live" — treating it as one marked the whole
+  // cached wall open before the seed ever ran, and the seed then skipped every
+  // row it found already in the map. So the map stays empty until the frame the
+  // transcript lands on, which is the frame the fold is decided in.
+  const waiting = !seeded.current && !opening;
+  for (const t of state.turns) {
+    if (t.role !== "assistant") continue;
+    // A ONE-LINE REPLY IS NOT THE RULE'S BUSINESS (Akshil 2026-09-15). It can
+    // never be folded (`Turn`'s `isOneLiner`), so seeding a state for it would
+    // be the log remembering a fold that is not drawn. Nothing is written, and
+    // `isFolded(undefined)` is open — and once it grows a second segment it is
+    // a turn that arrived after the seed, which is open too.
+    if (isOneLiner(t)) continue;
+    const id = foldKey(t);
+    foldIds.current.set(t.key, id);
+    if (waiting) continue;
+    // WRITTEN ONCE PER TURN, EVER. A turn already in the map is settled
+    // business — the seed's or the reader's — and re-deciding it is the exact
+    // bug this pass removes.
+    const prev = folds.current.get(id);
+    if (prev !== undefined) {
+      // WITH ONE EXCEPTION, AND IT IS NOT THE RULE TALKING: a turn the run is
+      // BLOCKED in. The cards do not always arrive with the history — with no
+      // `live_run` in the payload they land on a later poll, after the seed has
+      // folded the turn they belong to (review) — and a `default-closed` turn
+      // under an unanswered card is the 2026-09-15 bug back again: `pendingCard`
+      // draws it open while the card stands, so it snaps shut in the same
+      // gesture that presses Allow. Promoting it is a one-way write, it happens
+      // once, and it never touches a fold the reader set.
+      if (prev === "default-closed" && id === blockedFold) {
+        folds.current.set(id, "default-open");
+      }
+      continue;
+    }
+    // Outside the seed there is no folding left to do, so a turn first seen
+    // here is open: it is the reply being written, or one that arrived while
+    // the reader was watching. Inside it, the wall folds behind the newest —
+    // and a turn blocked on a permission card is open too, because an
+    // unanswered card is the one thing on screen to do.
+    const open = !opening || !!t.streaming || t.key === lastAssistant || id === blockedFold;
+    folds.current.set(id, open ? "default-open" : "default-closed");
+  }
+  if (opening) seeded.current = true;
+  const onToggleCollapse = useCallback((key: string) => {
+    const id = foldIds.current.get(key) ?? key;
+    // EVERY CLICK IS MANUAL, both ways: opening one pins it open past the next
+    // response, shutting one pins it shut past everything.
+    folds.current.set(id, isFolded(folds.current.get(id)) ? "manual-open" : "manual-closed");
+    // THE READER JUST CHANGED THE LOG'S HEIGHT ON PURPOSE (review #3). Folding
+    // or opening a reply resizes `.chat-log`, the ResizeObserver above answers
+    // a resize by writing `scrollTop = scrollHeight`, and the reply that was
+    // just opened went straight off the bottom of the screen. Same rule, same
+    // line as the `?msg=` anchor: a gesture that asks to READ something drops
+    // the follow first.
+    followTail.current = false;
+    bumpFold((n) => n + 1);
+  }, []);
+  // …and the same for every disclosure BELOW a turn — a run's `more`/`less`, a
+  // chip, a thinking block — which resize the log the same way from five levels
+  // down a memoized tree (ui/cardPolicy `useHoldTail`).
+  useHoldTail(useCallback(() => {
+    followTail.current = false;
+  }, []));
+
+  return (
+    <div className={cn("chat-logwrap", pinFull && "is-locked")} ref={port}>
+      <div className={cn("chat-log", !settled && "is-settling")} ref={log}>
+        {state.historyLoading ? (
+          <HistorySkeleton />
+        ) : (
+          <>
+            {state.turns.map((turn) => {
+              const plan = parked.get(turn.key);
+              // A `<CardStack/>` for one position, by id: the same list, the
+              // same three card kinds, restricted to the rows that belong here.
+              const stack = (ids: string[]) => (
+                <CardStack
+                  rows={state.permissions}
+                  ids={ids}
+                  placement="parked"
+                  turnKey={turn.key}
+                  liveMode={liveMode}
+                  pickerMode={pickerMode}
+                  actions={actions}
+                />
+              );
+              const after = plan?.after.size
+                ? new Map(Array.from(plan.after, ([i, ids]) => [i, stack(ids)]))
+                : null;
+              return (
+                <Turn
+                  key={turn.key}
+                  turn={turn}
+                  anchored={turn.role === "user" && !!flare && turn.uuid === flare}
+                  {...(tail && tail.turnKey === turn.key ? { tail } : {})}
+                  {...(onShowSent ? { onShowSent } : {})}
+                  {...(onPullPending ? { onPullPending } : {})}
+                  {...(after ? { cardsAfter: after } : {})}
+                  {...(onOpenShot ? { onOpenShot } : {})}
+                  {...(paneNoun ? { paneNoun } : {})}
+                  collapsed={isFolded(folds.current.get(foldIds.current.get(turn.key) ?? turn.key))}
+                  onToggleCollapse={onToggleCollapse}
+                  {...(blocked === turn.key &&
+                  folds.current.get(foldIds.current.get(turn.key) ?? turn.key) !== "manual-closed"
+                    ? { pendingCard: true }
+                    : {})}
+                >
+                  {/* Parked cards belong to the turn they were answered in —
+                      whichever turn that was, streaming or long finished.
+                      `streaming` is cleared at run end (run-controller's
+                      `runEnding`), so gating on it made every resolved card
+                      vanish from the transcript the moment its turn ended; T
+                      parks the node into the turn's DOM and it stays
+                      (T:14728-14742). These are the ones with no tool chip of
+                      their own to sit under, so they go at the turn's tail. */}
+                  {plan?.tail.length ? stack(plan.tail) : null}
+                </Turn>
+              );
+            })}
+            {/* THE ROW AND THE CARD, both (#27). T appends a red row per failure
+                AND draws the actionable card for the newest one; the port
+                suppressed the row the card duplicated, which left an API error
+                or a session limit with no line at the end of the log saying the
+                turn had stopped — "last line = the error" is the request. The
+                row is the log entry, the card is what the user can act on. */}
+            {state.trouble ? (
+              <TroubleView
+                trouble={state.trouble}
+                {...(what ? { what } : {})}
+                {...(comebackPending !== undefined ? { comebackPending } : {})}
+              />
+            ) : null}
+            {/* THE RECAP LINE, last in the log (after the error row, if any):
+                what happened while the reader was away is the newest thing
+                said, so it goes where the newest thing goes. */}
+            {recap ?? null}
+            {/* THE TAIL PIN (#17). An OPEN card sticks to the bottom of the
+                scrollport for as long as it is open, because the run cannot
+                continue without it and a reader who has scrolled up to re-read
+                the reply cannot otherwise find it. The working line comes with
+                it — "Waiting for your approval" and the thing to approve are one
+                statement. Answered cards are NOT in here: they have already been
+                parked back into their turn above, at the chip they answered. */}
+            <div
+              className={cn("chat-tailpin", openCards && "is-pinned")}
+              ref={pin}
+            >
+              <CardStack
+                rows={state.permissions}
+                placement="open"
+                liveMode={liveMode}
+                pickerMode={pickerMode}
+                actions={actions}
+              />
+              {state.working ? (
+                <WorkingLine working={state.working} status={state.status} onStop={onStop} />
+              ) : null}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
+
+/** One turn's parked cards: which segment each sits AFTER, plus the ones with
+ *  nowhere better to go. */
+export interface ParkPlan {
+  /** segment index → the ids of the cards drawn immediately after it. */
+  after: Map<number, string[]>;
+  /** Card ids for the turn's tail. */
+  tail: string[];
+}
+
+/**
+ * WHERE A RESOLVED CARD PARKS (#18): immediately after the tool chip it
+ * answered, in chronological position, every time.
+ *
+ * The port filed every parked card at the END of its turn, which is right when
+ * the approval was the last thing that happened in the turn and arbitrary the
+ * rest of the time — a Bash approved twenty chips ago showed its receipt under
+ * the final paragraph, and the same conversation reloaded put it somewhere else
+ * again because a later turn had become the live one.
+ *
+ * The chip is found in two steps, and the second is the one that works today:
+ *   1. `row.toolUseId` against the segment's own `tool_use` id — exact, and the
+ *      field the protocol layer is being asked to carry (agent.py already writes
+ *      `tool_use_id` into the permission request; the poll's row shape drops it);
+ *   2. otherwise the LAST not-yet-claimed tool segment of the same tool NAME.
+ *      A turn's approvals arrive in the order the tools do, so walking the cards
+ *      in arrival order and claiming chips left to right reconstructs the
+ *      pairing for the ordinary case (one Bash, one Edit, one Write) and for
+ *      repeats of the same tool.
+ * A card that matches neither — an AskUserQuestion, a plan, an approval whose
+ * chip never made it into the replayed transcript — goes to the turn's tail,
+ * which is where it was before.
+ */
+export function parkPlan(
+  turns: ChatState["turns"],
+  rows: ChatState["permissions"],
+): Map<string, ParkPlan> {
+  const out = new Map<string, ParkPlan>();
+  const claimed = new Map<string, Set<number>>();
+  for (const p of rows) {
+    if (!p || !p.id || !p.decision || !p.parkedIn) continue;
+    const key = p.parkedIn;
+    let plan = out.get(key);
+    if (!plan) out.set(key, (plan = { after: new Map(), tail: [] }));
+    const turn = turns.find((t) => t.key === key);
+    const segs = (turn && turn.role === "assistant" ? turn.segments : null) ?? [];
+    let taken = claimed.get(key);
+    if (!taken) claimed.set(key, (taken = new Set<number>()));
+    const at = chipFor(segs, p, taken);
+    if (at < 0) {
+      plan.tail.push(p.id);
+      continue;
+    }
+    taken.add(at);
+    const list = plan.after.get(at);
+    if (list) list.push(p.id);
+    else plan.after.set(at, [p.id]);
+  }
+  return out;
+}
+
+/** The index of the tool chip a card answered, or -1. See `parkPlan`. */
+function chipFor(
+  segs: readonly Segment[],
+  row: ChatState["permissions"][number],
+  taken: Set<number>,
+): number {
+  // TO WIRE (protocol): `PermissionRow.toolUseId`, from the permission
+  // request's `tool_use_id` — permission_server.py already writes it into the
+  // .req.json, agent.py's poll row just does not forward it. Read structurally
+  // rather than off the type so this file does not have to land in the same
+  // commit as `protocol/types.ts`; the name-match fallback below covers the
+  // ordinary case until it arrives.
+  const wanted = (row as { toolUseId?: string }).toolUseId;
+  if (wanted) {
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i];
+      if (seg.kind === "tool" && seg.id === wanted) return i;
+    }
+  }
+  if (!row.tool) return -1;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const seg = segs[i];
+    if (seg.kind === "tool" && seg.name === row.tool && !taken.has(i)) return i;
+  }
+  return -1;
+}
+
+/** The open cards' ids, in request order, as one string — the dependency for
+ *  "a card the run is blocked on appeared". Exported for the test: the rule is
+ *  per card MOUNT, and a count cannot express it (T:14652-14663). */
+export function openCardIds(rows: ChatState["permissions"]): string {
+  return rows
+    .filter((p) => p && p.id && !p.decision)
+    .map((p) => p.id)
+    .join(",");
+}
+
+/**
+ * HOW OPEN A REPLY IS, AND WHO SAID SO (design.md §B, Akshil 2026-09-15).
+ *
+ * Two bits, not one. "Is it folded" is what the row needs; "did the reader ask
+ * for that" is what the LOG needs, because the arrival of a new response folds
+ * the replies the rule opened and must leave alone the one the reader opened
+ * themselves. A boolean plus a side-set of manual keys said the same thing and
+ * kept drifting out of step with it — the set only ever learned about folds,
+ * never about opens, so a reply the reader had deliberately unfolded was
+ * indistinguishable from one the rule had left open.
+ */
+export type FoldState = "default-open" | "default-closed" | "manual-open" | "manual-closed";
+
+/** Is a reply in this state drawn as one line? Also the answer for a turn with
+ *  no entry at all (a row nothing has seeded yet): open, like a live one. */
+export function isFolded(state: FoldState | undefined): boolean {
+  return state === "default-closed" || state === "manual-closed";
+}
+
+/**
+ * THE KEY A REPLY'S FOLD IS REMEMBERED BY (review #1).
+ *
+ * The turn's own uuid wherever the wire carries one, because that is the only
+ * identity a reply keeps across a reload and across a switch to another
+ * conversation and back. `key` is the fallback and today it is what every
+ * restored assistant row has: `protocol/history.ts` numbers them by POSITION
+ * (`"h:" + i`), which is why the map is also cleared per transcript — a
+ * positional key means row 7 of one conversation and row 7 of the next are the
+ * same string.
+ */
+export function foldKey(turn: ChatState["turns"][number]): string {
+  return (turn as { uuid?: string }).uuid || turn.key;
+}
+
+/**
+ * THE TURN AN UNANSWERED CARD BELONGS TO, or null (review #2) — the one reply
+ * that may not be folded while the run is blocked on it (design.md §B).
+ *
+ * It is NOT "the newest reply". A card carries the id of the tool call that
+ * asked (`toolUseId`, the same field `parkPlan` files a resolved card by), so
+ * the turn that owns it is the turn holding that chip — which after a restore,
+ * or after a reply has already moved on, is not the turn at the bottom. Reading
+ * it as the newest one un-folded whichever reply happened to be last, including
+ * one the reader had just folded.
+ *
+ * With no id to go on the answer is the LIVE turn and nothing else: a streaming
+ * reply is the only turn a card can be blocking that the reader could not have
+ * folded themselves, so guessing stops there.
+ */
+export function blockedTurnKey(
+  turns: ChatState["turns"],
+  rows: ChatState["permissions"],
+): string | null {
+  const open = rows.filter((p) => p && p.id && !p.decision);
+  if (!open.length) return null;
+  for (const p of open) {
+    const wanted = (p as { toolUseId?: string }).toolUseId;
+    if (!wanted) continue;
+    for (const t of turns) {
+      if (t.role !== "assistant") continue;
+      const segs = t.segments ?? [];
+      for (const seg of segs) if (seg.kind === "tool" && seg.id === wanted) return t.key;
+    }
+  }
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.role === "assistant" && t.streaming) return t.key;
+  }
+  return null;
+}
+
+/** The newest assistant turn's key, or null — the one reply the fold rule
+ *  leaves open (design.md §B). Exported for the test: "the last ASSISTANT
+ *  turn", not "the last turn", because a note or an error row after a reply
+ *  must not make that reply fold. */
+export function lastAssistantKey(turns: ChatState["turns"]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) if (turns[i].role === "assistant") return turns[i].key;
+  return null;
+}
+
+/** The last `role: "error"` row's key, which is the one the trouble card at the
+ *  tail is reporting (the controller writes both in one patch). Exported for the
+ *  test: the rule is "the newest error row is the card", not "any error row". */
+export function lastErrorKey(turns: ChatState["turns"]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) if (turns[i].role === "error") return turns[i].key;
+  return null;
+}
+
+/** T:12885-12891 — compared as a string against what the render wrote rather
+ *  than built into a selector: a uuid off a url is untrusted input, and
+ *  `[data-msg="…"]` with a quote in it throws. */
+/** The card node for a permission row. A `dataset` walk rather than an
+ *  attribute selector, for the reason `findTurn` below is one: a row id is
+ *  server-shaped and would have to be CSS-escaped to be safe in a selector,
+ *  and there is never more than a handful of cards to walk. */
+function findCard(log: HTMLElement | null, id: string): HTMLElement | null {
+  if (!log) return null;
+  for (const el of log.querySelectorAll<HTMLElement>("[data-perm-id]"))
+    if (el.dataset.permId === id) return el;
+  return null;
+}
+
+function findTurn(log: HTMLElement | null, uuid: string): HTMLElement | null {
+  if (!log) return null;
+  for (const el of log.querySelectorAll<HTMLElement>(".turn[data-msg]"))
+    if (el.dataset.msg === uuid) return el;
+  return null;
+}
+
+function scrollToAnchor(el: HTMLElement, still: boolean): void {
+  try {
+    el.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "center" });
+  } catch {
+    el.scrollIntoView(); // an engine that takes no options object
+  }
+}
+
+/** Hold the anchored turn in view while the transcript finishes settling, and
+ *  only while it has actually drifted OUT of view — a turn that is merely
+ *  off-centre has already done its job. Any deliberate scroll cancels the rest
+ *  outright: once the reader has taken the wheel, nothing here may take it back
+ *  (T:12902-12945). */
+function settleAnchor(wrap: HTMLElement, el: HTMLElement, still: boolean): () => void {
+  const timers: number[] = [];
+  const stop = () => {
+    for (const t of timers) window.clearTimeout(t);
+    timers.length = 0;
+    for (const ev of ["wheel", "touchstart", "pointerdown", "keydown"])
+      wrap.removeEventListener(ev, stop);
+  };
+  for (const ev of ["wheel", "touchstart", "pointerdown", "keydown"])
+    wrap.addEventListener(ev, stop, { passive: true });
+  const last = ANCHOR_SETTLE_MS[ANCHOR_SETTLE_MS.length - 1];
+  for (const delay of ANCHOR_SETTLE_MS) {
+    timers.push(
+      window.setTimeout(() => {
+        if (!el.isConnected) return stop();
+        // Out of the scroller's box, not merely off its centre.
+        const box = wrap.getBoundingClientRect();
+        const seen = el.getBoundingClientRect();
+        if (seen.bottom <= box.top || seen.top >= box.bottom) scrollToAnchor(el, still);
+        if (delay === last) stop();
+      }, delay),
+    );
+  }
+  return stop;
+}
+
+/** While `history` is in flight. The SHAPE of a conversation, not a grey block:
+ *  a right-aligned prompt and a reply behind the avatar, so the column does not
+ *  jump when the real turns land. */
+function HistorySkeleton() {
+  return (
+    <div className="chat-skeleton" aria-hidden="true">
+      {[0, 1].map((i) => (
+        <div key={i} className="chat-skeleton">
+          <div className="chat-skeleton-row is-user">
+            <Skeleton className="h-8 w-1/2 rounded-2xl" />
+          </div>
+          <div className="chat-skeleton-row">
+            <Skeleton className="size-6 shrink-0 rounded-full" />
+            <div className="flex w-full flex-col gap-2">
+              <Skeleton className="h-3 w-full" />
+              <Skeleton className="h-3 w-4/5" />
+              <Skeleton className="h-3 w-2/3" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default Transcript;

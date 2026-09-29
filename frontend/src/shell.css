@@ -1,0 +1,79 @@
+/* shell.css is now an ordered barrel: each section lives in styles/ and
+ * import order here IS the cascade order — it must match the historical
+ * top-to-bottom order of the monolithic file. Add new sections at the
+ * position their rules would have appeared, not at the end by habit.
+ * Palette tokens live in styles/tokens.css (tests/test_theme.py). */
+@import "./styles/tailwind.css";
+@import "./styles/tokens.css";
+@import "./styles/base.css";
+@import "./styles/sidebar.css";
+@import "./styles/explorer.css";
+@import "./styles/preview.css";
+/* After preview.css and before task-cards.css, and the order is load-bearing
+   both ways: the chat frame's iframe rule must beat `.preview-side-frame`'s
+   flex-derived height (the frame is a child of the new box now, not a flex
+   item) and must LOSE to `.task-card-frame`'s scaled fit. Its skeleton bars are
+   explorer.css's `.skel-bar`, imported above. */
+@import "./styles/chat-frame.css";
+@import "./styles/context-menu.css";
+@import "./styles/dialogs.css";
+@import "./styles/notifications.css";
+@import "./styles/deploy.css";
+@import "./styles/fields.css";
+@import "./styles/buttons-modal.css";
+@import "./styles/shortcuts.css";
+@import "./styles/account.css";
+@import "./styles/preferences.css";
+/* Next to preferences.css: the Claude config app (/claude-config)
+   is a settings surface of the same family, and its rules layer over the
+   .btn / .field-control vocabulary imported above. */
+@import "./styles/claude-config.css";
+/* After claude-config.css because the AI Models page borrows its page chrome
+   (.cc-main / .cc-heading / .cc-pill) and only adds its own row layout. */
+@import "./styles/ai-models.css";
+/* After ai-models.css: the Playground tab lives on the same page and layers its
+   pg-* stage/sidebar rules over that page's chrome. */
+@import "./styles/ai-playground.css";
+@import "./styles/mounts.css";
+/* After mounts.css for the same reason mounts.css sits after preferences.css:
+   the scheduled-messages page is another settings-family surface that only adds
+   its own row layout over the .prefs-* / .field-* / .btn vocabulary above. */
+@import "./styles/schedule.css";
+/* Immediately after schedule.css, and the order is load-bearing: the Tasks
+   page's List/Board reuse that file's vocabulary (the status ring, the live
+   ping, the folder chip, the board's lanes and rails) and tasks.css adds only
+   what is new — so the two must be adjacent, and the additions must come
+   second. */
+@import "./styles/tasks.css";
+/* Third of the same family and last of it: the New task form layers over both
+   the .field-* vocabulary far above and schedule.css's own modal chrome, and
+   adds only the rows new to it — the two checkboxes, title and description,
+   the past-time note. */
+@import "./styles/new-task.css";
+/* Fourth of the family and last of it: the Cards view borrows the Board's card
+   surface (--tasks-card-bg, the 8px radius, the status ring) and adds only the
+   wall it lays them out on and the live pane inside one — so it must come after
+   both files whose vocabulary it is layering over. */
+@import "./styles/task-cards.css";
+/* LAST of the tasks family, and the order is the whole reason: the side peek's
+   halo has to beat the row/card/chip rules the four files above declare for the
+   same elements (`.tasks-row:hover`, `.tasks-row.is-selected`, the board card's
+   own fill), and it beats them by being later — not by being more specific and
+   not with `!important`. */
+@import "./styles/task-peek.css";
+/* After the whole tasks family: the app page (/apps/<slug>, D488) hosts the
+   Tasks page inside its Tasks tab and adds only the header and frame around it. */
+@import "./styles/app-page.css";
+/* After app-page.css: the App Doctor dialog is opened from that header (and
+   from the explorer's entry-page topbar) and layers only its checklist over
+   the shared modal chrome imported far above. */
+@import "./styles/app-doctor.css";
+@import "./styles/setup-modal.css";
+@import "./styles/templates.css";
+@import "./styles/home.css";
+/* After home.css: the canvases listing is another page-family surface that
+   layers its card grid over the .btn / .field-control vocabulary above. */
+@import "./styles/canvases.css";
+@import "./styles/reduced-motion.css";
+@import "./styles/apps.css";
+@import "./styles/scrollbars.css";

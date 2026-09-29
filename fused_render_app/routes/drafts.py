@@ -1,0 +1,377 @@
+"""Drafts over HTTP — the composer's unsent text, and the New task modal's
+half-filled form.
+
+The model is `fused_render/drafts.py`; this is the HTTP skin over it, and it is
+deliberately thin. Every rule about what a draft is — empty is a delete, an
+unknown field is dropped, a key is one of two shapes — lives in the store,
+because the badge join in `routers/tasks.py` and the schedule router's
+delete-on-create read the same store and must not be able to disagree with this
+file about any of them.
+
+**No D3 write guard**, unlike `POST /api/schedule`. That guard is on the two
+endpoints that start and stop an unattended agent turn; a draft executes
+nothing, and the POSTs in `routers/tasks.py` (read, archive, delete) are
+unguarded for the same reason — this is the same weight of change as marking a
+message read.
+
+**Every mutation announces itself** (`tasks_watch.notify`). A draft is a listed
+fact now: a chat draft puts a `✎ Draft` chip on its session's row, and a task
+draft IS a row. Both have to appear and vanish without a reload, and the
+long-poll in `/api/tasks/changes` is how every other change to a row already
+travels. The key announced is the key the listing files the row under — the
+session id for a chat draft, `draft:<id>` for a task draft — so the changes
+endpoint rebuilds exactly that row and nothing else.
+
+TWO keys when a task draft is bound to a session, because then two things
+change and only one of them is a row. A session-bound draft is never a row of
+its own (`routers/tasks.py::_draft_rows` skips it outright); the session's own
+row carries it instead, as `bound_draft` and the `✎ Draft` chip (`_bound_chips`,
+joined in `_row`). So the draft's key is announced so a page holding a stale
+row under it — from before the binding, or from an older build — is told to
+drop it (the changes endpoint reports it `gone`, having no row to rebuild), and
+the session's key is announced because that is the row whose chip just
+appeared, changed, or went. Nothing "swaps back" on a discard — the session's
+row was never touched, so there is nothing to reverse; it simply repaints
+without the chip.
+
+BOTH CHAT ROUTES ANNOUNCE THE SAME TWO KEYS when the session they name has a
+bound form, and for the same reason: the composer is a second door onto that one
+record ("one record, two doors", `drafts.chat_view`), so a write or a delete
+through this door is a write to the form the other door shows. Which form that
+is, is read before the write (`drafts.bound_chat_draft`) — emptying the box
+deletes it, and afterwards nothing can name it.
+
+`new:<file>` announces itself too, as of round 2. It used to be the one key
+that did not — no session meant no task row meant nothing for a listening page
+to repaint — but an unsent chat IS a row now, filed under the folder it was
+opened on (`routers/tasks.py::_new_chat_draft_row`), so it has to appear and
+vanish live like every other (design.md, "Round 2"; Akshil, 2026-09-11).
+
+**Moving that key onto a session is not a route here**, and the missing
+endpoint is deliberate. A chat's first send is what creates the session, and no
+page can prove which session id its own send made — every client-side version
+of that inference had a gap (Bugbot, PR #1118, 2026-09-12). What the send does
+say is which draft it is SPENDING: it tags its own run with the key
+(`draft_key`, written into the run's `meta.json` by `agent._start`), and the
+server moves the number when that run's session id appears, at listing time:
+`routers/tasks.py::_settle_new_chats` — but ONLY once the record itself is
+gone. A send writes nothing here at all (`ui/Composer.tsx`: "a send just
+sends"), so a `new:<file>` draft, which exists only because the reader asked
+for one, goes away the one ordinary way anything here does: a DELETE through
+this door.
+
+Routes take `{key:path}` rather than `{key}` for one reason: a `new:<file>` key
+carries a file path, separators and all, and a plain path parameter stops at
+the first one.
+"""
+from fused_render_app._web import APIRouter, Body, HTTPException, Request
+from fused_render_app._web import JSONResponse
+
+from fused_render_app import drafts, tasks_watch
+
+router = APIRouter()
+
+
+def _if_version(request: Request, body: dict | None = None):
+    """The version this write is conditional on, or None for "unconditional".
+
+    `If-Match` first, the body's `version` second, and nothing at all is the
+    third answer — which is the one that keeps every client written before this
+    round working, and the reason the header is not required (design-drafts-one
+    -record.md, §2: "Missing header = unconditional").
+
+    ETag spellings are accepted (`7`, `"7"`, `W/"7"`) because that is what an
+    `If-Match` looks like everywhere else on the web and a client library may
+    quote it for us. `*` is HTTP's "any current version", which is exactly
+    unconditional. Anything else unparseable is read as absent rather than
+    refused: a draft write must not be lost to a malformed header."""
+    raw = request.headers.get("if-match")
+    if raw is None and isinstance(body, dict):
+        raw = body.get("version")
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+    if not isinstance(raw, str):
+        return None
+    token = raw.strip()
+    if token.startswith("W/"):
+        token = token[2:].strip()
+    token = token.strip('"').strip()
+    if not token or token == "*":
+        return None
+    try:
+        value = int(token)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _conflict(exc: drafts.VersionConflict, **extra) -> JSONResponse:
+    """409 with the record the caller lost to.
+
+    A BODY AND NOT A BARE STATUS, because the client's next move needs it: the
+    editor that lost has to choose between adopting what is on disk and
+    re-sending its own words (design-drafts-one-record.md, §2), and both answers
+    are read out of this record — its text, its attachments, its form and the
+    version to write back against. `record` is null when the key was DELETED
+    elsewhere, which is the other thing that can have happened.
+
+    `JSONResponse` rather than `HTTPException`, because the shape is the point:
+    a raise would wrap all of this in FastAPI's `detail` envelope and every
+    reader would have to dig it back out."""
+    return JSONResponse(status_code=409,
+                        content=dict({"error": "version", "record": exc.record,
+                                      "version": exc.version}, **extra))
+
+
+def _sequence(body: dict | None) -> dict:
+    """The page id and counter this write carries, as keyword arguments for the
+    store — `{}` for a client that sends neither.
+
+    ONE PAGE'S WRITES TO ONE KEY ARE A SEQUENCE, and the store drops any that
+    arrive out of order (`drafts.SEQ`). A version cannot do that job: both
+    requests state the version they read, so the network decides which lands
+    second, and the second one wins. The client mints `client` once per document
+    and counts `seq` up per key (`platform/lib/drafts.ts`, `draftSyncer`).
+
+    Absent, and the write is judged on its version alone — which is exactly how
+    every client written before this round behaves."""
+    if not isinstance(body, dict):
+        return {}
+    client = body.get("client")
+    seq = body.get("seq")
+    if not isinstance(client, str) or not client.strip():
+        return {}
+    if isinstance(seq, bool) or not isinstance(seq, int):
+        return {}
+    return {"client": client, "seq": seq}
+
+
+def _dropped(exc: drafts.StaleWrite, record_key: str, **extra) -> dict:
+    """200 for a write the store dropped as a straggler (`drafts.StaleWrite`).
+
+    NOT AN ERROR, and deliberately not a 409: the client that sent this has
+    already sent something newer for the same key, so nothing was lost and
+    there is nothing to resolve. A status the client has to branch on would put
+    the ordering back in the caller, which is the whole thing this round takes
+    out of it. `dropped` is there for the tests and for anybody reading a
+    network log; the record rides along so the answer has the same shape a write
+    that landed does, version included."""
+    return dict({"ok": True, "dropped": True, record_key: exc.record}, **extra)
+
+
+def _chat_key(raw: str) -> str:
+    key = drafts.chat_key(raw)
+    if not key:
+        raise HTTPException(
+            status_code=400,
+            detail="chat draft key: expected a session id or `new:<file>`")
+    return key
+
+
+def _draft_id(raw: str) -> str:
+    ident = drafts.draft_id(raw)
+    if not ident:
+        raise HTTPException(
+            status_code=400,
+            detail="draft id: expected 8-64 characters of [A-Za-z0-9_-]")
+    return ident
+
+
+def _announce(*keys: str) -> None:
+    """Tell the Tasks page's long-poll that these rows moved. Best-effort by
+    construction — `notify` is an in-memory bump and cannot fail.
+
+    Nothing is silent any more: all three shapes this file handles — a session
+    id, `draft:<id>` and `new:<file>` — are keys the listing files a row under
+    (module docstring)."""
+    named = {key for key in keys if key}
+    if named:
+        tasks_watch.notify(named)
+
+
+@router.get("/api/drafts")
+def api_drafts():
+    """Everything, both kinds. The modal's "resume" affordance reads the task
+    half; the composer reads its own key out of the chat half rather than
+    paying for a request per conversation.
+
+    The chat half carries the BOUND FORMS too, each under the session it is a
+    message to and marked `bound_draft` (`drafts.chat_view`, "one record, two
+    doors"). It is the same read the tasks listing makes, so what the composer
+    seeds from and what the row's chip says can never be two different
+    answers.
+
+    EVERY RECORD CARRIES ITS `version`, which is what makes a conditional write
+    possible at all: a client seeds an editor from here and writes back with
+    `If-Match`, and a save that would land on top of another window's is refused
+    with a 409 instead (`_conflict`). A chat record also carries `form` — the
+    settings the Schedule hop's modal edited on this very record, `{}` on a
+    draft nobody has scheduled — since after this round the modal and the
+    composer are two doors onto one key (design-drafts-one-record.md, §1)."""
+    task, chat = drafts.list_all()  # one file, one read
+    return {"chat": chat, "task": task}
+
+
+@router.put("/api/drafts/chat/{key:path}")
+def api_draft_chat_put(key: str, request: Request, body: dict = Body(default={})):
+    """Upsert one chat draft. An empty one is a DELETE, and the answer says so
+    (`draft: null`) rather than making the caller infer it — the composer's
+    autosave fires on every pause including the one after the send cleared the
+    box, and it must be allowed to keep sending what it now holds.
+
+    …AND IT MAY NOT BE A CHAT RECORD AT ALL. When this session's words live in
+    a New task form bound to it, the store writes THERE and makes no chat
+    record (`drafts.put_chat`, "one record, two doors"): the composer and the
+    card's two fields edit one draft, split and joined by the same rule the hop
+    uses. The answer is that form read as a chat draft, `bound_draft` naming
+    it, so this route has one shape whichever record it wrote."""
+    chat = _chat_key(key)
+    want = _if_version(request, body)
+    # WHICH FORM'S ROW IS AT STAKE BESIDES THIS SESSION'S, read BEFORE the write
+    # for the reason the task PUT reads its binding first: a write that empties
+    # the box deletes the form, and afterwards there is nothing left to ask.
+    # The row under `draft:<id>` does not exist (a bound draft is never a row),
+    # so what the announcement does is tell a page holding a stale one to drop
+    # it — and tell the changes endpoint the session's chip moved.
+    bound = drafts.bound_chat_draft(chat)
+    try:
+        record = drafts.put_chat(chat, body.get("text"), body.get("attachments"),
+                                 form=body.get("form"), if_version=want,
+                                 **_sequence(body))
+    except drafts.VersionConflict as exc:
+        return _conflict(exc, key=chat)
+    except drafts.StaleWrite as exc:
+        # NOTHING CHANGED, SO NOTHING IS ANNOUNCED: this request is one the
+        # page that sent it has already superseded, and a row that repainted
+        # for it would repaint to exactly what it already shows.
+        return _dropped(exc, "draft", key=chat)
+    bound = bound or str((record or {}).get("bound_draft") or "")
+    _announce(chat, drafts.task_key(bound) if bound else "")
+    return {"ok": True, "key": chat, "draft": record}
+
+
+@router.delete("/api/drafts/chat/{key:path}")
+def api_draft_chat_delete(key: str, request: Request, body: dict = Body(default={})):
+    """Drop one chat draft — on send, or on an explicit clear. Answers whether
+    there was one, and is not a 404 when there was not: the composer clears
+    after a send whether or not the debounce ever got round to a first save,
+    and a red line in the console over that would be noise about nothing.
+
+    THE BOUND FORM GOES WITH IT. This is the composer's send, and what it is
+    saying is that the words under this key have been spent — so when those
+    words were living in a task draft bound to the session ("one record, two
+    doors"), that draft is what the send spent and leaving it behind would put
+    the sentence back on the row as unsent the moment the listing repainted.
+    The whole form goes — and it is THIS door that takes it. Emptying the
+    composer no longer does (`drafts._put_bound`, 2026-09-15): a blank box
+    clears the form's WORDS and leaves the folder, time, repeat rule, model and
+    tray somebody chose standing. A send is the gesture that says those words
+    are spent, so the record goes with them (Akshil, 2026-09-12).
+
+    Only from HERE, and never from `drafts.delete_chat` itself, which archive no
+    longer calls at all and which delete and erase pair with
+    `drafts.delete_bound` for the other half (`routers/tasks.py`)."""
+    chat = _chat_key(key)
+    bound = drafts.bound_chat_draft(chat)
+    try:
+        removed = drafts.delete_chat(chat, if_version=_if_version(request, body),
+                                     **_sequence(body))
+    except drafts.VersionConflict as exc:
+        return _conflict(exc, key=chat)
+    except drafts.StaleWrite as exc:
+        return _dropped(exc, "draft", key=chat, removed=False)
+    if bound:
+        removed = drafts.delete_task(bound) or removed
+    _announce(chat, drafts.task_key(bound) if bound else "")
+    return {"ok": True, "key": chat, "removed": removed}
+
+
+@router.put("/api/drafts/task/{draft_id:path}")
+def api_draft_task_put(draft_id: str, request: Request, body: dict = Body(default={})):
+    """Upsert one task draft from the modal's form fields.
+
+    The body IS the form — `title`, `description`, `target`, `when`, `repeat`,
+    `custom_rule`, `model`, `effort`, `permission`, `attachments`,
+    `new_task_each_run`, `session_id` — and anything else in it is dropped by
+    the store rather than refused here, so the modal may grow a field without
+    this endpoint learning about it. An all-empty form is a delete, the same
+    bargain the chat half makes.
+
+    `from_chat_key` IS NO LONGER ONE OF THEM (design-drafts-one-record.md, §1).
+    It named the chat draft a hop had just copied out of, so that this write
+    could delete the copy it left behind; there is no copy any more, because the
+    hop's modal edits the chat record itself (`PUT /api/drafts/chat/<key>` with
+    a `form`). A client that still sends the field is not refused — it is
+    dropped, like every other key this store does not know."""
+    ident = _draft_id(draft_id)
+    want = _if_version(request, body)
+    # WHICH SESSION'S CHIP IS AT STAKE BESIDES THIS DRAFT'S KEY, read BEFORE the
+    # write.
+    #
+    # A task draft that names a session is never a row of its own — the
+    # session's own row carries it instead, as `bound_draft` and the `✎ Draft`
+    # chip (`routers/tasks.py::_bound_chips`, joined in `_row`) — so both keys
+    # have to repaint on every write: the session's chip appears, changes or
+    # goes, and the draft's own key is announced so a page holding a stale row
+    # under it drops it. On the write that turns out to be a DELETE the chip
+    # simply goes, because the row underneath it was never touched. The delete
+    # is why this is read first — emptying a form takes the binding away with
+    # it, and afterwards there is nothing left to ask. One small json read on a
+    # debounced autosave, against a chip that would otherwise be stuck showing
+    # stale words until the 20-second listing.
+    bound = str((drafts.get_task(ident) or {}).get("session_id") or "")
+    try:
+        record, canonical = drafts.put_task(ident, body, if_version=want,
+                                            **_sequence(body))
+    except drafts.VersionConflict as exc:
+        return _conflict(exc, draft_id=ident)
+    except drafts.StaleWrite as exc:
+        return _dropped(exc, "draft", draft_id=ident)
+    bound = bound or str((record or {}).get("session_id") or "")
+    # A DRAFT MOVES, IT NEVER DUPLICATES — and after this round it does not even
+    # move (design-drafts-one-record.md, §1). The composer → New task hop used to
+    # mint a task draft out of the chat box and name its origin here
+    # (`from_chat_key`) so this same request could delete the copy it left
+    # behind; two records existed for one sentence, if only for an instant, and
+    # every duplicate and resurrection this round is about started there. The
+    # hop now opens the modal ON the chat record — one key, one record, edited
+    # through `PUT /api/drafts/chat/<key>` with a `form` — so there is no second
+    # copy to delete and nothing for this route to do about it.
+    #
+    # ...and THE ID THIS WRITE ACTUALLY LANDED ON, when it turned out to be
+    # about a session another draft already held and the store folded it into
+    # that one (`drafts.put_task`, Bugbot PR #1126: a merge, not an eviction).
+    # Both keys are announced — the requested id, so a page holding a row under
+    # it drops it, and the canonical one, so the row that grew these words
+    # repaints — and the canonical id is what goes back in the body, because
+    # every later call the card makes (the next autosave, Discard, Schedule)
+    # names the draft by id and would otherwise aim at a record that is not
+    # there.
+    _announce(drafts.task_key(ident), bound,
+              drafts.task_key(canonical) if canonical and canonical != ident else "")
+    return {"ok": True, "draft_id": canonical or ident, "draft": record}
+
+
+@router.delete("/api/drafts/task/{draft_id:path}")
+def api_draft_task_delete(draft_id: str, request: Request,
+                          body: dict = Body(default={})):
+    """Discard one task draft — the modal's Discard button, and the tidy-up
+    after a draft has been scheduled for real (which `POST /api/schedule` does
+    for itself, given a `draft_id`)."""
+    ident = _draft_id(draft_id)
+    # …and the session whose chip this draft was wearing, read before the
+    # delete for the same reason the PUT reads it: afterwards nothing can name
+    # it, and that row has to repaint — chip gone — in the same round the
+    # draft's own key goes out on (Akshil, 2026-09-12).
+    bound = str((drafts.get_task(ident) or {}).get("session_id") or "")
+    try:
+        removed = drafts.delete_task(ident, if_version=_if_version(request, body),
+                                     **_sequence(body))
+    except drafts.VersionConflict as exc:
+        return _conflict(exc, draft_id=ident)
+    except drafts.StaleWrite as exc:
+        return _dropped(exc, "draft", draft_id=ident, removed=False)
+    _announce(drafts.task_key(ident), bound)
+    return {"ok": True, "draft_id": ident, "removed": removed}

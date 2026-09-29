@@ -1,0 +1,5646 @@
+// "New task" — the /tasks page's own way to create a scheduled message,
+// alongside the chat composer's Send now pill (which stays the convenient path
+// when a chat is already open on the right folder). This form serves the
+// calendar-first direction, so it has to ask for the folder too.
+//
+// The layout is Google Calendar's new-event card, copied deliberately (Akshil,
+// 2026-08-14 — the first cut's labelled-field stack read as "a bit too much"):
+// a big borderless title, one when-row, one where-row, and everything else
+// behind a collapsed More options. The trick that keeps it that small is also
+// Google's: the REPEAT choices are derived from the picked date-time ("Weekly
+// on Monday" because the date IS a Monday), so recurrence needs no fields of
+// its own — only "Custom (cron)…" reveals one extra input.
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { shortTaskId } from "@platform/lib/task-id";
+import {
+  readClaudeDefaults, setClaudeDefaults, subscribeClaudeDefaults,
+} from "@platform/lib/claude-defaults";
+import { Modal } from "@platform/ui/modal/Modal";
+import {
+  cancelScheduledMessage,
+  getClaudeSessionFolders,
+  getConfig,
+  getTasks,
+  listDir,
+  rawUrl,
+  scheduleMessage,
+  statPath,
+  uploadTaskShot,
+} from "@platform/lib/api";
+import type { Config, RecurrenceRule, ScheduledMessage, StatResult,
+  TaskAttachment } from "@platform/lib/api";
+// THE APP'S OWN TYPEAHEAD KEYS, not a second reading of the same four presses.
+// `completionKeyAction` is the pure key→meaning map the Explorer's address bar
+// runs on (apps/explorer/listing/completion-keys.ts), and `moveHighlight` is its
+// wraparound. The shell may import an app (scripts/check-boundaries.mjs), and
+// these two are DOM-free functions — so the path field below answers ArrowDown,
+// ArrowUp and Enter with exactly the rules the reader already learnt one field
+// over, rather than a fifth hand-rolled combobox.
+import { completionKeyAction, moveHighlight }
+  from "@apps/explorer/listing/completion-keys";
+// …AND TWO MORE OF THE EXPLORER'S ADDRESS BAR, imported rather than mirrored.
+// Both are pure functions — no DOM, no React, no app state — so the shell may
+// hold them (scripts/check-boundaries.mjs), and a second copy of "does this text
+// name a place" is exactly the divergence one shared rule prevents.
+//
+//   `isPathShapedQuery` — does the text NAME A PLACE at all: true for anything
+//     that escapes its base (leading `/`, `~`, `~/`, a drive, or a `..`
+//     segment) and names no glob. A bare word is never an address, and the path
+//     check below has nothing to say about one.
+import { isPathShapedQuery } from "@apps/explorer/listing/path-shaped-query";
+//   `listingAddress`   — the Explorer's own `~`/drive/relative expander: the
+//     absolute path a typed address MEANS. The field goes on showing what the
+//     reader typed; everything that touches the disk asks this first.
+import { listingAddress } from "@apps/explorer/listing/listing-address";
+import { THUMB_SEAL } from "@platform/lib/frame-focus";
+import { thumbUrl } from "@platform/lib/thumb-frame";
+import { ErrorBanner } from "@platform/ui/ErrorBanner";
+import { listedModelIn, normalizeModel } from "@platform/lib/model-vocab";
+import { navigateUrl } from "@platform/lib/router";
+import {
+  chatKeySession,
+  draftSyncer,
+  draftVersion,
+  forgetDraftVersion,
+  joinDraft,
+  newChatFile,
+  NEW_CHAT_PREFIX,
+  newTaskDraftId,
+  splitDraft,
+  taskDraftKey,
+  useAutosave,
+  type DraftConflictRule,
+  type TaskDraftForm,
+} from "@platform/lib/drafts";
+
+// THE PROSE CONVENTION, RE-EXPORTED FROM WHERE IT USED TO LIVE. It moved to
+// `platform/lib/drafts` so the chat composer can use the same cut (an app may
+// not import the shell); every reader who learnt it here still finds it here.
+export { joinDraft, splitDraft } from "@platform/lib/drafts";
+import { notify } from "@platform/lib/notifications";
+import {
+  TASK_EFFORTS,
+  TASK_MODELS,
+  chatPaneUrl,
+  describeRepeats,
+  describeRule,
+  explorerUrl,
+  repeatChoicesFor,
+  taskRunLabel,
+  taskRunOptions,
+} from "./schedule-lib";
+import { ICON_CLOCK, ICON_FOLDER, ICON_PLUS } from "./ScheduleCalendar";
+// `~/…` for a path under home — the one way this app shortens a folder, shared
+// with the Tasks page rather than written a second time here.
+// …and `projectMatches`, which is the Tasks toolbar's Project filter's OWN
+// search: name-only, case-folded substring (PR #1229). The folder field
+// searches the same folders with the same rule, because a reader who has
+// learnt one of the two controls has learnt both — a field that found
+// `~/Desktop` for "desktop" while the filter beside it did not would be two
+// searches wearing one word.
+import { projectMatches, tildePath } from "./tasks-lib";
+// THE PATH HALF OF A ROW: as much of it as fits, cut out of the MIDDLE, and the
+// whole of it on hover. See PathTip.tsx for why neither `text-overflow` (it
+// only ever cuts the tail, and the tail is the half that names the folder) nor
+// `title` (held back a second, drawn by the OS, unstylable) could do it.
+import { FitPath, usePathTip } from "./PathTip";
+import { onDraftChange } from "./tasksPulse";
+// This card's own rules live in styles/new-task.css, imported from the
+// shell.css barrel like every other section — no shell component imports its
+// own CSS (tests/test_theme.py pins the barrel against the styles/ directory).
+
+
+// Where a new task points before the user says otherwise: the Fused
+// workspace (Akshil, 2026-08-14 — an empty path field was the confusing part
+// of the form). Taken from the server's RESOLVED workspace rather than
+// composed from home, so a FUSED_RENDER_DIR user gets their own folder and
+// not one that may not exist (whose only symptom is the server's 400 naming
+// the path). The picker makes changing it a click.
+export const defaultTargetOf = (c: Pick<Config, "home" | "fused_dir">) =>
+  normPath(c.fused_dir || c.home);
+
+// ---- Recent paths --------------------------------------------------------
+// The path field's dropdown offers the last folders the user actually used,
+// newest first, five shown. It draws on two sources — the app-wide one the home
+// page reads (see the section below) and this form's own memory of folders
+// picked in the browser or saved on a task, which is what the rest of THIS
+// section is. That second half lives in localStorage so "the folder I always
+// schedule against" survives reloads.
+// try/catch throughout: storage can be denied (private mode), and a corrupt
+// value must read as "no recents", never crash the modal (Bugbot, PR #538
+// pattern).
+const RECENTS_KEY = "fused-render:recent-paths";
+const RECENTS_SHOWN = 5;
+
+/** The `projects` prop's default, hoisted so it is the SAME array every render
+ *  — a fresh `[]` in the signature would rebuild the rows memo on every
+ *  keystroke of a card that was handed no listing. */
+const NO_PROJECTS: string[] = [];
+
+/** One row the folder field can offer: a path to take, and how to say it.
+ *
+ *  Every row this list builds is a FOLDER — a remembered target, a project, or
+ *  one about to be created — so there is no `is_dir` to branch on any more.
+ *  (There was, and both arms drew the same folder glyph.) */
+export interface FolderRow {
+  /** What goes IN THE FIELD when this row is taken — the whole path. */
+  path: string;
+  /** The basename, which is all a row PRINTS — the Explorer shows the name and
+   *  never the address, because the address is already in the field. */
+  name: string;
+  /** The address, muted, at the end of the row: where a remembered folder
+   *  SITS (its parent — the name beside it is the folder itself), or, for a
+   *  project, the whole path, because a search answers with places the reader
+   *  has not typed their way to. "" when there is nothing to add. */
+  where: string;
+}
+
+/** `dirname`, for the muted half of a row. */
+function parentOf(p: string): string {
+  const cut = p.replace(/\/+$/, "").lastIndexOf("/");
+  return cut > 0 ? p.slice(0, cut) : cut === 0 ? "/" : "";
+}
+
+/** `basename`, on a path that may end in a separator. */
+function leafOf(p: string): string {
+  const trimmed = p.replace(/\/+$/, "");
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1) || trimmed;
+}
+
+
+/**
+ * WHAT THE FOLDER FIELD'S DROP OFFERS, and it is one of two lists.
+ *
+ * THE FIELD IS AN ADDRESS BEING EDITED, nearly always: the card opens
+ * pre-filled with a path, so a keystroke in it is an edit of something the
+ * reader can already see. Nothing narrows then — the drop shows the handful of
+ * folders this form has been pointed at before, newest first, and typing does
+ * not touch them. That is the whole of what #1239 restored, and it is still the
+ * default.
+ *
+ * CLEAR IT AND TYPE A WORD AND IT IS A SEARCH (Akshil, 2026-09-19: "when I
+ * clear the path and search, it should search from projects — the same project
+ * options I have in the filter beside the New task button"). The folders
+ * searched are the Tasks page's OWN projects, handed down as a prop, matched
+ * with the toolbar filter's own `projectMatches` — name only. Not the file
+ * index: this list is small, already in memory, and is the vocabulary the page
+ * uses for "project" everywhere else. No cap, because the panel scrolls.
+ *
+ * WHICH OF THE TWO, in three tests, all about the TEXT rather than about the
+ * history:
+ *   · the drop has to be OPEN — a closed list answers nothing;
+ *   · the text must be something SOMEBODY TYPED. Empty, or still the value the
+ *     card opened on, means nobody has said anything yet, and a field answering
+ *     a search for its own default would be the card searching for itself. It
+ *     is the text that decides, not a "has been edited" flag, so leaving the
+ *     field and coming back answers the same way it did before;
+ *   · and it must NOT NAME A PLACE (`isPathShapedQuery`): a leading `/`, `~`, a
+ *     drive letter or a `..` segment is an address, and an address is the case
+ *     above — recents, unchanged.
+ *
+ * Pure, and exported, because that decision is the whole feature and it is
+ * worth asserting without a DOM (new-task-form.test.ts).
+ */
+export function folderFieldRows({
+  target,
+  defaultTarget,
+  open,
+  recents,
+  projects,
+  home,
+}: {
+  /** What is in the field, as typed. */
+  target: string;
+  /** The text the card OPENED on — the default nobody chose. */
+  defaultTarget: string;
+  /** Is the drop open at all. */
+  open: boolean;
+  /** The folders this form remembers, newest first. */
+  recents: string[];
+  /** Every folder the Tasks page knows, in its own order. */
+  projects: string[];
+  /** Home, for the address test — "" until `/api/config` answers. */
+  home: string;
+}): { rows: FolderRow[]; searching: boolean } {
+  const q = target.trim();
+  // `~` IS AN ADDRESS BEFORE HOME IS KNOWN. `isPathShapedQuery` can only call a
+  // tilde path an address once it has `home` to resolve it against, and `home`
+  // is "" until `/api/config` answers (for good, if it never does). In that
+  // window `~/Desktop/fu` would read as a search and swap the recents and the
+  // create-folder row for "No project matches" (Bugbot, PR #1239). A leading
+  // tilde names a place whatever home turns out to be, so it is one here too.
+  const searching =
+    open
+    && q !== ""
+    && q !== defaultTarget.trim()
+    && !q.startsWith("~")
+    && !isPathShapedQuery(q, home, home || undefined);
+  if (!searching) {
+    return {
+      searching: false,
+      rows: recents
+        .slice(0, RECENTS_SHOWN)
+        .map((r) => ({ path: r, name: leafOf(r), where: parentOf(r) })),
+    };
+  }
+  return {
+    searching: true,
+    // The projects' OWN order — the one the filter menu prints, which is
+    // alphabetical by the name it shows (tasks-lib `projectOptions`). A second
+    // ranking here would put the same folders in two orders in two controls.
+    //
+    // `where` is the WHOLE path, not the parent: a searched folder is one the
+    // reader has not typed their way to, so the row says where it is in full
+    // — `[project-name]   ~/Desktop/…/project-name` — and `FitPath` decides how
+    // much of that fits.
+    rows: projects
+      .filter((project) => projectMatches(project, q))
+      .map((project) => ({
+        path: project,
+        name: leafOf(project),
+        where: project,
+      })),
+  };
+}
+
+
+function readRecents(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(RECENTS_KEY) ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((p): p is string => typeof p === "string" && p !== "")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecent(path: string) {
+  const p = path.trim();
+  if (!p) return;
+  try {
+    const next = [p, ...readRecents().filter((r) => r !== p)].slice(0, 8);
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+  } catch {
+    // Storage denied — recents just don't persist.
+  }
+}
+
+// ---- The APP's recents, which are the ones a person means ------------------
+// "Recents" was two different lists until 2026-08-18. The home page shows the
+// folders this machine has Claude sessions in, newest session first
+// (`/api/claude-sessions`, its "Claude Sessions" strip); this form showed a
+// localStorage array only it ever wrote. Both were called recents, and only one
+// of them matched what a person means: someone who has spent the morning in a
+// repo opens New task thinking of that repo, and the form had never heard of it
+// (design-principles §1 — one noun per concept, §4 — recognition over recall).
+//
+// So the home page's list leads this one, from the same endpoint and in the
+// same order, and it is the right shape as well as the right source: those
+// entries are FOLDERS — each session's own `cwd`, canonicalised and filtered to
+// directories that still exist — which is exactly what a task targets.
+//
+// It briefly led with `/api/recents` instead, the explorer's recently-OPENED
+// FILES, whose folders had to be derived by taking each path's parent. That was
+// the wrong list twice over: it is about files rather than places to work, and
+// it is short — three entries on a machine that had dozens of sessions, which
+// is the complaint that sent this back (Akshil, 2026-08-18).
+const SESSION_FOLDERS_SHOWN = 5;
+
+// ---- Browse: a slide-in explorer panel ---------------------------------------
+// Browsing happens BESIDE the card, not inside it: the in-modal picker was
+// "too small to see anything" (Akshil, 2026-08-16), so Browse slides an
+// explorer-shaped panel in on the modal's right — the card shifts left to
+// make room (see .schedule-explorer / the :has() rule in schedule.css) — with
+// the room to show folders AND files. A folder click descends; a file click
+// IS the pick (a task can target a file); "Use this folder" picks where you
+// stand.
+
+// Forward slashes throughout, including for Windows drive paths — the same
+// normalization every other shell caller applies to `/api/config` values,
+// whose `home` is a raw expanduser and arrives with backslashes there. The
+// server accepts either separator; the PICKER's own string surgery (up(),
+// joins) only understands one.
+const normPath = (p: string) => p.replace(/\\/g, "/");
+
+// A path split into the folder it lives in and its last segment. Drive roots
+// keep their slash — bare "C:" reads as cwd-relative elsewhere in the shell,
+// not as the root (the same trap the picker's climb fixed in PR #548).
+export function splitTargetPath(path: string): { parent: string; base: string } {
+  const norm = normPath(path).trim().replace(/\/+$/, "");
+  const cut = norm.lastIndexOf("/");
+  const parent = cut > 0 ? norm.slice(0, cut) : "/";
+  return {
+    parent: /^[A-Za-z]:$/.test(parent) ? parent + "/" : parent,
+    base: norm.slice(cut + 1),
+  };
+}
+
+// ---- What the typed path IS ---------------------------------------------------
+// Three answers, not two (Akshil, 2026-08-20): a path can also be a folder that
+// does not exist YET. Standing in `.../fused/` and typing `ABC1` is how a person
+// says "run this in a new folder called ABC1", and the form used to answer that
+// with a red line refusing to save.
+//
+// ONE new segment, and only one. Its parent has to be somewhere the user can
+// point at, because "make the folder I named" and "build me a tree I typed" are
+// different asks and only the first is one a typo cannot cause. `/a/new1/new2`
+// with no `new1` is the second, and it is refused with the reason.
+//
+// Pure so the decision can be asserted without a DOM (new-task-form.test.ts);
+// the effect below only feeds it what the two listDir calls came back with.
+export type TargetVerdict =
+  | { kind: "ok" }
+  // `name` is the segment that will be created; `parent` is where.
+  | { kind: "new-folder"; name: string; parent: string }
+  | { kind: "bad"; text: string };
+
+export const PATH_MISSING = "This folder or file doesn't exist";
+
+export function twoLevelsMissing(parent: string): string {
+  return `Only one new folder can be created — ${parent} doesn't exist either`;
+}
+
+// `parentNames` is the parent folder's entry names, or null when the PARENT
+// itself could not be listed — which is the two-missing-levels case.
+export function targetVerdict(
+  path: string,
+  parentNames: string[] | null,
+): TargetVerdict {
+  const { parent, base } = splitTargetPath(path);
+  // "." and ".." name a folder that already exists by definition, so reaching
+  // here with one of them means the path was junk rather than a new name.
+  if (!base || base === "." || base === "..") {
+    return { kind: "bad", text: PATH_MISSING };
+  }
+  if (parentNames === null) return { kind: "bad", text: twoLevelsMissing(parent) };
+  // The parent lists and already holds this name: a FILE target, which is legal
+  // — a task can run against a file. (A folder would never have got this far;
+  // listing it directly is what the caller tries first.)
+  if (parentNames.includes(base)) return { kind: "ok" };
+  return { kind: "new-folder", name: base, parent };
+}
+
+
+interface Crumb {
+  name: string;
+  path: string;
+}
+
+// The path as clickable crumbs: every ancestor is one tap away, which is what
+// the old single "up" chevron made people hunt for (Akshil, 2026-08-15 — "not
+// intuitive"). Root renders as "/" (or "C:/"), each segment jumps there.
+function crumbsOf(path: string): Crumb[] {
+  const trimmed = path.replace(/\/+$/, "");
+  const drive = trimmed.match(/^[A-Za-z]:/)?.[0];
+  const rootPath = drive ? drive + "/" : "/";
+  const rest = (drive ? trimmed.slice(drive.length) : trimmed)
+    .split("/")
+    .filter(Boolean);
+  const out = [{ name: drive ?? "/", path: rootPath }];
+  let acc = drive ?? "";
+  for (const seg of rest) {
+    acc += "/" + seg;
+    out.push({ name: seg, path: acc });
+  }
+  return out;
+}
+
+// A real path is deeper than a 460px panel is wide, and the trail used to wrap
+// onto three lines — which moved the filter, the listing and the foot down with
+// it, so the panel's whole geometry hung off how long the current path happened
+// to be (audit 2026-08-16). Past four segments the middle collapses to one "…",
+// which is NOT a control: there is no single folder it could stand for.
+const CRUMBS_SHOWN = 4;
+
+function collapseCrumbs(crumbs: Crumb[]): (Crumb | null)[] {
+  if (crumbs.length <= CRUMBS_SHOWN) return crumbs;
+  return [crumbs[0], null, crumbs[crumbs.length - 2], crumbs[crumbs.length - 1]];
+}
+
+const ICON_FILE = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6" />
+  </svg>
+);
+
+// There was a lucide "type" glyph here — the serif T that led the Title row
+// while Title was one of the form's quiet icon rows. Title is a prominent
+// peer of the ask now and neither of the two takes an icon, so the glyph went
+// with the row (see the form's markup for why).
+
+// lucide "check", at tick scale.
+// lucide "x", for the attachment chips' remove button. An SVG rather than the
+// "✕" character because a glyph sits on a font baseline — it lands a pixel or
+// two below and right of a 14px circle's centre in every system face, and no
+// line-height fixes what the font's own metrics decide (Akshil, 2026-08-28:
+// "the cross is not properly aligned … it should be perfect"). Two strokes on
+// a 24-grid centre exactly, in any box.
+const ICON_X = (
+  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </svg>
+);
+
+const ICON_CHECK = (
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+// lucide "chevron-right", at the size the task list's disclosure uses — the
+// same mark, so the two read as one pattern. Points right when closed and is
+// rotated a quarter turn by CSS when the block opens.
+const ICON_CHEVRON = (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="9 18 15 12 9 6" />
+  </svg>
+);
+
+// lucide "chevron-down", at the size the app's native selects draw their own
+// (fields.css) — the mark that says "this opens a list", on every control that
+// does.
+const ICON_CHEVRON_DOWN = (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="6 9 12 15 18 9" />
+  </svg>
+);
+
+// lucide "trash-2", at the footer buttons' glyph scale. Carries the destructive
+// reading before the label is read, and stays through both press states so the
+// button does not change shape under the cursor.
+const ICON_TRASH = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    <line x1="10" y1="11" x2="10" y2="17" />
+    <line x1="14" y1="11" x2="14" y2="17" />
+  </svg>
+);
+
+// A quiet checkbox: a real <input> (focusable, space-toggled, announced as a
+// checkbox) wrapped in the <label> that names it, with the box itself drawn in
+// CSS so it resolves in both themes. Used twice — Repeat, and the flag behind
+// it.
+function CheckField({
+  checked,
+  onChange,
+  label,
+  className,
+  describedBy,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+  className?: string;
+  // A hint printed under the box that says what ticking it MEANS. Attached to
+  // the real input, not merely placed near it, so a screen reader reads the
+  // consequence with the control rather than as a stray line below it (the
+  // discipline pastHintId already follows).
+  describedBy?: string;
+}) {
+  return (
+    <label className={"new-task-check" + (className ? " " + className : "")}>
+      <input
+        type="checkbox"
+        className="new-task-check-input"
+        checked={checked}
+        aria-describedby={describedBy}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="new-task-check-box" aria-hidden="true">{ICON_CHECK}</span>
+      <span className="new-task-check-text">{label}</span>
+    </label>
+  );
+}
+
+// Both side panels (Browse, Custom recurrence) borrow the dialog's own rect
+// so they read as siblings of the card in geometry — see the comment inside.
+function useDialogBox() {
+  const [box, setBox] = useState<{ top: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const dialog = document.querySelector<HTMLElement>(".modal-dialog");
+      if (!dialog) return;
+      const r = dialog.getBoundingClientRect();
+      setBox({ top: r.top, height: Math.max(r.height, 480) });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  return box;
+}
+
+function ExplorerPanel({
+  start,
+  onPick,
+  onClose,
+  closing,
+  startNaming,
+  onName,
+}: {
+  start: string;
+  onPick: (path: string) => void;
+  onClose: () => void;
+  // Fired alongside onPick when the picked path is a folder the user just
+  // NAMED here rather than one they clicked — the caller answers it by showing
+  // that the folder is about to be created.
+  onName?: () => void;
+  // Mounted-but-leaving: paints the exit animation while the parent waits to
+  // unmount, so the way out mirrors the way in.
+  closing?: boolean;
+  // Opened BY "+ New folder" rather than by Browse: the panel comes up with the
+  // naming row already typing, so the button below Browse and the button inside
+  // the panel are one flow and not two (Akshil, 2026-08-20).
+  startNaming?: boolean;
+}) {
+  // A file target starts the panel in its PARENT — listing a file's "children"
+  // is a guaranteed error banner.
+  const [path, setPath] = useState(() => {
+    const p = normPath(start).replace(/\/+$/, "");
+    return p || "/";
+  });
+  const [rows, setRows] = useState<{ name: string; dir: boolean }[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Type-to-narrow, cleared on every navigation — a filter that survives into
+  // the next folder reads as "this folder is empty".
+  const [filter, setFilter] = useState("");
+  // One free climb: the client cannot tell a file path from a folder path
+  // until listDir refuses it, so the FIRST refusal walks to the parent
+  // instead of showing the error banner — Browse on an already-picked file
+  // must open where that file lives (Bugbot, PR #548). One only, so a
+  // genuinely missing tree still errors instead of climbing to "/".
+  const climbed = useRef(false);
+
+  useEffect(() => {
+    let stale = false;
+    // The OLD listing stays up, dimmed, while the next one loads — blanking
+    // it made the panel pump on every click (QA 2026-08-14).
+    setLoading(true);
+    setError(null);
+    listDir(path).then(
+      (r) => {
+        if (stale) return;
+        setRows(
+          r.entries
+            .filter((e) => !e.name.startsWith("."))
+            .map((e) => ({ name: e.name, dir: e.is_dir }))
+            // Folders first, then files, each alphabetical — the explorer's
+            // own ordering, so the panel reads like the app it stands in for.
+            .sort((a, b) =>
+              a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name),
+            ),
+        );
+        setLoading(false);
+      },
+      (e: Error) => {
+        if (stale) return;
+        const cut = path.replace(/\/+$/, "").lastIndexOf("/");
+        if (!climbed.current && cut >= 0) {
+          climbed.current = true;
+          const parent = path.replace(/\/+$/, "").slice(0, cut);
+          // A drive root keeps its slash — bare "C:" reads as cwd-relative
+          // elsewhere in the shell, not as the root (Bugbot, PR #548; the
+          // same trap the old picker's up() fixed in PR #541).
+          setPath(/^[A-Za-z]:$/.test(parent) ? parent + "/" : parent || "/");
+          return;
+        }
+        setError(e.message);
+        setLoading(false);
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [path]);
+
+  // The panel reads as a sibling of the card, so it has to BE one in geometry:
+  // its top and height come from the dialog's own rect, not from the viewport.
+  // Centred on the viewport (the first cut) the two lined up only when their
+  // heights happened to match — a 520px card beside a 600px panel shared no
+  // edge at all (audit 2026-08-16). The floor keeps a short card (an Edit with
+  // nothing expanded) from shrinking the listing back to the "too small to see
+  // anything" it was rescued from. Modal exposes no ref for its dialog, hence
+  // the querySelector; recomputed while open because a resize moves both.
+  const box = useDialogBox();
+
+  // "New folder" here NAMES one; it does not make one. The folder is created by
+  // the save, exactly as it is for a name typed straight into the path field —
+  // so backing out of the card leaves nothing behind on disk, and the picker
+  // needs no write endpoint to offer the affordance.
+  const [naming, setNaming] = useState(!!startNaming);
+  const [newName, setNewName] = useState("");
+  const nameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (naming) nameRef.current?.focus();
+  }, [naming]);
+  // FOCUS STAYS IN THE PANEL when the listing changes. A folder row is a
+  // button that unmounts the moment it is pressed (the listing re-renders for
+  // the new folder), so focus fell out of the panel and the modal chassis
+  // parked it on the first thing it could — its own ✕ — where the reader's
+  // next Enter closed the whole form (Akshil, 2026-09-24: "I pressed enter
+  // while I was selected a folder and suddenly it closed"). The filter box is
+  // the one control that survives every navigation, and typing is the next
+  // thing a reader does after opening a folder anyway. The naming row keeps
+  // its own focus (above) while it is up.
+  const filterRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!naming) filterRef.current?.focus();
+  }, [path, naming]);
+
+  const go = (p: string) => {
+    setPath(p);
+    setFilter("");
+    // A half-typed name belongs to the folder it was being typed in.
+    setNaming(false);
+    setNewName("");
+  };
+
+  const typedName = newName.trim();
+  // Checked against the listing already on screen — the one place that knows
+  // what is in this folder. A name that is taken is not an error to shout
+  // about, it is a folder the user can just click.
+  const nameTaken = rows?.some((r) => r.name === typedName) ?? false;
+  const nameBad = typedName.includes("/") || typedName === "." || typedName === "..";
+  const canCreate = typedName !== "" && !nameTaken && !nameBad;
+  const confirmName = () => {
+    if (!canCreate) return;
+    onPick(path.replace(/\/+$/, "") + "/" + typedName);
+    onName?.();
+    onClose();
+  };
+  const crumbs = collapseCrumbs(crumbsOf(path));
+  const shown = rows?.filter((r) =>
+    r.name.toLowerCase().includes(filter.trim().toLowerCase()),
+  );
+
+  // Escape dismisses the PANEL, not the modal behind it — captured before the
+  // modal chassis' own document-level Escape listener can see it. Which is also
+  // why the naming row cannot handle its own Escape: this listener sees the key
+  // first, so it has to know there is an inner thing to back out of and undo
+  // that instead. Read through a ref because the listener is bound once.
+  const namingOpen = useRef(false);
+  namingOpen.current = naming;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        if (namingOpen.current) {
+          setNaming(false);
+          setNewName("");
+          return;
+        }
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className={"schedule-explorer" + (closing ? " is-closing" : "")} role="dialog" aria-label="Choose a folder or file"
+         style={box ? { top: box.top, height: box.height } : undefined}>
+      <div className="schedule-explorer-head">
+        <span className="schedule-explorer-title">Choose a folder or file</span>
+      </div>
+      <div className="schedule-picker-crumbs" aria-label="Current folder">
+        {crumbs.map((c, i) =>
+          c === null ? (
+            <span key="gap" className="schedule-picker-crumb-ellipsis">…</span>
+          ) : (
+            <span key={c.path} className="schedule-picker-crumb-seg">
+              {/* The root crumb IS "/", so a separator in front of the first
+                  real segment prints it twice — "//Users" (audit 2026-08-16).
+                  A drive root ("C:") still takes one. */}
+              {i > 0 && !(i === 1 && crumbs[0]?.name === "/") && (
+                <span className="schedule-picker-crumb-sep">/</span>
+              )}
+              <button type="button" className="schedule-picker-crumb"
+                      disabled={i === crumbs.length - 1}
+                      title={c.path}
+                      onClick={() => go(c.path)}>
+                {c.name}
+              </button>
+            </span>
+          ),
+        )}
+      </div>
+      <input
+        ref={filterRef}
+        type="text"
+        className="field-control schedule-picker-filter"
+        placeholder="Filter this folder"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+      />
+      <div className={"schedule-picker-list" + (loading ? " is-loading" : "")}>
+        {/* At the TOP of the listing, where the folder it is about to join
+            would sort — a row being typed, not a dialog over the panel. */}
+        {naming && (
+          <div className="schedule-picker-new">
+            {ICON_FOLDER}
+            <input
+              ref={nameRef}
+              type="text"
+              className="field-control schedule-picker-new-name"
+              placeholder="New folder name"
+              aria-label="New folder name"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmName();
+                }
+              }}
+            />
+            <button type="button" className="btn btn-primary schedule-picker-new-ok"
+                    disabled={!canCreate} onClick={confirmName}>
+              Use
+            </button>
+          </div>
+        )}
+        {naming && typedName !== "" && !canCreate && (
+          <p className="schedule-card-why schedule-form-bad">
+            {nameTaken
+              ? `“${typedName}” is already in this folder`
+              : "A folder name can't contain a slash"}
+          </p>
+        )}
+        {error && <p className="schedule-card-why">{error}</p>}
+        {!error && shown?.length === 0 && !loading && (
+          <p className="schedule-card-why">
+            {filter ? "Nothing matches" : "Empty folder"}
+          </p>
+        )}
+        {!error && shown?.map(({ name, dir }) => (
+          <button key={name} type="button"
+                  className={"schedule-picker-row" + (dir ? "" : " schedule-picker-row--file")}
+                  disabled={loading} title={name}
+                  onClick={() => {
+                    const full = path.replace(/\/+$/, "") + "/" + name;
+                    // A folder is a place to go; a file is an ANSWER — picking
+                    // one finishes the errand.
+                    if (dir) go(full);
+                    else {
+                      onPick(full);
+                      onClose();
+                    }
+                  }}>
+            {dir ? ICON_FOLDER : ICON_FILE}
+            <span className="schedule-picker-name">{name}</span>
+            {dir && <span className="schedule-picker-enter" aria-hidden="true">›</span>}
+          </button>
+        ))}
+      </div>
+      <div className="schedule-picker-foot">
+        {/* Left of the pair, because it acts on the folder you are IN rather
+            than on the errand — same side as the crumbs it reads off. Hidden
+            while a name is being typed: the row above is the control then. */}
+        {!error && !naming && (
+          <button type="button" className="btn btn-secondary schedule-picker-newbtn"
+                  onClick={() => setNaming(true)}>
+            + New folder
+          </button>
+        )}
+        <button type="button" className="btn btn-secondary" onClick={onClose}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary"
+                onClick={() => { onPick(path); onClose(); }}>
+          Use this folder
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Fixed-position dropdowns ---------------------------------------------
+// Every dropdown in this modal is position:fixed, measured off its trigger:
+// the modal body scrolls (`.deploy-body { overflow-y: auto }`), and an
+// absolutely-positioned panel gets CLIPPED at its edge — the month grid
+// shipped cut off mid-row (Akshil, 2026-08-16 screenshot). Fixed escapes the
+// clip; when the viewport below the trigger is shorter than the panel, it
+// opens upward instead.
+/**
+ * HOW TALL A LIST-SHAPED PANEL MAY GET, and the gap it keeps off the window's
+ * edges. The Tasks page's own popovers already answer this — `POP_MAX_HEIGHT`
+ * in ScheduleTaskViews, with the same reasoning: a column of twenty-eight is
+ * not a menu, it is a page. Same number, so the two lists in this app cap alike.
+ */
+const POP_MAX_HEIGHT = 320;
+const POP_EDGE = 8;
+
+/**
+ * WHAT `position: fixed` IS ACTUALLY MEASURED FROM — the viewport, unless some
+ * ancestor is transformed, and in this card one always is.
+ *
+ * `.modal-dialog.deploy-dialog` carries `transform: scale(.98)` from the open
+ * animation, and a transformed element becomes the containing block for every
+ * `fixed` descendant. So `top`/`left`/`bottom` are resolved against the CARD
+ * while `getBoundingClientRect` answers in VIEWPORT coordinates, and the two
+ * have been quietly disagreeing for as long as this function has existed. It
+ * went unnoticed because every other menu here is short and opens downward, so
+ * the error was a few pixels; a 50-row folder list opening upward put the panel
+ * 150px off the top of the window (measured, 2026-09-18).
+ *
+ * Returns the origin to subtract and the box to fit inside. No transformed
+ * ancestor — every other host of this card — answers the viewport, which is what
+ * the arithmetic below has always assumed.
+ */
+function fixedBox(el: HTMLElement | null): { x: number; y: number; h: number } {
+  for (let node = el?.parentElement ?? null; node; node = node.parentElement) {
+    const cs = getComputedStyle(node);
+    // `""` is what a stand-in stylesheet answers, and it is not a transform —
+    // testing truthiness first keeps a test DOM from naming every ancestor.
+    const transformed = (cs.transform && cs.transform !== "none")
+      || (cs.filter && cs.filter !== "none")
+      || (cs.perspective && cs.perspective !== "none");
+    if (transformed) {
+      const r = node.getBoundingClientRect();
+      return { x: r.left, y: r.top, h: r.height };
+    }
+  }
+  return { x: 0, y: 0, h: window.innerHeight };
+}
+
+function popStyle(
+  el: HTMLElement | null,
+  estHeight: number,
+  matchWidth = false,
+  /**
+   * CAP THE HEIGHT AND LET IT SCROLL, for a panel whose length is the disk's
+   * business rather than the form's (Akshil, 2026-09-18: typing
+   * `/Users/akshilthumar/` listed eight folders and cut off).
+   *
+   * Off by default, because it must be: the date grid, the time list and the
+   * repeat menu are all fixed-length things this function has always placed by
+   * their own height, and capping them would be a change nobody asked for. The
+   * folder list is the one whose content is unbounded.
+   *
+   * The arithmetic is `ScheduleTaskViews.popStyle`'s, which fixed this exact
+   * bug on the project menu ("sliced off at the bottom with a handful of its 28
+   * folders showing"): height is never SET — a two-row list is two rows tall —
+   * only capped, and capped by the room actually there so the panel can never
+   * run off the card or the viewport.
+   */
+  scrolls = false,
+): React.CSSProperties {
+  const r = el?.getBoundingClientRect();
+  if (!r) return {};
+  // BOTH EDGES ARE ALWAYS STATED, and one of them is always `auto`. A panel that
+  // flips up sets `bottom` — and the stylesheet that placed it before this
+  // function existed still says `top: calc(100% + 4px)`, which a `position:
+  // fixed` box resolves too. Two resolved edges do not mean "prefer the inline
+  // one": they mean the height is the distance BETWEEN them, and for a panel
+  // opening upward that distance is negative, so it collapsed to its padding.
+  // Measured on `/Users/akshilthumar/`: a 50-row list 10px tall with 1473px of
+  // scroll inside it. `tasks.css` fixes the same collision on the Tasks
+  // popovers from the stylesheet's side (`top: auto`); doing it here fixes it
+  // for every menu this function places, including the date, time and repeat
+  // menus, which have had the same latent flip-up bug all along.
+  // The box the offsets are resolved against — see `fixedBox`. The ROOM is still
+  // reckoned in viewport terms, because what the reader cares about is whether
+  // the panel is on their screen; only the offsets are converted.
+  const o = fixedBox(el);
+  const s: React.CSSProperties = {
+    position: "fixed", left: r.left - o.x, right: "auto", top: "auto", bottom: "auto",
+  };
+  if (scrolls) {
+    const below = window.innerHeight - r.bottom - 4 - POP_EDGE;
+    const above = r.top - 4 - POP_EDGE;
+    // Flip only when up is genuinely roomier — a panel that jumps above its
+    // trigger to gain twenty pixels is a panel that moved for nothing.
+    const up = above > below && below < POP_MAX_HEIGHT;
+    s.maxHeight = Math.max(120, Math.min(POP_MAX_HEIGHT, up ? above : below));
+    if (up) s.bottom = o.y + o.h - r.top + 4;
+    else s.top = r.bottom + 4 - o.y;
+  } else if (r.bottom + 4 + estHeight > window.innerHeight && r.top - 4 - estHeight > 0) {
+    s.bottom = o.y + o.h - r.top + 4;
+  } else {
+    s.top = r.bottom + 4 - o.y;
+  }
+  // A menu is as wide as the control that opened it — the CSS floor of 180px
+  // made the repeat menu wider than its chip and the recurrence units menu
+  // three times wider than the word it was replacing (audit 2026-08-16). The
+  // 140px is only there so a very narrow trigger still yields a readable list.
+  if (matchWidth) {
+    s.width = r.width;
+    s.minWidth = 140;
+  }
+  return s;
+}
+
+// One custom select for EVERYTHING the form chooses from a list — repeat,
+// permissions, the recurrence dialog's units. The native <select> sat beside
+// the custom date/time/path dropdowns as the one control drawn by the OS
+// (Akshil, 2026-08-16, "custom input for everything").
+function Dropdown({
+  value,
+  options,
+  onPick,
+  ariaLabel,
+  className,
+}: {
+  value: string; // the current choice's LABEL
+  options: { key: string; label: string }[];
+  onPick: (key: string) => void;
+  ariaLabel: string;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  // Which option the ARROW KEYS are on. Focus never leaves the trigger — the
+  // menu is a listbox, and a listbox's items are described by
+  // aria-activedescendant, not focused one by one (a Tab through this form
+  // otherwise walked every option of every open menu; audit 2026-08-16). The
+  // options carry tabIndex={-1} for the same reason.
+  const [active, setActive] = useState(-1);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Open on the current choice, so the first ArrowDown steps off it.
+  const show = () => {
+    setActive(options.findIndex((o) => o.label === value));
+    setOpen(true);
+  };
+
+  // Keep the active option in view when it is stepped past the panel's edge.
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current
+      ?.querySelector<HTMLElement>(".is-active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
+
+  const move = (delta: number) => {
+    setActive((i) => {
+      const n = options.length;
+      if (n === 0) return -1;
+      return ((i < 0 ? 0 : i + delta) + n) % n;
+    });
+  };
+
+  return (
+    <div
+      className={"schedule-pop-wrap" + (className ? " " + className : "")}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          e.stopPropagation();
+          setOpen(false);
+          return;
+        }
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          if (!open) show();
+          else move(e.key === "ArrowDown" ? 1 : -1);
+          return;
+        }
+        if (!open) return;
+        if (e.key === "Home" || e.key === "End") {
+          e.preventDefault();
+          setActive(e.key === "Home" ? 0 : options.length - 1);
+          return;
+        }
+        if (e.key === "Enter" && active >= 0 && active < options.length) {
+          e.preventDefault();
+          setOpen(false);
+          onPick(options[active].key);
+        }
+      }}
+    >
+      <button
+        ref={btnRef}
+        type="button"
+        className="schedule-when-field schedule-select"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-activedescendant={
+          open && active >= 0 ? `${listId}-${active}` : undefined
+        }
+        aria-label={ariaLabel}
+        onClick={() => (open ? setOpen(false) : show())}
+      >
+        <span className="schedule-select-label">{value}</span>
+        {/* A DRAWN mark, not a "▾". The text triangle was a 10px glyph in a
+            32px chip: a flex box centres the glyph's LINE BOX, and where the
+            triangle's ink sits inside that box is the font's business — in the
+            UI stack it rides high in the em square, so the caret hung near the
+            top-right corner of the control instead of on the label's centre
+            line (Akshil, 2026-08-18 screenshot). An SVG has no baseline and no
+            font fallback; centred in a fixed square it lands on the middle of
+            the chip in every theme and on every machine. Same mark as the
+            native selects elsewhere in the app draw (fields.css) and as the
+            card's own disclosure. */}
+        <span className="schedule-select-caret" aria-hidden="true">
+          {ICON_CHEVRON_DOWN}
+        </span>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          id={listId}
+          className="schedule-pop schedule-pop--menu"
+          role="listbox"
+          aria-label={ariaLabel}
+          style={popStyle(btnRef.current, options.length * 34 + 10, true)}
+          onMouseDown={(e) => e.preventDefault()}
+          onMouseLeave={() => setActive(-1)}
+        >
+          {options.map((o, i) => (
+            <button
+              key={o.key}
+              id={`${listId}-${i}`}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              aria-selected={o.label === value}
+              className={
+                "schedule-menu-item" +
+                (o.label === value ? " is-selected" : "") +
+                (i === active ? " is-active" : "")
+              }
+              onMouseEnter={() => setActive(i)}
+              onClick={() => {
+                setOpen(false);
+                onPick(o.key);
+              }}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// ---- Google-style date + time dropdowns ----------------------------------
+// The native datetime-local control is one opaque box; Google splits it into
+// a date field that drops a month grid and a time field that drops a 15-min
+// list (Akshil, 2026-08-15, "have custom dropdown like gmail does"). Both are
+// dumb views over the modal's single `when` string.
+
+function MiniCalendar({
+  selected,
+  onPick,
+  minDate,
+}: {
+  selected: Date;
+  onPick: (d: Date) => void;
+  // A hard floor, and the ONLY one left: the recurrence section's end date,
+  // which cannot precede the anchor it ends. The when-row's grid no longer
+  // floors at today — scheduling into the past is now a legitimate way to say
+  // "run this as soon as you can" (design §9), so the `minToday` this
+  // component used to take is gone with the refusal it enforced.
+  minDate?: Date;
+}) {
+  // The month being LOOKED AT, which is not the month selected — paging
+  // through months must not move the selection.
+  const [view, setView] = useState(
+    () => new Date(selected.getFullYear(), selected.getMonth(), 1),
+  );
+  const today = new Date();
+  const firstDow = view.getDay();
+  const daysInMonth = new Date(view.getFullYear(), view.getMonth() + 1, 0).getDate();
+  const cells: (number | null)[] = [
+    ...Array.from({ length: firstDow }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+  ];
+  const same = (d: Date, y: number, m: number, day: number) =>
+    d.getFullYear() === y && d.getMonth() === m && d.getDate() === day;
+
+  // The earliest day this grid will hand back, as a midnight stamp; -Infinity
+  // when nothing constrains it.
+  const floor = minDate
+    ? new Date(minDate.getFullYear(), minDate.getMonth(), minDate.getDate()).getTime()
+    : -Infinity;
+
+  return (
+    <div className="schedule-mini-cal">
+      <div className="schedule-mini-cal-head">
+        <span className="schedule-mini-cal-title">
+          {MONTHS[view.getMonth()]} {view.getFullYear()}
+        </span>
+        <button type="button" className="schedule-mini-cal-nav" tabIndex={-1}
+                aria-label="Previous month"
+                onClick={() => setView(new Date(view.getFullYear(), view.getMonth() - 1, 1))}>
+          ‹
+        </button>
+        <button type="button" className="schedule-mini-cal-nav" tabIndex={-1}
+                aria-label="Next month"
+                onClick={() => setView(new Date(view.getFullYear(), view.getMonth() + 1, 1))}>
+          ›
+        </button>
+      </div>
+      <div className="schedule-mini-cal-grid">
+        {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+          <span key={i} className="schedule-mini-cal-dow">{d}</span>
+        ))}
+        {cells.map((day, i) => {
+          if (day === null) return <span key={`b${i}`} />;
+          const d = new Date(view.getFullYear(), view.getMonth(), day);
+          return (
+            <button
+              key={day}
+              type="button"
+              // The grid is one control reached from its chip, not 31 tab
+              // stops in the middle of the form.
+              tabIndex={-1}
+              disabled={d.getTime() < floor}
+              className={
+                "schedule-mini-cal-day" +
+                (same(selected, view.getFullYear(), view.getMonth(), day) ? " is-selected" : "") +
+                (same(today, view.getFullYear(), view.getMonth(), day) ? " is-today" : "")
+              }
+              onClick={() => onPick(d)}
+            >
+              {day}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// "8:30pm" — Google's compact clock wording, used by the field and its list.
+function fmtTime(h: number, m: number): string {
+  const ap = h < 12 ? "am" : "pm";
+  const hh = h % 12 === 0 ? 12 : h % 12;
+  return `${hh}:${String(m).padStart(2, "0")}${ap}`;
+}
+
+// Parse what a person types into a time field: "8", "8:30", "8:30pm", "20:15".
+// null = not a time; the field then falls back to what it had.
+function parseTime(text: string): { h: number; m: number } | null {
+  const m = text.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const mins = Number(m[2] ?? 0);
+  if (mins > 59) return null;
+  if (m[3] === "pm" && h < 12) h += 12;
+  if (m[3] === "am" && h === 12) h = 0;
+  if (m[3] && Number(m[1]) > 12) return null;
+  return h > 23 ? null : { h, m: mins };
+}
+
+function TimeList({
+  selected,
+  onPick,
+}: {
+  selected: { h: number; m: number };
+  onPick: (h: number, m: number) => void;
+}) {
+  // The NEAREST slot carries the highlight — a typed 10:19pm is not on the
+  // 15-minute grid, and matching exactly left the list unmarked and parked
+  // at midnight (QA 2026-08-15). Scrolled by container arithmetic, not
+  // scrollIntoView: the latter also scrolls the modal behind the dropdown.
+  const ref = useRef<HTMLDivElement>(null);
+  const nearest = Math.min(95, Math.round((selected.h * 60 + selected.m) / 15));
+  useEffect(() => {
+    const list = ref.current;
+    const hit = list?.querySelector<HTMLElement>(".is-selected");
+    if (list && hit) {
+      list.scrollTop = hit.offsetTop - list.clientHeight / 2 + hit.offsetHeight / 2;
+    }
+  }, []);
+  const slots = Array.from({ length: 96 }, (_, i) => ({
+    h: Math.floor(i / 4),
+    m: (i % 4) * 15,
+  }));
+  return (
+    // A listbox, said out loud: 96 slots that announced themselves as plain
+    // buttons left a screen reader no way to know one of them was the current
+    // time, and Tab walked all 96 (audit 2026-08-16).
+    <div className="schedule-time-list" ref={ref} role="listbox" aria-label="Time">
+      {slots.map(({ h, m }, i) => (
+        <button
+          key={`${h}:${m}`}
+          type="button"
+          role="option"
+          tabIndex={-1}
+          aria-selected={i === nearest}
+          className={"schedule-time-slot" + (i === nearest ? " is-selected" : "")}
+          onClick={() => onPick(h, m)}
+        >
+          {fmtTime(h, m)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---- Custom recurrence (Google's dialog, copied deliberately) --------------
+// Repeat every [n] [unit], weekday circles for weeks, Ends never/on/after.
+function CustomRecurrence({
+  initial,
+  anchor,
+  onDone,
+  onCancel,
+  closing,
+}: {
+  initial: RecurrenceRule | null;
+  anchor: Date;
+  onDone: (rule: RecurrenceRule) => void;
+  onCancel: () => void;
+  closing?: boolean;
+}) {
+  const box = useDialogBox();
+  // Escape dismisses the PANEL (as Cancel), captured before the modal's own
+  // document-level Escape — same contract as the explorer beside it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [freq, setFreq] = useState<RecurrenceRule["freq"]>(initial?.freq ?? "week");
+  // How often, as a list of units. `year` is NOT one of them any more (Akshil,
+  // 2026-08-17 — the annual preset went with it), with one exception: a rule
+  // that is ALREADY yearly keeps the row while it is being edited. That rule
+  // opens here (keyOfRule finds no preset for a yearly freq, so the modal opens
+  // it as Custom), and a unit dropdown that could not say "year" would show a
+  // value with no matching row — and would turn any other edit on the panel,
+  // the interval or the end date, into a silent change of frequency. Read off
+  // `initial` rather than the live `freq` so the row does not vanish mid-edit.
+  const units = initial?.freq === "year" ? LEGACY_RECUR_UNITS : RECUR_UNITS;
+  const [interval, setIntervalN] = useState(initial?.interval ?? 1);
+  const [byday, setByday] = useState<number[]>(
+    initial?.byday?.length ? initial.byday : [anchor.getDay()],
+  );
+  const [monthly, setMonthly] = useState<"day" | "nth-weekday">(initial?.monthly ?? "day");
+  const [ends, setEnds] = useState<"never" | "on" | "after">(
+    initial?.until ? "on" : initial?.count ? "after" : "never",
+  );
+  const [until, setUntil] = useState(initial?.until ?? "");
+  const [count, setCount] = useState(initial?.count ?? 13);
+  // The end date is picked from the SAME month grid the when-row uses, dropped
+  // from a chip — the `<input type="date">` it replaces was the last OS-drawn
+  // control in a form of custom chips (audit 2026-08-16).
+  const [untilOpen, setUntilOpen] = useState(false);
+  const untilRef = useRef<HTMLButtonElement>(null);
+  // The section opens on the question it is asking: how often. Without this
+  // the reveal landed focus nowhere and a keyboard user had to Tab in from the
+  // repeat menu they had just left (audit 2026-08-16).
+  const intervalRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    intervalRef.current?.focus();
+    intervalRef.current?.select();
+  }, []);
+
+  const toggleDay = (d: number) =>
+    setByday((prev) => {
+      const has = prev.includes(d);
+      // Never empty: a weekly rule with no days is a rule that never fires.
+      if (has && prev.length === 1) return prev;
+      return has ? prev.filter((x) => x !== d) : [...prev, d].sort((a, b) => a - b);
+    });
+
+  const done = () => {
+    const rule: RecurrenceRule = { freq };
+    if (interval > 1) rule.interval = interval;
+    if (freq === "week") rule.byday = byday;
+    if (freq === "month") rule.monthly = monthly;
+    if (ends === "on" && until) rule.until = until;
+    if (ends === "after") rule.count = count;
+    onDone(rule);
+  };
+
+  const nth = NTH_LABELS[Math.floor((anchor.getDate() - 1) / 7)];
+
+  return (
+    // A SECTION of the form, not a dialog: it has no scrim, no focus trap and
+    // the card behind it stays live, so announcing role="dialog" promised a
+    // modality that does not exist (audit 2026-08-16).
+    <section className={"schedule-recur" + (closing ? " is-closing" : "")}
+             aria-label="Custom recurrence"
+             style={box ? { top: box.top, maxHeight: box.height + 140 } : undefined}>
+      <p className="schedule-recur-title">Custom recurrence</p>
+
+      <div className="schedule-recur-row">
+        <span>Repeat every</span>
+        <input ref={intervalRef} type="number" min={1} max={99}
+               className="schedule-recur-n" aria-label="Repeat interval"
+               value={interval}
+               onChange={(e) => setIntervalN(Math.max(1, Math.min(99, Number(e.target.value) || 1)))} />
+        <Dropdown
+          ariaLabel="Repeat unit"
+          className="schedule-recur-unit"
+          value={interval > 1 ? `${freq}s` : freq}
+          options={units.map((u) => ({
+            key: u,
+            label: interval > 1 ? `${u}s` : u,
+          }))}
+          onPick={(u) => setFreq(u as RecurrenceRule["freq"])}
+        />
+      </div>
+
+      {freq === "week" && (
+        <div className="schedule-recur-row schedule-recur-days">
+          <span>Repeat on</span>
+          <span className="schedule-recur-circles">
+            {["S", "M", "T", "W", "T", "F", "S"].map((label, d) => (
+              <button key={d} type="button"
+                      className={"schedule-recur-day" + (byday.includes(d) ? " is-on" : "")}
+                      aria-pressed={byday.includes(d)}
+                      aria-label={DAYS[d]}
+                      onClick={() => toggleDay(d)}>
+                {label}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+
+      {freq === "month" && (
+        <div className="schedule-recur-row">
+          <Dropdown
+            ariaLabel="Monthly on"
+            value={
+              monthly === "day"
+                ? `Monthly on day ${anchor.getDate()}`
+                : `Monthly on the ${nth} ${DAYS[anchor.getDay()]}`
+            }
+            options={[
+              { key: "day", label: `Monthly on day ${anchor.getDate()}` },
+              { key: "nth-weekday", label: `Monthly on the ${nth} ${DAYS[anchor.getDay()]}` },
+            ]}
+            onPick={(v) => setMonthly(v as "day" | "nth-weekday")}
+          />
+        </div>
+      )}
+
+      {/* Three mutually exclusive answers to one question = a segmented
+          control, the same one the page's view toggle is built from. Three
+          stacked native radios (two of whose fields were rendered DISABLED
+          rather than hidden) was the one place this form still looked like a
+          settings page (audit 2026-08-16). Only the chosen branch's field is
+          rendered — a greyed-out control is a question you cannot answer. */}
+      <div className="schedule-recur-ends">
+        <span className="schedule-recur-ends-label">Ends</span>
+        <div className="schedule-form-seg" role="radiogroup" aria-label="Ends">
+          {ENDS_CHOICES.map(({ key, label }) => (
+            <button key={key} type="button"
+                    className={"btn btn-secondary" + (ends === key ? " is-active" : "")}
+                    aria-pressed={ends === key}
+                    onClick={() => setEnds(key)}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {ends === "on" && (
+          <div className="schedule-recur-detail">
+            <div
+              className="schedule-pop-wrap"
+              onBlur={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+                  setUntilOpen(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && untilOpen) {
+                  e.stopPropagation();
+                  setUntilOpen(false);
+                }
+              }}
+            >
+              <button ref={untilRef} type="button"
+                      className="schedule-when-field schedule-recur-until"
+                      aria-expanded={untilOpen}
+                      aria-label="End date"
+                      onClick={() => setUntilOpen((o) => !o)}>
+                {untilLabel(until)}
+              </button>
+              {untilOpen && (
+                <div className="schedule-pop" style={popStyle(untilRef.current, 300)}
+                     onMouseDown={(e) => e.preventDefault()}>
+                  {/* minToday is deliberately off: an end date is bounded by
+                      its own anchor, not by today. */}
+                  <MiniCalendar
+                    selected={untilDate(until) ?? anchor}
+                    minDate={anchor}
+                    onPick={(d) => { setUntil(ymdOf(d)); setUntilOpen(false); }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {ends === "after" && (
+          <div className="schedule-recur-detail">
+            <input type="number" min={1} max={999} className="schedule-recur-n"
+                   aria-label="Number of occurrences"
+                   value={count}
+                   onChange={(e) => setCount(Math.max(1, Math.min(999, Number(e.target.value) || 1)))} />
+            <span>occurrences</span>
+          </div>
+        )}
+      </div>
+
+      <div className="schedule-picker-foot">
+        <button type="button" className="btn btn-secondary" onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="btn btn-primary"
+                disabled={ends === "on" && !until}
+                onClick={done}>
+          Done
+        </button>
+      </div>
+    </section>
+  );
+}
+
+const ENDS_CHOICES = [
+  { key: "never", label: "Never" },
+  { key: "on", label: "On" },
+  { key: "after", label: "After" },
+] as const;
+
+// A date the recurrence section stores as "YYYY-MM-DD", both ways. Parsed by
+// hand rather than through `new Date(ymd)` — that reads a bare date string as
+// UTC and lands a day early west of Greenwich.
+const ymdOf = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+function untilDate(ymd: string): Date | null {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return y && m && d ? new Date(y, m - 1, d) : null;
+}
+
+function untilLabel(ymd: string): string {
+  const d = untilDate(ymd);
+  return d ? `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}` : "Pick a date";
+}
+
+const NTH_LABELS = ["first", "second", "third", "fourth", "fifth"];
+
+// The custom panel's "repeat every N ___" units. Shortest first, the order
+// recur.FREQUENCIES is written in — and without `year`, which is off the menu
+// for anything new (see `units` in CustomRecurrence for the one exception, and
+// repeatChoicesFor for the preset row that went with it).
+const RECUR_UNITS: readonly RecurrenceRule["freq"][] = ["hour", "day", "week", "month"];
+const LEGACY_RECUR_UNITS: readonly RecurrenceRule["freq"][] = [...RECUR_UNITS, "year"];
+
+// How a permission mode is SAID. The keys are the server's contract and stay
+// exactly as they are on the wire; only the reading changes. A mode this map
+// has never heard of shows its key, which is still better than hiding it.
+const PERMISSION_LABELS: Record<string, string> = {
+  auto: "Auto",
+  acceptEdits: "Accept edits",
+  plan: "Plan only",
+  prompt: "Ask every time",
+};
+
+const permissionLabel = (key: string) => PERMISSION_LABELS[key] ?? key;
+
+// A Date as the value a <input type="datetime-local"> wants: local wall-clock,
+// minute precision, no zone suffix. `toISOString` is exactly wrong here (UTC).
+//
+// Exported for draft-run.ts, which builds this form's payload for a draft
+// nobody has opened (the Board's drag-a-draft-into-In-Progress gesture). `when`
+// on the wire is this field's format, so the two have to spell "now"
+// identically or the draft's run lands in a different minute than the card's.
+export function toLocalInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Which derived choice a stored RULE is, so editing reopens on the words the
+// user picked; anything the preset list can't say is "custom". Legacy cron
+// templates get a "cron" key of their own — the form no longer writes cron,
+// but editing an old entry must not silently rewrite its rule.
+function keyOfRule(rule: RecurrenceRule, anchor: Date): string {
+  const choices = repeatChoicesFor(anchor);
+  const canon = (r: RecurrenceRule) =>
+    JSON.stringify({
+      freq: r.freq,
+      interval: r.interval ?? 1,
+      byday: r.freq === "week" ? (r.byday?.length ? [...r.byday].sort((a, b) => a - b) : [anchor.getDay()]) : undefined,
+      monthly: r.freq === "month" ? (r.monthly ?? "day") : undefined,
+      until: r.until,
+      count: r.count,
+    });
+  const hit = choices.find((c) => c.rule && canon(c.rule) === canon(rule));
+  return hit?.key ?? "custom";
+}
+
+// The repeat choice a form OPENS on. "none" is the one value that means the
+// Repeat checkbox is unticked, so this is also what decides whether editing a
+// repeating task opens checked (design §6).
+export function initialRepeatKey(entry?: ScheduledMessage | null): string {
+  if (entry?.rule) return keyOfRule(entry.rule, new Date(entry.due));
+  return entry?.repeats ? "cron" : "none";
+}
+
+// What the DESCRIPTION field opens with. An Edit opens on what the entry has; a
+// new task opens on the body of the chat composer's draft, whose first line has
+// gone to the title instead (see splitDraft).
+//
+// `description` FIRST now, and that order is the whole subtlety: `message` is
+// the composed title-plus-body Claude was sent (composeTaskMessage), so opening
+// the description on it would put the title back into the field under itself,
+// and the next Save would compose the heading a second time. `message` stays as
+// the fallback for every task stored before the two were composed — with the
+// heading peeled off if it is there, which is what `withoutTitleHeading` is for.
+// `||`, not `??`: "" is a missing answer here, not an answer.
+export function initialAskOf(
+  entry?: ScheduledMessage | null,
+  chatDraft?: string | null,
+): string {
+  if (entry) {
+    return (
+      entry.description
+      || withoutTitleHeading(entry.message ?? "", entry.title ?? "")
+    );
+  }
+  return splitDraft(chatDraft).description;
+}
+
+// The inverse of composeTaskMessage, for the one reader that needs it: an Edit
+// falling back to a stored `message`. It has to invert BOTH shapes the composer
+// can produce, because the composer has two:
+//
+//   * `title\n\nbody` — the two-field task. The heading and its blank line come
+//     off and the body is what is left;
+//   * `title` alone — the TITLE-ONLY task, which is the ordinary case now that
+//     the second field is optional. Nothing was appended, so there is no prefix
+//     to spot, and treating it as unrecognised prose is the bug it was: the
+//     whole message came back as the additional instructions, the next Save
+//     composed `title\n\ntitle`, and every further edit stacked another copy
+//     (Bugbot, PR #595). It inverts to "" — there were no additional
+//     instructions, which is exactly what the field should open on.
+//
+// Still deliberately exact about what it will peel: an opening that merely
+// begins with the same words is prose and is left alone. The equality check is
+// on the trimmed message, so trailing whitespace the wire may have picked up
+// does not make a title-only task look like something else.
+export function withoutTitleHeading(message: string, title: string): string {
+  const name = title.trim();
+  if (!name) return message;
+  if (message.trim() === name) return "";
+  const head = `${name}\n\n`;
+  return message.startsWith(head) ? message.slice(head.length) : message;
+}
+
+// The thread a task ALREADY OWNS, if any. A repeating template LEARNS one: its
+// first run reports the session it ran in and the server writes that id back
+// onto the template, so run 2 resumes it (a task IS a session — design §6).
+// That id has to survive an edit, because an edit is cancel + re-create and
+// dropping it orphans everything the task built.
+//
+// An UNMARKED id is not that. It is a chat handoff kept from when the task was
+// scheduled, and it keeps a handoff's rules: continued while the task stays a
+// one-off, refused the moment it starts repeating — otherwise ticking Repeat on
+// a chat-scheduled task quietly signs the user's open conversation up to be
+// appended to forever, the exact thing the repeat rule exists to refuse.
+//
+// The two are told apart by `session_learned`, which the server writes at the
+// moment it learns the id and which travels through the cancel-and-re-create an
+// edit is. This used to be INFERRED — an id counted as learned if the entry
+// repeated — and that reading cannot survive a round trip: demote a chaining
+// task to a one-off (its learned id deliberately rides along) and promote it
+// back, and the learned thread reads as a chat handoff and is dropped
+// (Bugbot, PR #555). An absent marker means NOT learned, which is the reading
+// that keeps a chat's id refused by a repeat.
+export function learnedSessionOf(entry?: ScheduledMessage | null): string {
+  if (!entry?.session_id || entry.session_learned !== true) return "";
+  return entry.session_id;
+}
+
+// ---- Deleting a task -----------------------------------------------------
+// The one way to STOP a repeating task. Everything else on the page cancels an
+// OCCURRENCE — the list's per-message cancel and the calendar popover's row
+// cancel both mean "skip this run", deliberately, and a rule whose runs you
+// skip one at a time keeps minting more forever (Akshil, 2026-08-17). The
+// server has always been able to do it: `schedule.cancel` on a TEMPLATE id
+// cancels the template AND its pending occurrence, which is exactly "no further
+// runs". Nothing in the UI had ever called it with a template id.
+//
+// The modal is where it belongs because the modal is already the one place a
+// template is addressable: an occurrence's Edit resolves `template_id ||
+// entry_id` (Scheduled.editEntry), so opening "tomorrow's run" of a repeating
+// task opens the RULE. The button just had to exist.
+//
+// What is cancellable is decided here rather than at the press, so a control
+// that would 404 is never drawn: `sending` is deliberately not cancellable (the
+// helper is away and the turn may have started — schedule.cancel's docstring),
+// and a terminal entry (`sent`/`missed`/`error`/`cancelled`) has nothing left
+// to stop. Only `pending` and `recurring` can be withdrawn.
+export interface DeleteAction {
+  // The id to cancel — a template's id when this is a rule, which is what
+  // makes it stop the series rather than skip one run.
+  id: string;
+  // Whether cancelling ends a SERIES. Drives every sentence below, and the
+  // reading of a 404.
+  series: boolean;
+  label: string;
+  // The second press. It names the consequence rather than asking "are you
+  // sure?", because the consequence is the whole difference between the two
+  // cases and it is not undoable from this page.
+  confirm: string;
+  title: string;
+}
+
+export function deleteActionFor(entry?: ScheduledMessage | null): DeleteAction | null {
+  if (!entry) return null;
+  const series = entry.state === "recurring";
+  if (!series && entry.state !== "pending") return null;
+  return {
+    id: entry.id,
+    series,
+    // One label for both cases — the user is deleting the task either way, and
+    // a rule that called itself "Delete schedule" would read as a third noun
+    // the page never uses. The difference is spelled out on the second press.
+    label: "Delete task",
+    confirm: series
+      ? "Delete and stop all future runs?"
+      : "Delete and cancel this run?",
+    title: series
+      ? "Deletes this task and stops all future runs. Runs it has already made are kept."
+      : "Deletes this task. It will not run.",
+  };
+}
+
+// What a press of that button decides, as a value rather than as a branch
+// buried in a handler — so "the first press cannot reach the server" is a thing
+// that can be asserted. `arm` carries no id at all; only the second press
+// produces one.
+export type DeletePress = { do: "arm" } | { do: "delete"; id: string };
+
+export function deletePress(
+  action: DeleteAction | null,
+  armed: boolean,
+): DeletePress | null {
+  if (!action) return null;
+  if (!armed) return { do: "arm" };
+  return { do: "delete", id: action.id };
+}
+
+// What the error area says when the cancel does not land. A 404 is the honest
+// race, not a failure: the run fired, or someone cancelled it in another tab —
+// so it is translated instead of showing the server's id-bearing sentence,
+// which reads as a bug. Every other status keeps the server's own words: those
+// are written for a human (see the router's 400s).
+export function deleteFailureText(err: unknown, series: boolean): string {
+  const status = (err as { status?: number } | null)?.status;
+  if (status === 404) {
+    return series
+      ? "This task is already stopped — nothing is scheduled to run from it any more."
+      : "This task is already gone — it has run, or it was cancelled somewhere else.";
+  }
+  return (err as Error | null)?.message || "The task could not be deleted.";
+}
+
+// ---- Naming the task -----------------------------------------------------
+// Title is REQUIRED (Akshil, 2026-08-17), and it opens prefilled wherever the
+// app honestly knows a name — which is any path with a SESSION behind it (see
+// the precedence below). Where it does not, the field opens blank and the
+// requirement is what asks for a name. That is the trade, stated plainly: a
+// blank required field costs the user one line of typing, while a field
+// prefilled with a guess costs them a task named after its own description.
+//
+// The placeholder ASKS FOR THE TASK (Akshil, 2026-08-18), because that is what
+// this field now collects. It said "Title", which is what the value is USED for
+// — the row's name in the list — and not what the user is being asked to write;
+// people answered it with a label ("News") and then wrote the actual instruction
+// underneath, which is the split this whole pass exists to close. The question is
+// the same one the composer asks, and the answer to it is both the task's name
+// and the first line of what Claude is sent.
+//
+// (Two earlier wordings are gone for the same class of reason: "optional, filled
+// in automatically" outlived the requirement, and a PREVIEW of the chat's own
+// name is worse than a question when Save then refuses the preview.)
+export const TITLE_PLACEHOLDER = "What should Claude do?";
+
+// And the second field is the OVERFLOW of that question — the constraints, the
+// context, the "start with the parquet path" — never the task again. Both jobs a
+// placeholder can honestly do are in it: which field this is, and that it can be
+// left alone. It read "What should Claude do?" while it was the whole message,
+// and leaving that question here while the field above asks it too would put the
+// user in front of the same question twice.
+export const ASK_PLACEHOLDER = "Additional instructions (optional)";
+// The second line of the ask's placeholder: the key that brings the caret
+// down from the title (its onKeyDown).
+export const ASK_HINT_KEY = "shift + enter";
+
+// One line of a block of prose, trimmed. Used to reduce a multi-line value to
+// something an <input> can hold — it would strip the newlines anyway. It also
+// used to answer "is this string the message I am about to send?" for
+// sessionTitleOf; that question is the server's now, and answered by provenance
+// rather than by comparing strings.
+export function firstLine(text: string): string {
+  return text.trim().split("\n")[0]?.trim() ?? "";
+}
+
+// -- The title names the SESSION, never the message ---------------------------
+// The bug this replaced (Akshil, 2026-08-17): scheduling from a Claude chat
+// prefilled Title with `firstLine(ask)` — the very message being scheduled — so
+// a long message came out duplicated, once as the title and once as the
+// description. "The description is what we type in the chat box"; the title is
+// what the CONVERSATION is called.
+//
+// So the precedence is now, in order:
+//   1. the task's own stored title, if a user ever set one;
+//   2. the SESSION's resolved title — Claude Code's `ai-title` record, which is
+//      the "cloud summarised it" case, served on /api/tasks as `title` with
+//      `title_source: "ai"`;
+//   3. the session's FIRST user message, shortened — "the first message that we
+//      had". Also /api/tasks, as `title_source: "message"`: the first line of the
+//      transcript's first user prompt (tasks.py `_title` reading
+//      `tasks_store.head`). Its sibling `title_source: "entry"` — a row named
+//      from a message merely SCHEDULED at the session, because the transcript
+//      could not be read — is not a step here at all; see sessionTitleOf;
+//   3b. the slash command the session ran (`title_source: "command"`), for a
+//      session that contains no prose at all — `/making-a-release` is the only
+//      true thing there is to call one of those, and the server says so rather
+//      than leaving the row nameless;
+//   4. nothing. The field opens blank and the user types a name.
+// Never the composed message, at any step. Steps 2 and 3 need a fetch, so they
+// live in the /api/tasks effect; 1 and 4 are what `initialTitleOf` decides
+// synchronously.
+
+// How long a title derived from a first message is allowed to be. A name, not a
+// summary: this is the whole point of step 3 — a 200-char first line (the
+// server's own cap) is the duplication bug again in a longer field.
+export const TITLE_MAX = 60;
+
+// A first message reduced to a name: one line, clamped, cut on a word boundary.
+// No ellipsis — the field is a NAME the user can edit, and "…" is punctuation
+// they would have to delete. A single word longer than the clamp has no boundary
+// to cut on, so it is cut hard; that is the only mid-word cut here.
+export function shortTitle(text: string, max = TITLE_MAX): string {
+  const line = firstLine(text);
+  if (line.length <= max) return line;
+  // max + 1 so a value whose max'th character is the space gets the whole word
+  // before it rather than losing it.
+  const boundary = line.slice(0, max + 1).lastIndexOf(" ");
+  return (boundary > 0 ? line.slice(0, boundary) : line.slice(0, max)).trimEnd();
+}
+
+/**
+ * WHERE "BACK TO CHAT" LANDS A REOPENED DRAFT, out of the chat key the hop
+ * stored on it (design.md, Round 2: "A draft moves, never duplicates").
+ *
+ * Two key shapes, two doors, because a chat has two ages (platform/lib/drafts
+ * `chatDraftKey`):
+ *
+ *   * a SESSION id — the conversation exists, so the folder opens with that
+ *     thread on the Claude pane, which is `explorerUrl`'s whole job. The folder
+ *     is the draft's own `target`: the hop wrote the chat's `file` into it, and
+ *     it is the only path this card kept;
+ *   * `new:<file>` — there is no session and never was one, so the door is that
+ *     file's folder with the Claude pane on it (`schedule-lib.chatPaneUrl`) and
+ *     no `session_id` named at all: an empty value claims the question was
+ *     asked and answered with nothing, and this conversation has not been asked
+ *     it. Built out of the key's own `<file>` rather than out of `target`,
+ *     because the composer seeds from a key built on that exact string
+ *     (platform/lib/drafts.chatDraftKey) and a chat mounted anywhere else reads
+ *     a key nothing wrote.
+ *
+ * `""` for a key that is neither, which is a card with nothing to go back to —
+ * the caller gates on that before ever getting here.
+ */
+export function backChatHref(key: string, target: string): string {
+  if (!key) return "";
+  if (key.startsWith(NEW_CHAT_PREFIX)) {
+    const file = newChatFile(key);
+    return file ? chatPaneUrl(file) : "";
+  }
+  return target ? explorerUrl(target, key) : "";
+}
+
+// A prefill this field must refuse, whichever source produced it: a transcript
+// record's machine-written wire, leaked into a title.
+//
+// THIS IS A GUARD, NOT THE FIX. The fix is server-side — four readers of a
+// transcript's first user message each had their own idea of what counted as
+// machinery, and /api/tasks served rows titled `<live-app-state>` and
+// `<command-message>making-a-release</command-message>` (44 of them in one real
+// store). tasks_store owns that policy now and the server no longer emits such a
+// string. This refuses one anyway, because of what happens to a bad prefill in
+// THIS field specifically: the precedence below is permanent in one direction —
+// a `user`-set title outranks every other source forever — so a single leaked
+// string the user does not notice before pressing Save becomes that task's name
+// for good. One already is, in one real store. A second check on the cheap side
+// of an asymmetric cost.
+//
+// Deliberately NARROW, and the narrowness is the point: it refuses a value that
+// OPENS with a tag or with the annotation preamble's sentence. It does not go
+// hunting for angle brackets, because "fix why <div> renders twice" is a
+// perfectly good name for a thread about that bug, and refusing it would be the
+// very mistake this whole change undoes — a reader deciding that markup means
+// nobody typed it.
+const LEAKED_TITLE = /^(?:<[a-z][a-z0-9-]*>|The user annotated )/;
+
+// What Title OPENS on, synchronously. Only step 1 and step 4: a stored title
+// wins outright (an edit that quietly replaced it would be data loss), and
+// otherwise the field is BLANK until the /api/tasks lookup answers.
+//
+// It used to derive `firstLine(initialAskOf(...))` here, which is what put the
+// scheduled message in the title. Blank is the honest synchronous answer instead
+// — the form has nothing to say about the session yet — and blank is safe even
+// though Title is required: the requirement bites at Save, by which time either
+// the lookup has filled the field or the user has.
+export function initialTitleOf(entry?: ScheduledMessage | null): string {
+  const title = (entry?.title ?? "").trim();
+  // Guarded here as well as in `sessionTitleOf`, because a stored title is
+  // exactly how the one bad row in the real store got there: it was saved, so it
+  // is a `user` title now, and re-prefilling it on an Edit would keep the
+  // mistake alive every time the form opened.
+  return LEAKED_TITLE.test(title) ? "" : title;
+}
+
+// The pairing that keeps the two halves of step 1 from drifting apart. "Is there
+// a usable stored title?" is ONE question with two readers — the value the field
+// OPENS on, and whether the /api/tasks lookup may run at all — so it is asked
+// once, by `initialTitleOf` above, and both readers take that answer.
+//
+// It was asked twice (review, 2026-08-18), and the two answers disagreed on
+// exactly the rows LEAKED_TITLE exists to rescue: the field took
+// `initialTitleOf`, which blanks a leaked machinery title, while the lookup gated
+// on the RAW `entry.title` — and a leaked string is non-empty, so the guard sent
+// the lookup home. The field arrived blank AND stayed blank on a REQUIRED field,
+// so Save was refused on the one task the user cannot easily rename. Repeating
+// the LEAKED_TITLE test at the second site would only have set the same trap for
+// whatever the third reason to reject a stored title turns out to be.
+//
+// `lookupSession` is "" for "do not fetch", and it carries BOTH refusals: a
+// stored title has won step 1 outright (an async overwrite would be data loss),
+// or there is no session to ask about in the first place.
+//
+// A CHAT DRAFT's first line (splitDraft) sits between the two, and it takes the
+// same refusal: it is a name the user has just written, this second, and the
+// /api/tasks lookup would land a beat later and replace it with the name of the
+// conversation they wrote it in. A stored title still outranks it — an Edit
+// never loses the name it has — and the draft's line only exists on a NEW task,
+// where there is nothing to lose.
+export function initialTitleStateOf(
+  entry?: ScheduledMessage | null,
+  sessionId?: string | null,
+  draftTitle?: string | null,
+): { title: string; lookupSession: string } {
+  const title = initialTitleOf(entry) || (entry ? "" : (draftTitle ?? "").trim());
+  return { title, lookupSession: title ? "" : (sessionId ?? "") };
+}
+
+// Steps 2 and 3, which only /api/tasks can answer: the name the session this
+// form was opened from already carries. A session IS a task there, so the row
+// keyed on it has both the resolved `title` and the `title_source` saying which
+// branch produced it — and that provenance is the whole reason this reads the
+// API instead of a string in the deep link.
+//
+// The server's step 3 has TWO sources and only one of them is a name, so the
+// row says which it read (tasks.py `_title`):
+//
+//   * `message` — the session's own first prompt, out of the transcript. Step 3
+//     itself, "the first message that we had", and taken as a name (shortened).
+//   * `entry` — no readable transcript, so the row is named from the earliest
+//     message SCHEDULED at that session. On a task made in this form that is the
+//     ask itself, which is the duplication bug arriving by way of the server, so
+//     it is refused and Title stays blank for the user to fill.
+//
+// This used to be one value, and the composed ask was passed in so the client
+// could GUESS which of the two it had: a `message` title was dropped whenever
+// the ask's first line began with it. A guess cannot tell an echo from a
+// continuation — "pull today's news and file it" begins with the session's real
+// first prompt "pull today's news" — so a session lost the name the app already
+// knew and Save sat disabled until the user retyped it. The server knows the
+// answer for certain, so it says it, and no draft is an input here at all.
+//
+// Steps 1 and 2 are taken verbatim — a name a human typed and a name Claude
+// wrote are both already names, and shortening either would edit someone's
+// words. Only step 3 is a message being reduced to one.
+export function sessionTitleOf(
+  tasks: readonly { session_id: string; title: string; title_source: string }[],
+  sessionId: string,
+): string {
+  if (!sessionId) return "";
+  const task = tasks.find((t) => t.session_id === sessionId);
+  const title = (task?.title ?? "").trim();
+  if (!title) return "";
+  // Before the source is consulted at all: a leaked wire string is not a name
+  // from ANY source, and the verbatim branches below would take it as one. See
+  // LEAKED_TITLE — a guard behind a server fix, not the fix.
+  if (LEAKED_TITLE.test(title)) return "";
+  if (task?.title_source === "entry") return "";
+  if (task?.title_source === "message") return shortTitle(title);
+  // Everything else is already a name and is taken as written: `user` and `ai`,
+  // and `command` — a session whose only user records are a slash command is
+  // named `/making-a-release`, which is short, true, and not a message.
+  return title;
+}
+
+// What the Repeat checkbox does to the repeat state. Unticking CLEARS: the key
+// goes back to "none" AND the custom rule is dropped, so nothing stays armed
+// behind a dropdown that is no longer on screen — a hidden rule would still be
+// submitted by `rule` below. Ticking an unset form lands on the commonest
+// answer rather than on a blank menu; ticking a form that already carries a
+// rule (an Edit) leaves it exactly where it was.
+export const DEFAULT_REPEAT_KEY = "daily";
+
+export function applyRepeatToggle(
+  on: boolean,
+  current: { repeat: string; customRule: RecurrenceRule | null },
+): { repeat: string; customRule: RecurrenceRule | null } {
+  if (!on) return { repeat: "none", customRule: null };
+  if (current.repeat === "none") return { repeat: DEFAULT_REPEAT_KEY, customRule: current.customRule };
+  return current;
+}
+
+// -- What a time already gone actually MEANS ---------------------------------
+// A past time is not refused, by this form or by the server (design §9). What
+// the form owes instead is a sentence naming which of the TWO things will
+// happen, because a one-off and a rule answer differently:
+//
+//   * one-off — the queue sorts it to the head and sends it (SCH-3b). Once.
+//   * rule    — SCH-13b. A rule template with nothing materialized yet walks
+//     anchor → now and creates ONE occurrence, on the latest slot at or before
+//     now, marked `catch_up`; it is overdue the instant it exists, so it goes
+//     on the next tick. Every slot it stepped past is never materialized and
+//     never runs — the same collapse `_coalesce` applies to a backlog
+//     (SCH-13) — so an anchor a year back is still exactly one run, not a
+//     year of them. The series then continues from now in the ordinary way.
+//
+// Two sentences rather than one, because "runs as soon as it can" is a promise
+// a repeat does not keep: it runs once now AND then keeps its pattern.
+export const PAST_NOTE_ONE_OFF =
+  "This time has passed — the task will run as soon as it can.";
+export const PAST_NOTE_CATCH_UP =
+  "This time has passed — one catch-up run goes now, then the task keeps to "
+  + "its schedule. Just the one, however many have gone by.";
+
+// The series' FIRST slot, given the picked date as its anchor — null once the
+// rule's `until` has already cut the series off before it began.
+//
+// Mirrors recur._walk's opening step, and for four of the five frequencies
+// there is nothing to mirror: hourly, daily, monthly and annually all include
+// the anchor itself (a monthly nth-weekday reads "the second Wednesday" OFF
+// the anchor, so the anchor's own month always has it; a Feb 29 anchor is in a
+// leap year by construction). Only a WEEKLY rule can start later than its
+// anchor, and only because the chosen days are free of it: the anchor's week
+// is a partial one (`when >= anchor` in _walk_week), so a Tuesday anchor with
+// only Thursday ticked starts on that Thursday, and a Tuesday anchor with only
+// Monday ticked starts `interval` weeks on.
+export function firstRuleSlot(rule: RecurrenceRule, anchor: Date): Date | null {
+  let first = anchor;
+  if (rule.freq === "week" && rule.byday?.length) {
+    const days = [...rule.byday].sort((a, b) => a - b);
+    // Sunday-anchored blocks, counted from the anchor's OWN week — the unit
+    // that repeats is the week, not "7·interval days from each run".
+    const sunday = anchor.getDate() - anchor.getDay();
+    const slot = (day: number, weeks: number) =>
+      new Date(anchor.getFullYear(), anchor.getMonth(), sunday + day + weeks * 7,
+               anchor.getHours(), anchor.getMinutes());
+    const thisWeek = days
+      .map((d) => slot(d, 0))
+      .find((d) => d.getTime() >= anchor.getTime());
+    first = thisWeek ?? slot(days[0], rule.interval ?? 1);
+  }
+  if (rule.until) {
+    // INCLUSIVE, and compared on the DATE, so the time of day cannot decide
+    // it — recur._walk's rule exactly.
+    const [y, m, d] = rule.until.split("-").map(Number);
+    if (first.getTime() > new Date(y, m - 1, d, 23, 59, 59, 999).getTime())
+      return null;
+  }
+  return first;
+}
+
+// Midnight-safe start of the minute `d` falls in, as epoch ms. Field arithmetic
+// rather than `- (seconds * 1000)`, for the reason schedule-lib's day helpers give:
+// a constructed local date cannot be knocked into the wrong hour by a DST edge.
+const startOfMinute = (d: Date) =>
+  new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes())
+    .getTime();
+
+// The note the when-row prints, or null for silence. Silence is the answer for
+// a future time, and also for the two repeats with no anchor to catch up FROM:
+// a legacy cron template (`create` computes its first run from now by
+// construction, and cron never reads `due` at all — Bugbot, PR #541) and a
+// half-finished Custom, which Save refuses anyway. Never a refusal: it does
+// not touch `ready`, because "start this pattern, and run the one I missed" is
+// a legitimate thing to ask for.
+export function pastNoteFor(
+  picked: Date | null,
+  repeatOn: boolean,
+  rule: RecurrenceRule | null,
+  now: Date,
+): string | null {
+  if (!picked || Number.isNaN(picked.getTime())) return null;
+  // COMPARED AT THE FIELD'S OWN PRECISION (2026-08-18). The picker is
+  // minute-precision, so the current minute is not a time that has "passed" — it
+  // is the only way this form can say "now", and it is what the card now opens on.
+  // Comparing against `now` to the millisecond made that default print a warning
+  // about itself for the 59 seconds after the minute turned. Seconds the reader
+  // cannot see cannot be the thing that decides.
+  const cutoff = startOfMinute(now);
+  if (picked.getTime() >= cutoff) return null;
+  if (!repeatOn) return PAST_NOTE_ONE_OFF;
+  if (!rule) return null;
+  const first = firstRuleSlot(rule, picked);
+  return first !== null && first.getTime() < cutoff ? PAST_NOTE_CATCH_UP : null;
+}
+
+// ---- The first message ---------------------------------------------------
+// TITLE AND DESCRIPTION ARE ONE MESSAGE (Akshil, 2026-08-18). The card collects
+// a name and a body, and what Claude is sent is both of them: the title as the
+// first line, the description under it. Two reasons:
+//
+//   * the title is real instruction. "Update the changelog" is the whole task
+//     most of the time, and a form that sent only the description threw that
+//     sentence away — the user had typed the task and then had to type it again
+//     underneath. That is what makes the description OPTIONAL now (saveEnabled);
+//   * a message that opens with its own heading reads to Claude the way it reads
+//     in the list: one titled instruction, not an anonymous paragraph.
+//
+// A BLANK LINE between them, which is the plainest heading there is in the
+// markdown Claude is read in — a single newline would run the two together as
+// one paragraph. Either side alone is sent alone: no leading blank line on a
+// description-only message (a task from before this rule, re-saved), and no
+// trailing one on a title-only task.
+export function composeTaskMessage(title: string, description: string): string {
+  const name = title.trim();
+  const body = description.trim();
+  if (!name) return body;
+  if (!body) return name;
+  return `${name}\n\n${body}`;
+}
+
+// WHAT THE PRIMARY BUTTON SAYS. "Save" was the word for a card that only ever
+// wrote a row down; the same card now does two genuinely different things, and
+// the button is the last thing read before either of them happens (Akshil,
+// 2026-08-23).
+//
+//   Schedule — the picked time is still ahead, or the task repeats. Something is
+//              being written into the future, and nothing runs on this press.
+//   Create   — the time is now or already past, which is what a card opened from
+//              the List or the Board and left alone means. It briefly said "Run"
+//              (2026-08-23), but the press creates the task — the run is a
+//              consequence — and "Run" over-promised on a card that may still be
+//              being written (Akshil, 2026-08-25).
+//
+// A repeat is always "Schedule" even when its anchor is behind: a past anchor
+// gets ONE catch-up run and then a pattern, and "Create" would describe the
+// catch-up while saying nothing about the standing rule, which is the bigger fact.
+//
+// An EDIT reads by the same rule rather than reverting to "Save": moving a task's
+// time forward and moving it into the past are the two things an edit does here,
+// and they deserve the same two words a create gets.
+//
+// Minute precision, matching the field and `pastNoteFor`: a card opened on the
+// current minute and saved unchanged says Create, not Schedule.
+export function saveActionLabel(
+  picked: Date | null,
+  repeatOn: boolean,
+  now: Date,
+): "Schedule" | "Create" {
+  if (repeatOn) return "Schedule";
+  // An unreadable date cannot be claimed to run now. Save is refused on it
+  // anyway (saveBlockedReason), so this is only about which word the disabled-
+  // looking button wears.
+  if (!picked || Number.isNaN(picked.getTime())) return "Schedule";
+  return startOfMinute(picked) > startOfMinute(now) ? "Schedule" : "Create";
+}
+
+// The body POSTed to /api/schedule — api.ts's own parameter type, nothing
+// added to it. That type models `title`, `description` and `new_task_each_run`
+// itself, so this alias only names what the builder returns.
+export type SchedulePayload = Parameters<typeof scheduleMessage>[0];
+
+// One attachment, from either of the two places it can come from. A fresh
+// attach shows a `blob:` thumbnail (pictures only) while the upload is in
+// flight and gains `path` plus the SERVER's `kind` when POST
+// /api/schedule/shot answers; an Edit's restored attachment is the opposite — a
+// stored path with no blob, its kind read back off the extension
+// (`attachmentKindOf`) and its picture drawn through /api/fs/raw. `key` only
+// keys the React list.
+//
+// ANY FILE, NO CAPS (D618, following the chat's D612/D615): the count cap
+// (IMAGES_MAX, 4), the byte cap and the image-only MIME gate are all gone. What
+// `kind` decides is what the chat's `shotIsImage` decides — a thumbnail or a
+// glyph, a picture viewer or a template preview — and nothing about whether the
+// file is allowed in.
+export interface TaskImage {
+  key: number;
+  path: string;
+  // Thumbnail XOR glyph, never both — the chat's D613 rule and for its reason:
+  // a chip wearing a picture frame AND a hole is the worst of the three
+  // possible outputs.
+  kind: "image" | "file";
+  // What to SAY for a file: the client's filename, which is the only name the
+  // user recognises — the stored path is a minted timestamp.
+  name: string;
+  // A `blob:` URL for a freshly attached, drawable picture; null for
+  // everything else (a restored attachment, every non-picture, and a picture in
+  // a format this engine cannot draw until the server's PNG comes back).
+  thumb: string | null;
+}
+
+// Extensions that mean "picture" for a path with no File behind it — a restored
+// Edit, and the kind guess a fresh attach makes before the upload answers.
+// Deliberately only the DRAWABLE formats: the upload endpoint has already
+// converted anything a browser shows as an empty box (a `.tif`, a `.heic`) by
+// the time a path is stored, so a stored path in one of those formats is the
+// original that nobody can draw — and the one worth drawing is the `-view.png`
+// beside it, which this list matches on its own.
+const DRAWABLE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp",
+                               ".avif", ".bmp", ".svg", ".ico"]);
+// The same answer from a MIME, for a clipboard paste whose File has no usable
+// filename at all (a pasted screenshot is `image/png` and nothing else).
+const DRAWABLE_MIMES = new Set(["image/png", "image/jpeg", "image/gif",
+                                "image/webp", "image/avif", "image/bmp",
+                                "image/svg+xml"]);
+
+export function attachmentKindOf(path: string): "image" | "file" {
+  const dot = path.lastIndexOf(".");
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const ext = dot > slash ? path.slice(dot).toLowerCase() : "";
+  return DRAWABLE_EXTS.has(ext) ? "image" : "file";
+}
+
+// An EDIT's chips, restored from the entry the form opened on.
+//
+// `attachments` first, `images` second, and the difference is what the user
+// sees: the richer field carries the filename they chose and the kind the
+// browser settled at attach time, where a bare path yields a minted timestamp
+// (`20260828-101500-a1b2c3d4.pdf`) and a kind guessed from an extension the
+// upload endpoint may have changed. The fallback stays because an entry stored
+// before D619 has only paths — and it is the same guess the server makes for
+// one (`schedule._derived_attachment`).
+export function restoredAttachments(
+  editing?: Pick<ScheduledMessage, "images" | "attachments"> | null,
+): TaskImage[] {
+  const rich = editing?.attachments ?? [];
+  if (rich.length) {
+    return rich.map((a, i) => ({
+      key: i,
+      path: a.path,
+      kind: a.kind === "image" ? "image" : "file",
+      name: a.name || a.path.split("/").pop() || a.path,
+      thumb: null,
+    }));
+  }
+  return (editing?.images ?? []).map((p, i) => ({
+    key: i,
+    path: p,
+    kind: attachmentKindOf(p),
+    name: p.split("/").pop() || p,
+    thumb: null,
+  }));
+}
+
+// The chat's own two functions, ported (D616 / template.html paneOfferable +
+// paneSrcFor): stat's entries minus the `conditional` ones — their verdict lives
+// behind /api/fs/conditions and is deliberately NOT fetched, so an unresolved
+// gate reads as "not offered" — and minus the chat mode itself; the first one
+// wins, and it is the shell's own default-template rule. A per-extension table
+// here would drift from the registry on the next rebinding and ignore a user's
+// override entirely (§16).
+//
+// /render and NOT /embed: /embed serves the React shell, which nests the file
+// one iframe deeper — an extra document, an extra boot, and a chrome bar around
+// a preview that has a caption of its own here.
+//
+// `thumbUrl` puts the two display-only stamps on: `_preview=1` (this is a
+// picture of a page, not an open the recents list should record) and
+// `_nofocus=1` (the framed page may not steal the keyboard or yank scroll — the
+// viewer is modal and Escape has to keep belonging to it).
+//
+// null is the ORDINARY answer, not an error: a file with no template, a path
+// the pruner has deleted, a server that declined. The dialog then says the name
+// and the path, which is what it said before a preview existed.
+const PREVIEW_SKIP_MODES = new Set(["claude"]);
+
+export function taskPreviewSrcFor(stat: StatResult | null, path: string): string | null {
+  if (!stat || stat.is_dir || !path) return null;
+  const t = (stat.templates || []).find(
+    (e) => !e.conditional && !PREVIEW_SKIP_MODES.has(e.mode));
+  if (!t) return null;
+  // `_render` is a shell sentinel (PT-12), not a template folder: it means "the
+  // file renders itself", which is a bare /render on the file.
+  if (t.mode === "_render") return thumbUrl("/render?path=" + encodeURIComponent(path));
+  if (!t.path) return null;
+  return thumbUrl("/render?path=" + encodeURIComponent(t.path)
+    + "&_file=" + encodeURIComponent(path)
+    + (stat.remote ? "&_remote=1" : ""));
+}
+
+export function buildSchedulePayload(form: {
+  target: string;
+  // The SECOND field on the card: the task's DESCRIPTION, and — joined under
+  // the title by `composeTaskMessage` — the second half of the first message
+  // Claude is sent. OPTIONAL as of 2026-08-18: a task whose whole instruction
+  // fits in its name ("Update the changelog") should not have to say it twice,
+  // so an empty one is legal here and the composed message is the title alone.
+  // It still rides the wire as `description` when it has content, because the
+  // server stores the two separately and a task page with nothing under the
+  // title would be the only alternative.
+  message: string;
+  // The FIRST field on the card, and the REQUIRED one (2026-08-17): a name for
+  // the list, and — as of 2026-08-18 — the first line of what Claude is sent.
+  // `saveEnabled` refuses Save on a blank one, so what reaches here is a name a
+  // human accepted or typed. The wire contract is unchanged — the server still
+  // names an untitled task from the transcript's `ai-title` (design §4) — so the
+  // empty branch below stays as the honest fallback for a caller this form's
+  // gate never saw.
+  title: string;
+  when: string;
+  // The structured rule the current choice means; null for a one-off and for
+  // the legacy cron key, whose line is submitted verbatim instead.
+  rule: RecurrenceRule | null;
+  repeat: string;
+  legacyCron: string;
+  permission: string;
+  // WHICH Claude the unattended run uses and how hard it thinks — the More
+  // options row's two dropdowns (TASK_MODELS / TASK_EFFORTS in schedule-lib).
+  //
+  // "" is the default for both, and it means "don't send the key at all": the
+  // server stores "" for "pass no flag" and the session then detects its own
+  // defaults from the project, which is what every task did before these were
+  // askable. Omitting rather than sending "" keeps the body the same shape it
+  // has always had for the overwhelming majority of tasks, which is also what
+  // makes the two easy to read in a stored entry — a `model` on the row means
+  // somebody chose one.
+  model: string;
+  effort: string;
+  // A CHAT HANDOFF's session: the conversation the composer was in when it
+  // deep-linked here (?new=1&session_id=…). A one-off continues it; a repeat
+  // refuses it, because a task that runs every day must not hijack the user's
+  // open chat and compound its context forever.
+  sessionId: string;
+  // The task's OWN session, and the opposite case: the thread the entry being
+  // edited LEARNED when its first run reported the session it ran in, which the
+  // server marks as learned at that moment (`session_learned`). Editing is
+  // cancel + re-create, so dropping this is how a chaining task silently
+  // abandons everything it had built. It outranks a chat's id and survives a
+  // repeat — unless the task forks every run below.
+  learnedSessionId?: string;
+  // Ticked: mint a fresh task — a fresh Claude session — per occurrence,
+  // instead of the default, which is every run landing in this task's own
+  // thread (design §6).
+  newTaskEachRun: boolean;
+  // The id of the entry being EDITED, and "" for a new task. An edit is cancel
+  // + re-create, so the entry the user is looking at is about to stop existing
+  // and a new one with a new id take its place — and a task that has not run yet
+  // is NUMBERED on that entry id. Carrying it lets the server move the number
+  // across rather than allocate a second one, which is what renamed TASK-078 to
+  // TASK-079 when only its time had changed.
+  replacesEntryId?: string;
+  // The client-minted uuid of the DRAFT this form was autosaving into, or "" for
+  // a card that never became one. Sent so the server deletes the draft in the
+  // same request that creates the task: two round trips could half-fail and
+  // leave a draft row sitting beside the task it had already become.
+  draftId?: string;
+  // THE CHAT RECORD THIS FORM IS, for a card opened from the composer's
+  // Schedule button or from the Draft chip — the same key the card has been
+  // autosaving onto. Sent so the server deletes that record in the same request
+  // that creates the task, and moves its TASK number onto the new entry, exactly
+  // as `draft_id` does for a task draft (contract §5, `draft_key`).
+  //
+  // THE TWO ARE ALTERNATIVES, not a pair: a card edits one record, and which
+  // kind it is decides which key names it.
+  draftKey?: string;
+  // DID ANYONE PICK THIS TIME? False when the card was opened from the List or
+  // the Board — where the when-row starts folded away — and the user never
+  // touched it, so `when` is only the form's own default of "now". The task
+  // still runs, and runs immediately; what changes is that the calendar knows
+  // not to draw it (design: a plan, not a log). Absent means "yes, treat it as
+  // planned", which is what every caller that is not this form means.
+  timePicked?: boolean;
+  // Uploaded task-shot paths, in attach order. Omitted from the wire when
+  // empty, like every other optional here.
+  images?: string[];
+  // The SAME uploads with the two facts a path loses — the user's filename and
+  // the kind the browser settled — in the same order. Sent beside `images`
+  // rather than instead of it (D619): the fired run writes the chat's own
+  // `<pane-shot>` block from these, so the task's turn shows receipt rows
+  // (📄 name, a thumbnail) instead of a list of temp paths, and every reader
+  // that only knows `images` keeps working.
+  attachments?: TaskAttachment[];
+}): SchedulePayload {
+  const repeating = form.rule !== null || form.repeat === "cron";
+  const trimmedTitle = form.title.trim();
+  // The description, trimmed: the padding a textarea collects is not part of
+  // what the task is about.
+  const trimmedDescription = form.message.trim();
+  // WHAT CLAUDE IS ACTUALLY SENT — title and description as one message, not
+  // the description alone. See composeTaskMessage.
+  const composed = composeTaskMessage(form.title, form.message);
+  // WHICH session, if any, the re-created entry continues. The two sources are
+  // treated oppositely:
+  //   · the task's own (learned) id survives everything except a template that
+  //     is meant to fork — an edit that dropped it would orphan the thread the
+  //     task had been building, with nothing in the UI saying so;
+  //   · a chat's id is continued only while the task stays a one-off.
+  // A ticked "new task each run" refuses BOTH: that template mints a fresh
+  // session per occurrence, so any id on it is a thread it must not resume.
+  const carriesLearned =
+    Boolean(form.learnedSessionId) && !(repeating && form.newTaskEachRun);
+  const continued = carriesLearned
+    ? (form.learnedSessionId ?? "")
+    : form.learnedSessionId || repeating
+      ? ""
+      : form.sessionId;
+  return {
+    target: form.target.trim(),
+    message: composed,
+    // A rule rides WITH its anchor (`due` = the first run); the legacy cron
+    // line replaces due exactly as it always did; a one-off is due alone.
+    ...(form.rule
+      ? { due: form.when, rule: form.rule }
+      : form.repeat === "cron" && form.legacyCron
+        ? { repeats: form.legacyCron }
+        : { due: form.when }),
+    permission_mode: form.permission,
+    // Sent only when chosen — see `model`/`effort` on the form type above. An
+    // edit re-states whatever the entry held, so a task's model survives the
+    // cancel + re-create instead of quietly reverting to the default.
+    ...(form.model ? { model: form.model } : {}),
+    ...(form.effort ? { effort: form.effort } : {}),
+    // An edit keeps what it cannot re-ask for — see `continued` above.
+    ...(continued ? { session_id: continued } : {}),
+    // …and re-states WHERE that id came from, so the re-created entry is still
+    // marked as owning a learned thread. Without this the marker would die on
+    // the first edit and the next one would read the id as a chat handoff —
+    // which is the bug this replaced. Never sent for a chat's id: nothing has
+    // learned anything yet.
+    ...(continued && carriesLearned ? { session_learned: true } : {}),
+    // Empty means "the server decides" for the title and "there isn't one" for
+    // the description — in both cases the key is better left off the wire than
+    // sent as "". The title's empty branch is not reachable from the form (Save
+    // refuses a blank one); the description's is the ordinary case of a task
+    // named well enough to need no body, and `message` above still carries the
+    // title, so nothing empty reaches `schedule.create`.
+    ...(trimmedTitle ? { title: trimmedTitle } : {}),
+    ...(trimmedDescription ? { description: trimmedDescription } : {}),
+    // Only ever sent on a repeating task: on a one-off there is no "each run"
+    // for it to mean anything about.
+    ...(repeating && form.newTaskEachRun ? { new_task_each_run: true } : {}),
+    // Only ever sent as `true`, and only on a one-off: a repeat's anchor is a
+    // time somebody chose by definition, and the server refuses the pairing
+    // anyway. Left off the wire otherwise, like every other flag here.
+    ...(!repeating && form.timePicked === false ? { immediate: true } : {}),
+    // Only on an edit, and only as a non-empty string: a new task replaces
+    // nothing, and the key is left off the wire rather than sent as "" for the
+    // same reason `title` is.
+    ...(form.replacesEntryId ? { replaces: form.replacesEntryId } : {}),
+    ...(form.draftId ? { draft_id: form.draftId } : {}),
+    ...(form.draftKey ? { draft_key: form.draftKey } : {}),
+    ...(form.images && form.images.length ? { images: form.images } : {}),
+    ...(form.attachments && form.attachments.length
+      ? { attachments: form.attachments } : {}),
+  };
+}
+
+// WHAT SAVE REFUSES. Pulled out of the component (it was an inline `ready`
+// expression) so the rules are assertable: ONE prose field is required — the
+// Title, because a task nobody can name in a list is not a task and because it
+// is now also the first line of what Claude is sent (composeTaskMessage). The
+// description is OPTIONAL as of 2026-08-18: "Update the changelog" is a whole
+// instruction, and a form that made the user write it twice was asking for
+// ceremony rather than information.
+//
+// Title being required is not softened by the field sometimes opening blank —
+// that is the point of the requirement rather than a hole in it. The form fills
+// the field from the session wherever a session has a name (initialTitleOf plus
+// the /api/tasks lookup behind it), and from the chat draft's first line where
+// one arrived; where nothing honest is available it asks.
+//
+// `.trim()`, because a title of spaces is not a name. The field carries
+// `aria-required`, and pressing Save while it is empty SAYS SO — see
+// `saveBlockedReason`, which is the same set of rules read out loud.
+export function saveEnabled(f: {
+  // The description. OPTIONAL — it is read by the gate no more; the parameter
+  // stays because everything else about the form's state travels in this one
+  // object and dropping it would make the two callers assemble two shapes.
+  message: string;
+  // The task's name. Required, and prefilled rather than asked for.
+  title: string;
+  // Where it runs. Required, and the async existence check must not be failing.
+  target: string;
+  pathError: string | null;
+  // A "custom" repeat is only a choice once the recurrence dialog produced a
+  // rule; a legacy cron template needs its line; everything else needs a
+  // parseable date-time.
+  repeatOn: boolean;
+  repeat: string;
+  customRule: RecurrenceRule | null;
+  legacyCron: string;
+  pickedOk: boolean;
+  // The entry has already been re-created by this modal — saving twice would
+  // schedule it twice.
+  replaced: boolean;
+}): boolean {
+  return (
+    !f.replaced &&
+    f.title.trim() !== "" &&
+    f.target.trim() !== "" &&
+    f.pathError === null &&
+    (f.repeatOn && f.repeat === "custom" ? f.customRule !== null : true) &&
+    (f.repeat === "cron" ? f.legacyCron !== "" : f.pickedOk)
+  );
+}
+
+// WHICH FIELD, and where the caret should go. The other half of `saveEnabled`:
+// the same rules, in the same order, said as a sentence a person can act on.
+//
+// Save used to be `disabled` on a false `saveEnabled`, and that is a dead
+// control, not a hint. The commonest way to meet it is the commonest thing to
+// forget — open the form, type a name, press Save — and a disabled button
+// answers by doing NOTHING: no error, no focus move, the modal just sits there
+// (QA, 2026-08-18). That press is not blocked at all any more: a title alone is
+// a saveable task, and what goes over the wire as `message` is the title (the
+// server's "message: cannot be empty" is satisfied by composeTaskMessage, not by
+// a second required field).
+//
+// So Save stays pressable and this is what a press finds. `field` is the ref key
+// to focus, because a sentence naming a field the user then has to hunt for is
+// half an answer — `null` for the reasons that are not a field (an already-saved
+// edit, an unreachable path).
+//
+// ORDER IS THE READING ORDER OF THE CARD: title, folder, time, repeat. One
+// reason at a time, the topmost — a form that lists everything wrong at once
+// reads as a scolding, and fixing the first often fixes the rest. The
+// description is not in the list any longer: it is optional, so there is no
+// sentence to say about an empty one, and "message" is gone from `field` with
+// it rather than kept as a case nothing can return.
+export function saveBlockedReason(f: Parameters<typeof saveEnabled>[0] & {
+  /**
+   * THE TARGET FIELD IS DISABLED (the card opened inside an app's Tasks tab —
+   * see the prop of the same name). The gate is unchanged by it: a missing or
+   * unreachable folder still blocks Save, because the task genuinely cannot run.
+   * What changes is the FIX, and therefore the `field`.
+   *
+   * `.focus()` on a disabled input is a no-op, so a reason returning
+   * `field: "target"` here put the sentence in the banner and then moved nothing
+   * — and there was no control on the card that could answer it. The press read
+   * as a dead end, which is the very thing `saveBlockedReason` exists to stop
+   * (see above: a disabled Save button answers by doing nothing).
+   *
+   * So the reason still SPEAKS — the banner is the whole point, and "this app's
+   * folder is gone" is news worth having — and it names no field, because there
+   * is no field to send the caret to. The answer lies outside this card.
+   */
+  lockTarget?: boolean;
+}): {
+  text: string;
+  field: "title" | "target" | null;
+} | null {
+  if (f.replaced) {
+    return {
+      text: "This task is already saved — close the card and edit it again to change it.",
+      field: null,
+    };
+  }
+  if (f.title.trim() === "") {
+    // The sentence asks for the TASK, not for a name, because that is what the
+    // field asks for now ("What should Claude do?"). "Give the task a name" sent
+    // the user looking for a label to invent, when what is missing is the
+    // instruction itself — and this empty field means there is no message to
+    // send at all. The caret lands in the same place either way: the primary
+    // field is where the answer goes.
+    return {
+      text: "Say what Claude should do — a task with no instructions has nothing to run.",
+      field: "title",
+    };
+  }
+  if (f.target.trim() === "" || f.pathError !== null) {
+    // LOCKED FIRST, because under a lock neither of the two sentences below is
+    // actionable and neither has a field to land in (see `lockTarget`). One
+    // sentence covers both halves: the path the card was handed is not a folder
+    // that exists any more, and nothing on this card can change which path that
+    // is. It names the project rather than the field, because that is the thing
+    // the reader would go and look at.
+    if (f.lockTarget) {
+      return {
+        text: "This project's folder is missing, so there is nowhere to run the task.",
+        field: null,
+      };
+    }
+  }
+  if (f.target.trim() === "") {
+    return { text: "Pick the folder or file this task runs against.", field: "target" };
+  }
+  // The path check has already written its own sentence into the field; naming
+  // it again in the banner would say the same thing twice.
+  if (f.pathError !== null) {
+    return { text: f.pathError, field: "target" };
+  }
+  if (f.repeatOn && f.repeat === "custom" && f.customRule === null) {
+    return { text: "Finish the custom repeat, or pick one of the presets.", field: null };
+  }
+  if (f.repeat === "cron" ? f.legacyCron === "" : !f.pickedOk) {
+    return { text: "Pick a date and a time for the first run.", field: null };
+  }
+  return null;
+}
+
+/**
+ * AN UNFINISHED FORM, HANDED BACK (design.md, "Reopen path").
+ *
+ * The draft row's `form` is whatever this card last autosaved, and it arrives as
+ * loose JSON: it was written by a build of this file that may not be this one,
+ * and it round-tripped through a file on disk. So every field is read with its
+ * own type check and every miss is `null` — "the draft does not say", which the
+ * state initialisers below fall back from into the answer they would have given
+ * with no draft at all. A draft with a field this build has never heard of costs
+ * that field and nothing else; one with a field of the wrong shape costs the
+ * same. Neither may throw: this runs in a `useState` initialiser, and a throw
+ * there is a card that will not open at all.
+ */
+export interface DraftSeed {
+  /** The task draft this card is reopening, or `""` for a seed that carries no
+   *  draft at all — a chat hop's record, or a folder to open a blank card on.
+   *  `""` is NOT a minted form: see `draftId` (Bugbot 4028344040). */
+  id: string;
+  form?: Record<string, unknown> | null;
+}
+
+export interface SeededDraftForm {
+  title: string | null;
+  description: string | null;
+  target: string | null;
+  when: string | null;
+  repeat: string | null;
+  model: string | null;
+  effort: string | null;
+  permission: string | null;
+  attachments: { path: string; name: string; kind: "image" | "file" }[] | null;
+  newTaskEachRun: boolean | null;
+  /**
+   * THE CONVERSATION THIS DRAFT IS A MESSAGE TO (Akshil, 2026-09-12).
+   *
+   * Where the task is GOING, and it has to survive the card being closed. A hop
+   * out of a session that has already run schedules into that session — same
+   * thread, same TASK number — and the page knew that only while it stayed
+   * open: exit the card, reopen the draft from its row and press Schedule, and
+   * the message started a new conversation under a new number instead.
+   *
+   * It is what `sessionId` on the Schedule payload falls back to, and it is
+   * what the server's listing reads to give this draft the session's own row
+   * identity rather than minting a second one.
+   */
+  sessionId: string | null;
+  /**
+   * THE RULE `repeat: "custom"` POINTS AT (Bugbot, PR #1118). The preset key
+   * alone is not an answer for Custom — see `TaskDraftForm.custom_rule` — so a
+   * reopened draft needs this to seed `customRule` with, not just `repeat`.
+   * Null for anything that does not parse as one of the five known shapes:
+   * a draft is loose JSON that may have been written by a different build
+   * (module docstring), and a malformed rule must cost the rule, not the card.
+   */
+  customRule: RecurrenceRule | null;
+}
+
+/** `f.custom_rule`, as a `RecurrenceRule` or not at all. Every field its own
+ *  type check, exactly like `str`/`attachments` below — a draft is loose JSON
+ *  and a bad shape must never throw inside the `useState` initialiser that
+ *  reads this (module docstring). */
+function parseCustomRule(value: unknown): RecurrenceRule | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  const freq = row.freq;
+  if (freq !== "hour" && freq !== "day" && freq !== "week" && freq !== "month" && freq !== "year") {
+    return null;
+  }
+  const rule: RecurrenceRule = { freq };
+  if (typeof row.interval === "number") rule.interval = row.interval;
+  if (Array.isArray(row.byday) && row.byday.every((d) => typeof d === "number")) {
+    rule.byday = row.byday as number[];
+  }
+  if (row.monthly === "day" || row.monthly === "nth-weekday") rule.monthly = row.monthly;
+  if (typeof row.until === "string") rule.until = row.until;
+  if (typeof row.count === "number") rule.count = row.count;
+  return rule;
+}
+
+export function seededDraftForm(seed?: DraftSeed | null): SeededDraftForm {
+  const f = (seed?.form ?? {}) as Record<string, unknown>;
+  const str = (key: string): string | null =>
+    typeof f[key] === "string" && f[key] !== "" ? (f[key] as string) : null;
+  const attachments = Array.isArray(f.attachments)
+    ? (f.attachments as unknown[])
+        .filter((a): a is { path: string } =>
+          !!a && typeof a === "object" && typeof (a as { path?: unknown }).path === "string"
+          && (a as { path: string }).path !== "")
+        .map((a) => {
+          const row = a as { path: string; name?: unknown; kind?: unknown };
+          return {
+            path: row.path,
+            name: typeof row.name === "string" && row.name ? row.name : row.path,
+            kind: row.kind === "image" ? ("image" as const) : ("file" as const),
+          };
+        })
+    : null;
+  return {
+    title: str("title"),
+    description: str("description"),
+    target: str("target"),
+    when: str("when"),
+    repeat: str("repeat"),
+    model: str("model"),
+    effort: str("effort"),
+    permission: str("permission"),
+    attachments: attachments && attachments.length ? attachments : null,
+    newTaskEachRun: typeof f.new_task_each_run === "boolean" ? f.new_task_each_run : null,
+    sessionId: str("session_id"),
+    customRule: parseCustomRule(f.custom_rule),
+  };
+}
+
+export default function NewJobModal({
+  initialTime,
+  initialTarget,
+  initialMessage,
+  initialAttachments,
+  initialDraft,
+  chatSessionId,
+  chatBack,
+  chatKey,
+  lockTarget = false,
+  sourceTask = null,
+  editing,
+  permissionModes,
+  recentTargets,
+  projects = NO_PROJECTS,
+  planning = false,
+  onClose,
+  onCreated,
+}: {
+  // From a calendar slot click, or null from the New task button.
+  initialTime: Date | null;
+  // From a deep link that ALREADY knows the folder: the chat composer's
+  // Schedule button, which is bound to one target (/tasks?new=1&target=…).
+  // It outranks the defaultTargetOf() workspace below — a default is what you
+  // offer when nobody said — and an Edit outranks both, having a stored target.
+  initialTarget?: string | null;
+  // The chat composer's handoff (Akshil, 2026-08-16): the draft the user had
+  // typed arrives as the task's prose and is SPLIT across the card's two fields
+  // — first line to the title, the rest to the description (splitDraft), which
+  // Save composes back into one message…
+  initialMessage?: string | null;
+  // …and the chat's TRAY arrives as this card's chips (owner E2E R1, F4
+  // (2026-09-10)). Already copied into the task-shots dir by the composer's
+  // Schedule button — the chat's own copies live in a tempdir on a 12 h TTL and
+  // POST /api/schedule refuses any path outside the shots dir — so what lands
+  // here is the same three fields a saved entry's `attachments` carries, and it
+  // is seeded through the identical function an Edit uses. An Edit outranks it:
+  // that entry's own attachments are the ones being changed.
+  initialAttachments?: { path: string; name: string; kind: "image" | "file" }[];
+  // AN UNFINISHED FORM THIS CARD ALREADY SAVED, re-opened from its row on the
+  // List or the Board (design.md, "Reopen path" — the only way back to a
+  // draft). It seeds every field this form owns, and the card keeps autosaving
+  // under the SAME id, so re-opening is not a new draft. The primary button is
+  // still Schedule: a draft becoming a task is the one thing it is for.
+  //
+  // Never combined with `editing`: a stored entry already persists on save, and
+  // abandoning an edit is a cancel rather than a draft (design.md, Not in
+  // scope).
+  initialDraft?: DraftSeed | null;
+  // …the open conversation arrives as a session to CONTINUE — but only a
+  // one-off resumes it; a repeating task always opens fresh chats, because
+  // resuming the same conversation every day compounds context forever.
+  chatSessionId?: string | null;
+  // And the chat's own URL, so the form can offer the way back — the whole
+  // point is a round trip (chat → schedule → back → adjust → again).
+  chatBack?: string | null;
+  /**
+   * THE CHAT RECORD THIS CARD IS EDITING (design "one record", §1).
+   *
+   * The key the composer's own autosave writes under — `<session_id>`, or
+   * `new:<file>` for a chat that has none — and, when it is set, the record THIS
+   * card autosaves onto as well. Not a key to supersede: there is no second
+   * record to mint and none to delete, so the sentence is in exactly one place
+   * at every instant by construction rather than by a delete racing a write.
+   *
+   * Set by the Schedule hop, by the Draft chip's press, and by nothing else. `""`
+   * (or absent) is a card with no chat behind it, which autosaves to a
+   * `draft:<id>` task record exactly as it always has.
+   */
+  chatKey?: string | null;
+  /**
+   * THE PATH IS NOT A QUESTION HERE (design.md §2, 2026-09-14).
+   *
+   * True when the card was opened from inside ONE app — the app page's Tasks
+   * tab (AppPage.tsx) mounts the Tasks page scoped to that folder, and a task
+   * made there runs against that app by definition. The combobox then renders
+   * as a read-only field: no recents, no Browse, no picker, and a line under it
+   * saying why. `initialTarget` still decides the value, exactly as it does on
+   * the unscoped page.
+   *
+   * It changes nothing about what is SAVED — the field shows the target the
+   * payload carries either way. What it removes is a control whose every answer
+   * but one takes the reader out of the app they are standing in.
+   */
+  lockTarget?: boolean;
+  /**
+   * THE FOLDERS THIS PAGE CALLS PROJECTS — the very array the toolbar's Project
+   * filter offers (Scheduled.tsx `projectOptions`), handed down rather than
+   * re-derived (Akshil, 2026-09-19: "the same project options I have in the
+   * filter beside the New task button").
+   *
+   * It is what the folder field SEARCHES once the address is cleared and a bare
+   * word is typed; while the field holds an address it is not consulted at all.
+   * Empty on every opening that has no listing behind it (the app page's scoped
+   * card, a deep link), and an empty list simply means a search finds nothing.
+   */
+  projects?: string[];
+  /**
+   * THE TASK THESE WORDS CAME OUT OF, when the card was opened from one
+   * (design.md B, Option 1).
+   *
+   * Scheduling from a task flows through `chatSessionId` / `chatKey`, which
+   * name a SESSION — nothing on the card said which task that session is, so a
+   * reader mid-form had no way to check what they were continuing. The header
+   * says it as a chip beside the title, and pressing it opens that task.
+   *
+   * The parent resolves it (it holds the listing, and where a task opens is its
+   * answer — the Tasks page has a side peek beside it), so this is the NAME plus
+   * the door, not the row. Null on every opening that did not come from a task,
+   * and never set on an Edit: that card's heading is the task.
+   *
+   * `onOpen` is optional because the door is not always there — a page with no
+   * peek to open hands over the name alone, and the chip is then a statement
+   * rather than a button that would do nothing.
+   */
+  sourceTask?: { taskId: string; onOpen?: (() => void) | null } | null;
+  // An existing task to change. The server has no update: saving schedules the
+  // replacement first, then withdraws this one — see submit().
+  editing?: ScheduledMessage | null;
+  permissionModes: string[];
+  // Folders existing tasks already point at, newest first — the parent reads
+  // them off the schedule it has anyway. They pad the dropdown out on a
+  // machine whose localStorage hasn't seen this form yet (QA 2026-08-15 —
+  // the first open showed nothing but Browse).
+  recentTargets?: string[];
+  // IS THIS CARD BEING USED TO PLAN? (Akshil, 2026-08-23.) True on the calendar
+  // — where the question in the reader's head is already "when" — and on any
+  // opening that arrived with a time (a slot click, an edit). False from the
+  // List and the Board, where a task is overwhelmingly something to run NOW and
+  // the when-row was the field everybody skipped past.
+  //
+  // It moves ONE thing: whether the when-row (and the Repeat that hangs off it)
+  // is on the card's face or folded into More options, which starts open when
+  // this is true. It never changes what the form can express — the row is one
+  // click away either way — and it is not a second answer to "is this
+  // scheduled": that is `timePicked` below, which reads what the user actually
+  // did rather than which view they came from.
+  planning?: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  // The description field's opening value — see initialAskOf. Held in a const
+  // because the BASELINE below (`initial`) has to be the identical value, or an
+  // Edit opens looking dirty and its ✕ arms the close-twice guard on an
+  // untouched modal (QA 2026-08-14).
+  // What the saved draft says, field by field, with every miss reading as "the
+  // draft does not say" — see seededDraftForm. Taken ONCE, in a const, for the
+  // same reason `initialAsk` and `draft` below are: the BASELINE (`initial`)
+  // has to be the identical value or a re-opened draft reads as dirty the
+  // moment it mounts.
+  const saved = seededDraftForm(initialDraft);
+  const initialAsk = saved.description ?? initialAskOf(editing, initialMessage);
+  // The chat handoff's two halves, and the same held-in-a-const discipline: the
+  // title below opens on `draft.title` and the description on the body that goes
+  // with it, so the split has to be taken once rather than per reader.
+  const draft = splitDraft(initialMessage);
+  const [message, setMessage] = useState(initialAsk);
+  // The attachments (design: the same functionality the claude template's chat
+  // has — paste or drop ANY file, a thumbnail or a doc glyph with a remove ✕ —
+  // in this card's own chrome). An Edit opens on the entry's stored paths, kind
+  // decided by extension since there is no File to ask; a fresh attach shows
+  // its chip immediately and swaps in the uploaded path when the POST answers.
+  // …and a CHAT HANDOFF opens on the tray it came from, through the same
+  // function and therefore as the same chips: a restored path with no blob, its
+  // picture drawn through /api/fs/raw (owner E2E R1, F4 (2026-09-10)). Only when
+  // this is not an Edit — an entry being changed already has attachments of its
+  // own, and they are the ones on the card.
+  // The attachments this card opens with, as ONE expression used twice — the
+  // state below and the dirty baseline further down must be the same list, or a
+  // re-opened draft reads as dirty on mount. A draft's own attachments outrank a
+  // chat handoff's for the reason an Edit's do: they are the ones being changed.
+  const initialAttachmentRows = saved.attachments ?? initialAttachments ?? [];
+  const [images, setImages] = useState<TaskImage[]>(() =>
+    editing
+      ? restoredAttachments(editing)
+      : restoredAttachments({ images: [], attachments: initialAttachmentRows }));
+  // THE REF IS THE AUTHORITY, the state is its mirror for rendering — and that
+  // asymmetry is load-bearing twice (Bugbot, PR #865). Save awaits the uploads
+  // and then has to read the paths they wrote; a `setImages` updater only
+  // reaches `images` on the next RENDER, so a drop-then-immediate-Save read an
+  // empty path and `filter(Boolean)` dropped the picture — losing exactly the
+  // attachment the await existed to save. And the cap has to be answered
+  // BEFORE the upload starts, which a state updater cannot do either.
+  // `applyImages` writes the ref synchronously, then mirrors.
+  const imagesRef = useRef<TaskImage[]>(images);
+  // Every `blob:` thumbnail is revoked when the form unmounts — Save and Close
+  // both drop the list without walking it, and with no count or size cap a
+  // folder of photos would otherwise stay pinned in memory for the rest of the
+  // session (bugbot, #915). The ref, not the state: it is the list as of the
+  // last write, and this runs once, after the final render.
+  useEffect(() => () => {
+    for (const i of imagesRef.current) if (i.thumb) URL.revokeObjectURL(i.thumb);
+  }, []);
+  const applyImages = useCallback((fn: (prev: TaskImage[]) => TaskImage[]) => {
+    imagesRef.current = fn(imagesRef.current);
+    setImages(imagesRef.current);
+  }, []);
+  // Keys for images attached in THIS session, clear of the edit-seeded 0..n.
+  const imageKey = useRef(1000);
+  // Every in-flight UPLOAD, so Save can await the stragglers instead of
+  // silently scheduling a task with half its attachments. Each promise removes
+  // itself when it settles, and each is registered SYNCHRONOUSLY with the chip
+  // it belongs to — a drop-then-immediate-Save has to find it there (Bugbot,
+  // PR #865). There is no read to cover any more: the upload is multipart, so
+  // the File goes straight into a FormData and the only thing the chip needed a
+  // FileReader for (a data-URL thumbnail) is a `blob:` URL now.
+  const pendingRef = useRef<Set<Promise<void>>>(new Set());
+  const attachFiles = useCallback((files: FileList | File[] | null) => {
+    const picked = [...(files ?? [])];
+    if (!picked.length) return;
+    picked.forEach((file) => {
+      const key = imageKey.current++;
+      // The chip's kind is a GUESS until the upload answers, and the guess is
+      // only "can this engine draw it": a `.tif` and a `.heic` are pictures the
+      // browser renders as an empty box, so they wear the glyph until the
+      // server's PNG comes back and `kind` arrives with a path that can be
+      // drawn. MIME first (a pasted screenshot has no filename), extension
+      // second (a drop off a NAS often has no type).
+      const drawable = DRAWABLE_MIMES.has(file.type)
+        || (!!file.name && attachmentKindOf(file.name) === "image");
+      // `blob:` rather than a FileReader's data URL: no read to await before
+      // the chip appears and no 33% base64 string held in memory, which is what
+      // makes a 40 MB drop cost nothing on the card.
+      const thumb = drawable ? URL.createObjectURL(file) : null;
+      applyImages((prev) => [...prev, {
+        key,
+        path: "",
+        kind: drawable ? "image" : "file",
+        name: file.name || "attachment",
+        thumb,
+      }]);
+      const pending: Promise<void> = uploadTaskShot(file)
+        .then((up) => applyImages((prev) => prev.map((i) => {
+          if (i.key !== key) return i;
+          // The server's `kind` is trusted only where the PATH it stored can be
+          // drawn: a `.tif`/`.heic` whose transcode failed (no sips, Pillow
+          // without HEIF) comes back `kind: "image"` on the original bytes,
+          // and an <img> of those is the empty box DRAWABLE_EXTS exists to
+          // avoid — so it wears the glyph and the file viewer instead
+          // (bugbot, #915). The blob thumb is kept where the browser drew one.
+          const kind = up.kind === "image" && attachmentKindOf(up.path) === "image"
+            ? "image" : (i.thumb ? "image" : "file");
+          return { ...i, path: up.path, kind };
+        })))
+        .catch((e) => {
+          // A failed upload takes its chip with it — an attachment on the card
+          // that would not reach the task is the lie to avoid.
+          if (thumb) URL.revokeObjectURL(thumb);
+          applyImages((prev) => prev.filter((i) => i.key !== key));
+          setError((e as Error).message || "attachment upload failed");
+        })
+        .finally(() => pendingRef.current.delete(pending));
+      pendingRef.current.add(pending);
+    });
+  }, [applyImages]);
+
+  // The open attachment, if any — the claude template's #shotview, ported: a
+  // chip proves a thing EXISTS, it cannot show what is in it, so clicking it
+  // opens a viewer. A PICTURE opens fitted and a second click swaps to natural
+  // size (the zoom class) with the box scrolling; a FILE opens in its own
+  // fused-render template, which is the only answer to "is this the right file"
+  // that a name cannot give (D616).
+  // The viewer holds a KEY and reads the entry out of `images` on every render,
+  // rather than holding the entry itself: an upload finishes AFTER the click
+  // that opened its chip, and it lands `path`/`kind` in the list only — a
+  // snapshot taken at click time would sit on "uploading…" for ever, and a
+  // TIFF that came back as a PNG would stay in the file dialog (bugbot, #915).
+  const [viewerKey, setViewerKey] = useState<number | null>(null);
+  const viewer = useMemo<TaskImage | null>(
+    () => (viewerKey === null ? null
+           : images.find((i) => i.key === viewerKey) ?? null),
+    [images, viewerKey]);
+  const [viewerZoom, setViewerZoom] = useState(false);
+  // A file's preview: the src once the stat has answered, null for every "no
+  // preview" case (no template, a pruned copy, a declining server, an upload
+  // still in flight) — and `frameLoaded` because the promise the line makes is
+  // about the PAGE, not about the URL: the caption says "loading preview…"
+  // until the frame itself fires `load`.
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [previewWait, setPreviewWait] = useState(false);
+  const [frameLoaded, setFrameLoaded] = useState(false);
+  const closeViewer = useCallback(() => setViewerKey(null), []);
+  useEffect(() => {
+    setPreviewSrc(null);
+    setFrameLoaded(false);
+    if (!viewer || viewer.kind !== "file" || !viewer.path) {
+      setPreviewWait(false);
+      return;
+    }
+    // Identity, not a path compare: the user may close this or open another
+    // attachment in the seconds the stat takes, and a late answer must not
+    // frame the previous file. The cleanup runs on both.
+    let live = true;
+    setPreviewWait(true);
+    statPath(viewer.path)
+      .then((st) => { if (live) setPreviewSrc(taskPreviewSrcFor(st, viewer.path)); })
+      .catch(() => { if (live) setPreviewSrc(null); })
+      .finally(() => { if (live) setPreviewWait(false); });
+    return () => { live = false; };
+    // The three fields the stat depends on, not `viewer` itself: the object is
+    // re-derived on every `images` change (an upload landing on ANOTHER chip),
+    // and a re-stat of an unchanged file would blank a frame that was showing.
+  }, [viewer?.key, viewer?.kind, viewer?.path]);
+
+  // Escape closes the VIEWER while it is up — captured at the document so the
+  // modal chassis' own Escape (which would close the whole card) never sees it.
+  useEffect(() => {
+    if (!viewer) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setViewerKey(null);
+      }
+    };
+    document.addEventListener("keydown", onKey, { capture: true });
+    return () => document.removeEventListener("keydown", onKey, { capture: true });
+  }, [viewer]);
+
+  // ONE paste handler for both text fields: a file pasted on the title is as
+  // deliberate as one pasted on the description, and only a FILE paste is
+  // intercepted — ordinary text pastes stay exactly what they were. ANY file
+  // kind, not only an image: the type gate is gone (D618), and a clipboard
+  // holding a `.csv` is the same gesture as one holding a screenshot.
+  const pasteFiles = useCallback(
+    (e: React.ClipboardEvent) => {
+      const files = [...e.clipboardData.items]
+        .filter((i) => i.kind === "file")
+        .map((i) => i.getAsFile())
+        .filter((f): f is File => !!f);
+      if (files.length) {
+        e.preventDefault();
+        attachFiles(files);
+      }
+    },
+    [attachFiles],
+  );
+
+  // The FIRST field on the card, and REQUIRED (Akshil, 2026-08-17).
+  // This is only the synchronous half of the precedence: a usable stored title,
+  // else blank. The two SESSION steps — the thread's `ai-title`, then its first
+  // user message — need a fetch and land in the /api/tasks effect below. Blank on
+  // the first paint is deliberate now: the alternative was deriving a name from
+  // the ask, which is exactly how a long scheduled message ended up duplicated
+  // into the title.
+  //
+  // The session that could name this task — the chat this form was deep-linked
+  // from, or whatever session an edited entry carries — is resolved HERE rather
+  // than beside the effect, because which value the field opens on and whether
+  // the lookup may run are one decision, taken once; see initialTitleStateOf.
+  //
+  // Held in consts for the same reason `initialAsk` is: the BASELINE (`initial`)
+  // has to be the identical value or an untouched Edit reads as dirty.
+  // …AND THE SAME THREE SOURCES NAME IT (`boundSessionId`, below): a hop's key
+  // IS the session when the chat has run, which is what lets the title field
+  // fill itself from the conversation instead of opening blank.
+  const nameSession =
+    (editing?.session_id || chatKeySession(chatKey ?? "") || chatSessionId) ?? "";
+  const { title: derivedTitle, lookupSession: titleLookup } =
+    initialTitleStateOf(editing, nameSession, draft.title);
+  const [title, setTitle] = useState(saved.title ?? derivedTitle);
+  const initialTargetValue = saved.target ?? editing?.target ?? initialTarget ?? "";
+  const [target, setTarget] = useState(initialTargetValue);
+  // ONE date-time drives everything: a one-off runs at it, and every derived
+  // repeat choice reads its parts (minute, time, weekday) — Google's model.
+  //
+  // THE DEFAULT IS NOW, NOT AN HOUR FROM NOW (Akshil, 2026-08-18). It used to open
+  // on now + 1h, a time nobody had asked for: a task typed into this card is
+  // overwhelmingly one to RUN, so the commonest case was a two-step — wind the
+  // time back, then save. Now is also the value that needs no reading, because it
+  // matches the clock on the wall: a reader who does not care about the when-row
+  // can ignore it, and one who does is editing from the moment they are standing
+  // in rather than undoing an offset. Scheduling for later stays one edit away,
+  // which is what the row is for.
+  //
+  // The field is minute-precision, so this lands on the current minute with the
+  // seconds dropped — and `pastNoteFor` compares at that same precision, so the
+  // form cannot open printing a warning about its own default.
+  const [when, setWhen] = useState(() =>
+    // A DRAFT'S OWN `when` IS VERBATIM: it is already this field's format (the
+    // draft stores what the field held), so it is used as it stands rather than
+    // re-derived through a Date, which would quietly re-round it.
+    saved.when
+      ?? toLocalInput(editing?.due ? new Date(editing.due) : (initialTime ?? new Date())),
+  );
+  // DID ANYBODY PICK THIS TIME? The when-row's default is `now`, and "now"
+  // means two different things depending on how it got there: a time the user
+  // chose (or accepted, on the calendar, where choosing when is the whole
+  // reason the card is open) versus a field they never saw because it was
+  // folded into More options. The first belongs on the calendar; the second is
+  // a task somebody wanted RUN, and drawing it on the grid turned the plan into
+  // a log of everything ever typed (Akshil, 2026-08-23).
+  //
+  // It cannot be inferred from the value — both cases carry the same minute —
+  // so it is tracked as the FACT it is: set by the date grid, the time field
+  // and the Repeat tick, the three controls that mean "I have an opinion about
+  // when".
+  //
+  // The opening value says which kind this card is before anyone touches
+  // anything: an edit inherits what the entry was stored as (an older entry has
+  // no flag, which reads as planned — every one of them came from a form that
+  // asked), and a new card is planned exactly when it is `planning`.
+  const [timePicked, setTimePicked] = useState(
+    // A draft that carries a time is a draft where somebody opened the when-row
+    // and said one — that is the only way the field gets into the draft at all
+    // (see the autosaved body below, which stores null until it is picked).
+    () => (saved.when !== null ? true : editing ? !editing.immediate : planning),
+  );
+  // …and the disclosure the when-row now lives behind, open from the start on a
+  // planning card. State rather than a bare `open` attribute: `<details>` keeps
+  // its own openness in the DOM, and a React re-render would slam a
+  // half-controlled one shut under the user's hand.
+  // …opened as well for a draft that has a time in it: the row holds the answer
+  // the reader already gave, and folding it away would hide the one thing about
+  // this card that is not on its face.
+  const [moreOpen, setMoreOpen] = useState(planning || saved.when !== null);
+  // The repeat CHOICE (a key into repeatChoicesFor) plus the one choice that
+  // carries its own data: a custom rule from the recurrence dialog. Legacy
+  // cron templates edit under the "cron" key and keep their line verbatim.
+  const [repeat, setRepeat] = useState<string>(
+    () => saved.repeat ?? initialRepeatKey(editing),
+  );
+  const [customRule, setCustomRule] = useState<RecurrenceRule | null>(() => {
+    // A REOPENED DRAFT'S OWN RULE OUTRANKS `editing` — the two are mutually
+    // exclusive (a draft never carries `editing`, per `draftBody`'s comment
+    // above), and reading it here is the other half of the fix `custom_rule`
+    // exists for: storing it was pointless if nothing ever seeded it back
+    // (Bugbot, PR #1118).
+    if (saved.repeat === "custom" && saved.customRule) return saved.customRule;
+    return editing?.rule && keyOfRule(editing.rule, new Date(editing.due)) === "custom"
+      ? editing.rule
+      : null;
+  });
+  // Repeat is a CHECKBOX now, and the dropdown only exists while it is ticked
+  // (design §6). Editing a repeating task therefore opens ticked, with the
+  // stored rule already loaded — which is exactly "the key is not none".
+  const [repeatOn, setRepeatOn] = useState(
+    () => (saved.repeat ?? initialRepeatKey(editing)) !== "none",
+  );
+  // The opt-out behind it: every run of a repeating task lands in this task's
+  // own thread — a task IS a session — unless this says to mint a fresh one
+  // per occurrence.
+  const [newTaskEachRun, setNewTaskEachRun] = useState(
+    () => saved.newTaskEachRun ?? editing?.new_task_each_run ?? false,
+  );
+  const legacyCron = editing?.repeats ?? "";
+  // The thread this task has already been building, if it has one — read once
+  // and used twice: it goes on the wire (or the edit orphans it) and it is what
+  // the note under the repeat row is able to say out loud.
+  const learnedSession = learnedSessionOf(editing);
+  // The recurrence dialog, and the key to fall back to if it's cancelled —
+  // picking "Custom…" must not strand the select on a choice with no rule.
+  const [recurOpen, setRecurOpen] = useState(false);
+  const repeatBefore = useRef(repeat);
+  const [permission, setPermission] = useState(
+    saved.permission ?? editing?.permission_mode ?? "auto",
+  );
+  // The run's model and thinking budget. "" — "Default", the leading option —
+  // and NOT a hardcoded name, unlike `permission` above: permissions is a policy
+  // this form has an opinion about (a task runs unattended, so "auto"), while a
+  // model is one the CLI is better placed to pick per project than we are from
+  // here. An edit prefills from the entry, so a task keeps what it was set to.
+  //
+  // THROUGH `normalizeModel`, and this is the one door a stored value comes in
+  // by. An entry booked before the pinned Fable id was retired still says
+  // "claude-fable-5-1"; left raw it is a value TASK_MODELS has never heard of,
+  // so `taskRunOptions` carries it through as its own row and the card shows a
+  // reader the CLI's spelling of a model the menu now calls Fable — and writes
+  // it back on the next Save.
+  const [model, setModel] = useState(() => {
+    const stored = saved.model ?? editing?.model ?? "";
+    return listedModelIn(stored, TASK_MODELS.map((o) => o.key)) || normalizeModel(stored);
+  });
+  const [effort, setEffort] = useState(saved.effort ?? editing?.effort ?? "");
+  // A FIELD NOBODY CHOSE OPENS ON WHAT THE RUN WILL GET (Akshil, 2026-09-21:
+  // "remove the default field … show the model and effort"). "" used to be the
+  // leading "Default" row — no flag, the CLI decides at spawn. The row is gone;
+  // the card asks the server for the global Claude preference instead and
+  // writes it into whichever of the pair is still "" — per field, so a draft
+  // that chose a model keeps it and only its thinking is filled in. One read
+  // per open, and a read that fails leaves "" — the dropdown then shows its
+  // first option's label and the spawn still resolves as it always did.
+  const askedDefaults = useRef(false);
+  useEffect(() => {
+    if (askedDefaults.current || (model && effort)) return;
+    askedDefaults.current = true;
+    let live = true;
+    readClaudeDefaults().then(
+      (d) => {
+        if (!live) return;
+        setModel((m) => m || d.model);
+        setEffort((e) => e || d.effort);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [model, effort]);
+  // WHICH OF THE PAIR THIS CARD TOOK FROM THE GLOBAL, rather than from a
+  // reopened draft or the entry being edited — captured on the first render,
+  // because that is the only moment the distinction is visible. Only those two
+  // may be moved underneath the reader by another surface's write below: a
+  // draft that chose Opus is a choice this card is holding, and a composer pill
+  // somewhere else must not overwrite it.
+  const tookGlobal = useRef<{ model: boolean; effort: boolean } | null>(null);
+  if (tookGlobal.current === null) tookGlobal.current = { model: !model, effort: !effort };
+  // ONE VALUE, TWO SURFACES (Akshil, 2026-09-21). This card's dropdowns and the
+  // Explorer composer's pills for a new chat are two editors of the SAME
+  // setting — `~/.claude/settings.json`'s `model`/`effortLevel`. So a pick here
+  // writes it, and a pick THERE arrives here, in this window and in every other
+  // tab, without a reload.
+  //
+  // NEW TASKS ONLY. Editing a stored entry is the analogue of a chat that
+  // already has a session: what that task runs with is a fact about that task,
+  // and changing it must not re-aim every future chat on the machine.
+  const globalEditor = !editing;
+  // A PICK IN FLIGHT OUTRANKS A BROADCAST (review, 2026-09-21). Another tab's
+  // announcement landing between this card's click and its PUT settling used
+  // to overwrite the reader's own choice for a frame; the server's answer then
+  // put it back, but the flicker was real. Per field: a model pick does not
+  // hold the effort half still.
+  const pickInFlight = useRef({ model: 0, effort: 0 });
+  useEffect(() => {
+    if (!globalEditor) return;
+    return subscribeClaudeDefaults((d) => {
+      if (tookGlobal.current?.model && d.model && !pickInFlight.current.model) setModel(d.model);
+      if (tookGlobal.current?.effort && d.effort && !pickInFlight.current.effort) setEffort(d.effort);
+    });
+  }, [globalEditor]);
+  const pickModel = useCallback(
+    (value: string) => {
+      setModel(value);
+      if (!globalEditor) return;
+      pickInFlight.current.model += 1;
+      // The answer is painted from the PROMISE, not from the subscription the
+      // guard above is holding off: a refused write's correction arrives this
+      // way, so the card that made the pick hears it too (Bugbot, 2026-09-21).
+      void setClaudeDefaults({ model: value }).then((d) => {
+        pickInFlight.current.model -= 1;
+        // Unconditional: "" is the server saying the key was RESET, and the
+        // card must not go on showing a value the file no longer holds.
+        setModel(d.model);
+      });
+    },
+    [globalEditor],
+  );
+  const pickEffort = useCallback(
+    (value: string) => {
+      setEffort(value);
+      if (!globalEditor) return;
+      pickInFlight.current.effort += 1;
+      void setClaudeDefaults({ effort: value }).then((d) => {
+        pickInFlight.current.effort -= 1;
+        setEffort(d.effort);
+      });
+    },
+    [globalEditor],
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  // Leaving states: the panel stays mounted for its 180ms exit animation —
+  // popping off while the card glided back read as a glitch (Akshil,
+  // 2026-08-16). Guarded so a double-close cannot double-arm the timer.
+  const [pickingOut, setPickingOut] = useState(false);
+  const [recurOut, setRecurOut] = useState(false);
+  // The exit timers are HELD, not fire-and-forget: reopening a panel during
+  // its 180ms exit must cancel the pending unmount, or the reopened panel
+  // stays is-closing and then vanishes when the stale timer lands (Bugbot,
+  // PR #548 — same discipline as backTimer above).
+  const pickerTimer = useRef<number | null>(null);
+  const recurTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (pickerTimer.current !== null) window.clearTimeout(pickerTimer.current);
+      if (recurTimer.current !== null) window.clearTimeout(recurTimer.current);
+    },
+    [],
+  );
+  const closePicker = () => {
+    if (pickingOut) return;
+    setPickingOut(true);
+    pickerTimer.current = window.setTimeout(() => {
+      pickerTimer.current = null;
+      setPicking(false);
+      setPickingOut(false);
+    }, 180);
+  };
+  // Which of the two dropdown verbs opened the panel: Browse lands on the
+  // listing, "+ New folder" lands on the listing WITH the naming row typing.
+  const [pickerNaming, setPickerNaming] = useState(false);
+  const openPicker = (naming = false) => {
+    setPickerNaming(naming);
+    if (pickerTimer.current !== null) window.clearTimeout(pickerTimer.current);
+    pickerTimer.current = null;
+    setPickingOut(false);
+    // Displacing an open Custom panel runs its CANCEL semantics, not a bare
+    // close: "Custom…" chosen but never Done'd would otherwise strand the
+    // select on a choice with no rule and Save disabled for no visible
+    // reason (Bugbot, PR #548).
+    if (recurTimer.current !== null) window.clearTimeout(recurTimer.current);
+    recurTimer.current = null;
+    setRecurOut(false);
+    setRecurOpen((open) => {
+      if (open && !customRule)
+        setRepeat((r) => (r === "custom" ? repeatBefore.current : r));
+      return false;
+    });
+    setPicking(true);
+  };
+  const closeRecur = () => {
+    if (recurOut) return;
+    setRecurOut(true);
+    recurTimer.current = window.setTimeout(() => {
+      recurTimer.current = null;
+      setRecurOpen(false);
+      setRecurOut(false);
+    }, 180);
+  };
+  const openRecur = () => {
+    if (recurTimer.current !== null) window.clearTimeout(recurTimer.current);
+    recurTimer.current = null;
+    setRecurOut(false);
+    if (pickerTimer.current !== null) window.clearTimeout(pickerTimer.current);
+    pickerTimer.current = null;
+    setPickingOut(false);
+    setPicking(false);
+    setRecurOpen(true);
+  };
+  // The Repeat tick. Unticking is the case worth being explicit about: it puts
+  // the key back to "none" AND drops the custom rule, so the rule the form
+  // submits really is gone rather than merely hidden — an armed rule behind an
+  // unticked box would repeat a task nobody asked to repeat. The flag under it
+  // goes with it, and an open recurrence panel is dismissed (it is asking about
+  // a rule that no longer exists).
+  const toggleRepeat = (on: boolean) => {
+    const next = applyRepeatToggle(on, { repeat, customRule });
+    setRepeat(next.repeat);
+    setCustomRule(next.customRule);
+    setRepeatOn(on);
+    // Ticking Repeat is an opinion about when — the anchor is now a pattern's
+    // starting point, which is the most deliberate thing a time can be here.
+    // Unticking does not take the opinion back: the user has still been in this
+    // row on purpose.
+    if (on) setTimePicked(true);
+    if (!on) {
+      setNewTaskEachRun(false);
+      if (recurOpen) closeRecur();
+    }
+  };
+  const [home, setHome] = useState("");
+  // The path field's recents dropdown, in three tiers and in this order:
+  //
+  //  1. the APP's recents — the top five folders from the same call the home
+  //     page's Claude Sessions strip makes, newest session first. First because
+  //     it is what a person means by "recent": the folders they have actually
+  //     been working in.
+  //  2. this form's own memory — folders picked through Browse or saved on a
+  //     task (localStorage). Kept, not replaced: a folder deliberately chosen
+  //     here may hold no files anyone has opened, so tier 1 would never learn
+  //     it.
+  //  3. the folders existing tasks point at, as padding on a fresh machine.
+  //
+  // Tier 2 is RE-READ every time the list opens, not once per modal: it changes
+  // while the modal is up (Browse writes the folder you pick), so a read-once
+  // state showed the list as it was BEFORE you went browsing — "I just went
+  // through a bunch of folders but recents didn't update" (Akshil, 2026-08-16).
+  // It is a single localStorage hit on a user gesture, so per-open costs nothing.
+  const [recentsOpen, setRecentsOpen] = useState(false);
+  const [recents, setRecents] = useState<string[]>([]);
+  // Tier 1 is a fetch, so it is asked for once on mount and held. Exactly as
+  // Home.tsx asks for it, and fire-and-forget for the same reason: a suggestion
+  // list that fails to load costs suggestions, never the form. Normalised on the
+  // way in, like every other path this card handles.
+  const [sessionFolders, setSessionFolders] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    getClaudeSessionFolders().then(
+      (r) => {
+        if (!alive) return;
+        setSessionFolders(
+          r.folders.slice(0, SESSION_FOLDERS_SHOWN).map((f) => normPath(f.path)),
+        );
+      },
+      () => {},
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const readRecentList = useCallback(() => {
+    const seen = new Set<string>();
+    return [
+      ...sessionFolders,
+      ...readRecents(),
+      ...(recentTargets ?? []),
+    ].filter((p) => {
+      if (!p || seen.has(p)) return false;
+      seen.add(p);
+      return true;
+    });
+  }, [recentTargets, sessionFolders]);
+  //: IS THE PATH CHECK STILL OUT — the 400ms verdict below (`newFolder` /
+  //: `pathError`). The "create this folder" row waits on it: an offer that
+  //: arrives before the answer does is the flicker this closes.
+  const [pathChecking, setPathChecking] = useState(false);
+  const openRecents = useCallback(() => {
+    setRecents(readRecentList());
+    setRecentsOpen(true);
+  }, [readRecentList]);
+  //: DOES THE FIELD HOLD AN ADDRESS AT ALL. The create-new offer is a statement
+  //: about a path, and a bare word names no place for a folder to be made in.
+  const targetIsPath = isPathShapedQuery(target.trim(), home, home || undefined);
+  // WHAT THE DROP OFFERS — the remembered folders, or the page's projects when
+  // the address has been cleared and a word typed in its place. One pure
+  // function decides which (`folderFieldRows`, top of this file), so the rule
+  // can be read and asserted in one place instead of inferred from four
+  // conditions spread through the render.
+  const { rows: folderRows, searching: pathSearching } = useMemo(
+    () => folderFieldRows({
+      target,
+      defaultTarget: initialTargetValue,
+      open: recentsOpen,
+      recents,
+      projects,
+      home,
+    }),
+    [target, initialTargetValue, recentsOpen, recents, projects, home],
+  );
+  // Early path validation (Akshil, 2026-08-16 — "detect it before me
+  // scanning the input"): a beat after typing stops, ask the server whether
+  // the path exists. A folder answers listDir directly; a FILE fails it, so
+  // the parent is listed and the basename looked up — a file target is legal,
+  // and so, since 2026-08-20, is ONE folder that isn't there yet (targetVerdict).
+  // `pathError` null = fine (or still checking); a string is the red line under
+  // the row. `newFolder` is the name being created, and is NOT a refusal — it
+  // is shown as a ROW IN THE DROPDOWN (Akshil, 2026-08-20: "this UI should be in
+  // dropdown"), beside the folders that already exist, rather than as an inline
+  // note under the field that pushed the rest of the form down as you typed.
+  const [pathError, setPathError] = useState<string | null>(null);
+  const [newFolder, setNewFolder] = useState<string | null>(null);
+  useEffect(() => {
+    const p = target.trim();
+    if (!p) {
+      setPathError(null);
+      setNewFolder(null);
+      setPathChecking(false);
+      return;
+    }
+    // A BARE WORD IS NOT AN ADDRESS, so there is no address to have a verdict
+    // about (see `newFolderShown`). The red "only one new folder can be created"
+    // line was this check reporting on a path it had invented out of a word.
+    if (!isPathShapedQuery(p, home, home || undefined)) {
+      setPathError(null);
+      setNewFolder(null);
+      setPathChecking(false);
+      return;
+    }
+    // `~` WITH NO HOME YET IS NOT A VERDICT, IT IS A WAIT (Bugbot, PR #1213).
+    // `home` arrives from `/api/config` a beat after mount, and a `~/…` path
+    // typed or PASTED before it landed would be probed literally — the red
+    // "Only one new folder can be created" line, again, on a path that is
+    // perfectly good. There is nothing to say about it yet, so nothing is said:
+    // the check stays pending and the effect re-runs when `home` lands (it is a
+    // dep). The last verdict is left alone rather than cleared, which is the
+    // same discipline `settle` keeps.
+    if (p.startsWith("~") && !home) {
+      setPathChecking(true);
+      return;
+    }
+    setPathChecking(true);
+    let stale = false;
+    // Neither piece of state is cleared up front: the last verdict stays on
+    // screen until the next one resolves, so the note does not blink off and
+    // back on between keystrokes.
+    const settle = (v: TargetVerdict) => {
+      if (stale) return;
+      setPathError(v.kind === "bad" ? v.text : null);
+      setNewFolder(v.kind === "new-folder" ? v.name : null);
+      setPathChecking(false);
+    };
+    // `~` IS A PLACE, NOT A FOLDER NAME (Akshil, 2026-09-18 screenshot: typing
+    // `~/Desktop/` drew the red "Only one new folder can be created" line). This
+    // check reads the disk, and the disk has never heard of `~` — so it asked
+    // for a folder literally called "~", found nothing, and reported every
+    // segment under it as a folder to be created.
+    //
+    // Expanded with the EXPLORER'S OWN expander (`listingAddress`), which is
+    // what its address bar resolves `~`, a drive letter and a relative path
+    // with. The field keeps showing `~/…`: what the reader typed is what they
+    // read back, and the server expands it again on the way in
+    // (`schedule.create`: `abspath(expanduser(target))`), so the stored target
+    // is the real path either way.
+    const probe = listingAddress(p, home, home || undefined) ?? p;
+    const timer = window.setTimeout(() => {
+      listDir(probe).then(
+        () => settle({ kind: "ok" }),
+        () => {
+          const { parent } = splitTargetPath(probe);
+          listDir(parent).then(
+            (r) => settle(targetVerdict(probe, r.entries.map((e) => e.name))),
+            () => settle(targetVerdict(probe, null)),
+          );
+        },
+      );
+    }, 400);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+    // `home` IS A DEP, and Bugbot caught that it was not: it arrives from
+    // `/api/config` after mount, so a `~` path checked before it landed was
+    // checked literally and never re-checked. The check is cheap and `home`
+    // changes once in the life of the card.
+  }, [target, home]);
+
+  // IS THE "<name> — New folder" SUGGESTION ON SCREEN. It is drawn by its own
+  // branch (a different shape — a badge and a line about when it becomes true),
+  // so "which row is that one" is asked in three places and has to be one
+  // answer.
+  /**
+   * ONLY A PATH CAN NAME A FOLDER TO CREATE (Akshil, 2026-09-18, and this one
+   * MADE A FOLDER IN THE WRONG PLACE). Typing a bare `123` offered "New folder
+   * — created when the task is saved", and saving it created
+   * `…/fused-render-wt/agent-20260918-tasks-and-new-task/123`: the server
+   * resolved the name against ITS OWN cwd, because a name says nothing about
+   * where it lives.
+   *
+   * A NAME IS NOT AN ADDRESS. `~/new-folder1` and
+   * `/Users/ask/desktop/fold1-new` say where the folder would go; `newfold1`
+   * does not, so the field does not offer to make it.
+   *
+   * THE CARD'S HALF IS THE OFFER; the server refuses to MAKE one either way
+   * (`schedule.create`, `_names_a_place`). This stops the reader being asked; a
+   * client that asks anyway is still refused.
+   *
+   * …and only once the answer has LANDED. "Create this folder" is a statement
+   * about a folder that does not exist, and while the check is still out the app
+   * does not yet know that — "for a split second it shows me create new folder".
+   */
+  const newFolderShown = !pathError && !!newFolder && !pathChecking && targetIsPath;
+  // EVERY ROW THAT PICKS A PATH, in the order they are drawn — the ring the
+  // arrow keys walk. Browse and New folder are VERBS: they open a panel rather
+  // than answering the field, and an Enter that opened a side panel where the
+  // reader expected a folder would be the one press this list must not get
+  // wrong. The new-folder SUGGESTION is in the ring, because it answers with
+  // the path the field already holds (its click does the same).
+  //
+  // IT COMES LAST, AND THAT IS THE WHOLE OF IT (browser QA, 2026-09-18). It led
+  // the ring for one round, which made the commonest keystroke pair on any
+  // typeahead — ArrowDown, Enter — CREATE A FOLDER rather than pick the folder
+  // sitting right underneath it. The one row a reader almost never wants was
+  // the one the keyboard reached first, and the mistake it makes is the
+  // expensive kind. Remembered folders first, the new thing after them, which
+  // is where every tag and folder picker puts "Create '<typed>'".
+  //
+  // The DOM order below is this order too. A ring that walks one way while the
+  // list reads the other is a reader watching `aria-activedescendant` jump
+  // backwards.
+  //
+  // `newFolder` is the server's verdict on the typed path, so this list is only
+  // ever built out of things the form has already checked or already knew — and
+  // it joins the ring on exactly the condition the ROW is drawn on, or the
+  // indices here and the ones in the markup would part company.
+  const pathRows = useMemo<FolderRow[]>(
+    () => [...folderRows,
+           ...(newFolderShown && newFolder
+             ? [{ path: newFolder, name: leafOf(newFolder),
+                  where: parentOf(newFolder) }]
+             : [])],
+    [newFolderShown, newFolder, folderRows],
+  );
+  //: Where that suggestion sits in the ring — the end — or -1 when it is not
+  //: offered at all. One expression, read by the markup and by
+  //: `aria-activedescendant`.
+  const newFolderAt = newFolderShown ? pathRows.length - 1 : -1;
+  //: The rows of THIS render, for `setPathAt` to turn an index into a path
+  //: without being rebuilt on every keystroke.
+  const pathRowsRef = useRef(pathRows);
+  pathRowsRef.current = pathRows;
+  //: The panel itself, for the keyboard to scroll the highlighted row back into
+  //: view — a capped list is a list you can arrow off the bottom of.
+  const recentsRef = useRef<HTMLDivElement | null>(null);
+  //: THE WHOLE PATH, ON HOVER. One portalled element for the list — see
+  //: PathTip.tsx for why it is not a `title` and not drawn inside the panel.
+  const pathTip = usePathTip();
+  //: Is the next mouse-up the tail of the click that focused the field — see
+  //: `onMouseDown` / `onMouseUp` on the input.
+  const selectOnUp = useRef(false);
+  //: …and it goes when the ROWS go. It is dismissed on pointer-leave, blur,
+  //: scroll and resize, but a keystroke that swaps the recents for project rows
+  //: (or back) remounts the buttons under a pointer that never left, and the tip
+  //: would keep naming a folder that is no longer on screen at coordinates that
+  //: no longer hold a row (Bugbot, PR #1239). Keyed on the list's identity.
+  const { hide: hidePathTip } = pathTip;
+  useEffect(() => { hidePathTip(); }, [pathRows, hidePathTip]);
+  /**
+   * WHICH ROW THE ARROWS ARE ON — held as the row's own PATH, not its index
+   * (Bugbot, PR #1213: "stale highlight after async rows").
+   *
+   * An index is a promise about a list that is still arriving. The reader arrows
+   * to row 2, the path check answers and the "create this folder" row appears or
+   * goes — and Enter takes whatever is at index 2 now, which is a DIFFERENT
+   * FOLDER from the one they were looking at. A path cannot do that: if it is
+   * still on screen the highlight is still on it, and if it is gone the
+   * highlight is gone with it and Enter passes through to the form.
+   *
+   * "" — nothing — is where it rests, and it only ever moves on an explicit
+   * arrow: a seeded highlight would make Enter mean something the reader never
+   * chose (the property `completionKeyAction`'s header exists to guarantee).
+   */
+  const [pathMark, setPathMark] = useState("");
+  useEffect(() => { setPathMark(""); }, [target, recentsOpen]);
+  //: …and the index the key map wants, DERIVED. -1 the moment the marked row
+  //: leaves the list, which is exactly the clamp this replaces.
+  const pathAt = pathMark ? pathRows.findIndex((r) => r.path === pathMark) : -1;
+  const setPathAt = useCallback((i: number) => {
+    setPathMark(i >= 0 ? (pathRowsRef.current[i]?.path ?? "") : "");
+  }, []);
+  /**
+   * TAKING A ROW, the Explorer's two ways.
+   *
+   * `acceptPath` is Tab: the path goes INTO THE FIELD and the list stays open,
+   * so the reader can go on editing the address they were just handed — the
+   * Explorer's `acceptCompletion`, for the field that is its cousin.
+   *
+   * `pickPath` is the other ending: this is the answer, close the list. A
+   * remembered folder is a whole address rather than a step towards one, so that
+   * is what Enter on one does.
+   */
+  const acceptPath = useCallback((row: FolderRow) => {
+    setTarget(row.path);
+    setPathMark("");
+    pathRef.current?.focus();
+  }, []);
+  // KEEP THE HIGHLIGHTED ROW IN VIEW. The same one line the `Dropdown` at the
+  // top of this file uses and the task peek uses (`block: "nearest"`), and the
+  // reason it is needed here now: the panel is capped and scrolls, so arrowing
+  // past its edge would otherwise move a highlight the reader cannot see.
+  //
+  // Keyed on the MARK rather than on an index, like everything else about this
+  // highlight — a row that arrives while the mark is on it is still the row to
+  // scroll to.
+  useEffect(() => {
+    if (!recentsOpen || !pathMark) return;
+    recentsRef.current
+      ?.querySelector<HTMLElement>(".is-active")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [pathMark, recentsOpen, pathRows]);
+  const pickPath = useCallback((row: FolderRow) => {
+    const path = row.path.replace(/\/+$/, "");
+    setTarget(path);
+    // …AND THE CARD REMEMBERS IT, whichever list it came off. A project picked
+    // out of a search is a folder this form has now been pointed at, so the
+    // next opening offers it without being asked — the same thing Browse's own
+    // pick and a saved task already do.
+    rememberRecent(path);
+    setRecentsOpen(false);
+    setPathMark("");
+  }, []);
+
+  // The verdict row rides the dropdown and NEVER forces it open. The reveal
+  // flag this replaced looked helpful — bring the list back so a late verdict
+  // is seen — but the verdict is debounced 400ms behind the keystroke that
+  // armed it, so "type, then click away" had the list popping back OVER
+  // whatever the user had moved on to, and there was no gesture that made it
+  // stay shut (Akshil, 2026-08-20). Typing holds focus and focus holds the
+  // list open, so in practice the verdict is seen exactly when it should be:
+  // while the path is still the thing being worked on.
+
+  // The ask shares Title's borderless surface but not its face, and it grows
+  // like a note: with the text, from the CSS floor (`.new-task-ask`'s
+  // min-height, which is what hands it the card's slack) up to the CSS
+  // max-height, then it scrolls. Both clamps hold against the inline height set
+  // here — min-/max-height bound the used value whatever `style.height` says —
+  // so this measuring only ever picks the size BETWEEN them. It is the whole
+  // difference between the two fields: Title is an <input> and has no height to
+  // measure. Measured on every change because "auto then scrollHeight" is the
+  // one reflow-safe way to shrink back when lines are deleted.
+  const askRef = useRef<HTMLTextAreaElement>(null);
+  // Title is the third field a refused Save can send the caret to (see
+  // trySubmit); the ask has `askRef` above and the path already has `pathRef`.
+  // Refs rather than a querySelector, because the card is a portal and there can
+  // be a second one mid-exit-animation when a deep link swaps the entry.
+  const titleRef = useRef<HTMLInputElement>(null);
+  const pathRef = useRef<HTMLInputElement>(null);
+  // Escape-from-a-row hands focus back to the field WITHOUT reopening the
+  // list it just dismissed — the input's onFocus otherwise undoes the close
+  // in the same tick.
+  const suppressOpen = useRef(false);
+  // Whether the picker is closing because a folder was chosen (done — stay
+  // closed) or backed out of (return to the recents dropdown). onPick runs
+  // just before onClose, so a ref is enough to tell the two closes apart.
+  const pickedFromBrowser = useRef(false);
+  useEffect(() => {
+    const el = askRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [message]);
+
+  // The default target, filled once the server says where home is — and only
+  // into a still-empty field, so it never clobbers an edit or the user's own
+  // typing that raced the fetch. The BASELINE moves with it (setInitial): the
+  // default is what the form opened with, not something the user typed, and
+  // counting it as dirty armed the close-twice guard on a fresh untouched
+  // modal — the "✕ intermittently does nothing" bug (QA 2026-08-14, second
+  // sighting; the first was Edit's prefill).
+  useEffect(() => {
+    getConfig().then(
+      (c) => {
+        setHome(c.home);
+        if (!editing) {
+          const fallback = defaultTargetOf(c);
+          setTarget((prev) => (prev === "" ? fallback : prev));
+          setInitial((prev) =>
+            prev.target === "" ? { ...prev, target: fallback } : prev,
+          );
+        }
+      },
+      () => undefined,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // What the form OPENED with. The chassis' dirty guard (close once, confirm
+  // within 2s) must fire on "the user typed something", not "the fields are
+  // non-empty" — an Edit modal opens full, and treating prefill as dirty made
+  // its ✕ appear broken (QA 2026-08-14).
+  const [initial, setInitial] = useState(() => ({
+    // Same expressions as the states above, and they have to be: a prefill
+    // the user did not type must not read as dirty, or the ✕ arms its
+    // close-twice guard on an untouched modal (the bug the getConfig effect's
+    // setInitial exists for — this is the same one, one prefill earlier).
+    target: initialTargetValue,
+    message: initialAsk,
+    title,
+    when,
+    repeat,
+    repeatOn,
+    newTaskEachRun,
+    customRule: JSON.stringify(customRule),
+    permission,
+    model,
+    effort,
+    // Paths only: a fresh attach reads as dirty from the moment it lands
+    // (its path is "" until the upload answers, then a path — both differ
+    // from this baseline), which is exactly right — the user added something.
+    // …and a re-opened DRAFT's are baseline too, which a chat handoff's
+    // deliberately are not: the handoff just added them (dirty is right), the
+    // draft already had them (dirty would be a lie the ✕ acts on).
+    images: (editing
+      ? (editing.images ?? [])
+      : (saved.attachments ?? []).map((a) => a.path)).join("\n"),
+  }));
+  // EVERY field the form can lose arms the guard — time, repeat rule and
+  // permission included. Comparing only text fields let a single ✕ silently
+  // discard an adjusted schedule (Bugbot, PR #538).
+  const dirty =
+    target !== initial.target ||
+    message !== initial.message ||
+    title !== initial.title ||
+    when !== initial.when ||
+    repeat !== initial.repeat ||
+    repeatOn !== initial.repeatOn ||
+    newTaskEachRun !== initial.newTaskEachRun ||
+    JSON.stringify(customRule) !== initial.customRule ||
+    permission !== initial.permission ||
+    model !== initial.model ||
+    effort !== initial.effort ||
+    images.map((i) => i.path || "pending").join("\n") !== initial.images;
+
+  // ---- THE DRAFT (design.md, "New Task modal (task draft)") -----------------
+  //
+  // WHAT IT IS FOR: closing this card must not throw away what was typed in it.
+  // The first change to any field mints an id and starts autosaving the whole
+  // form; ✕ / Esc / click-out then simply leave, with no prompt, and the card
+  // comes back from its row on the List or the Board. Discard (in the footer) is
+  // the deliberate way to be rid of it.
+  //
+  // NEW TASKS ONLY. An Edit is a stored entry: it already persists on save, and
+  // abandoning one is a cancel rather than a draft (design.md, Not in scope) —
+  // so `editing` writes nothing here and keeps the close-twice guard it has
+  // always had.
+  //
+  // `""` IS NOT AN ID (Bugbot 4028344040). Two doors seed this card with a
+  // DraftSeed that carries no id at all and only exists to state a folder or a
+  // stored form — the chat hop (`chatHopSeed`, whose record is a chat key, not
+  // a task draft) and the empty never-sent hop, which opens a blank card on the
+  // folder its chat was mounted on. An empty string is not null, so the card
+  // read both as "already minted" and autosaved a settings-only change — a time,
+  // a model, a folder — into the Untitled draft it refuses to mint everywhere
+  // else. A seed says "no draft yet" by saying nothing, however it spells it.
+  const [draftId, setDraftId] = useState<string | null>(initialDraft?.id || null);
+  const draftIdRef = useRef(draftId);
+  draftIdRef.current = draftId;
+  // The form as the store holds it. `when` / `repeat` / `new_task_each_run` are
+  // stored as null until the reader actually says something about them, which is
+  // the same distinction `timePicked` draws on the card: "never opened the
+  // when-row" is not the same answer as "chose now".
+  /**
+   * THE RECORD THIS CARD WRITES INTO — a chat key, or nothing (design "one
+   * record", §1 and §4).
+   *
+   * When it is set, the card is a second door onto a CHAT record: the composer's
+   * own, edited in place. There is no mint, no origin key to spend, no delete of
+   * a copy, and no write-at-mount — all four existed because a hop used to create
+   * a task draft over words that already lived somewhere, and the window between
+   * "words exist here" and "words exist there" was the whole bug.
+   *
+   * AN EDIT-TASK CARD JOINS THEM (design §4). An Edit used to autosave nowhere
+   * at all — `draftBody` was null whenever `editing` was set — so ✕ on a card
+   * with ten minutes of changes in it dropped every one of them silently. A task
+   * that has run has a session, and that session has a chat record, so the Edit
+   * writes into it exactly as the Draft chip's card does. A task with no session has
+   * no record to write into and keeps the old behaviour, which is the honest
+   * answer rather than a `draft:<id>` invented for it.
+   */
+  const recordKey = (chatKey ?? "") || (editing?.session_id ?? "");
+  /**
+   * THE CONVERSATION THIS CARD'S TASK IS A MESSAGE TO — the destination, where
+   * `recordKey` is the record being edited (Akshil, 2026-09-12).
+   *
+   * A hop out of a chat that HAS ALREADY RUN is a message into that thread:
+   * `POST /api/schedule` is given the session, the entry is filed under it, and
+   * the task keeps the number the conversation already has. Press Schedule
+   * straight away and that worked, because the page still held the id. Exit the
+   * card and the draft on disk knew nothing about it, so reopening it and
+   * pressing Schedule opened a SECOND session with a SECOND task number and the
+   * TASK-nnn the reader had been watching was gone.
+   *
+   * THREE SOURCES, ONE ANSWER, and the FIRST of them is the record's own key
+   * (`chatKeySession`, Akshil, 2026-09-17). A hop out of a chat that has run
+   * opens this card on that conversation's record, and a session's record is
+   * filed under the session id itself — so the key the card is editing IS the
+   * thread, and nothing has to be told it separately. It used to be told:
+   * `?session_id=` rode the hop's URL and arrived here as `chatSessionId`. The
+   * param went when the hop stopped carrying copies of what the server already
+   * holds (design "one record", §1) and this const was left reading a prop
+   * nobody passes any more.
+   *
+   * WHAT THAT COST, because it is the bug and not a tidiness point: with no
+   * session the Schedule payload named none, so `POST /api/schedule` filed the
+   * message as a task of its OWN — a fresh `pending:<entry>` row with a fresh
+   * TASK number, sitting beside the conversation it was supposed to be the next
+   * message of. One booking, two rows, and the reader's report was exactly that:
+   * "scheduling a task creates double entries". `chatHopSeed` restates the same
+   * id into the stored form, which is why the everyday hop (a composer with
+   * words in it, a record already on the server) still worked — and why the
+   * empty-composer hop, whose record does not exist yet, did not.
+   *
+   * So: the key when the key is a session, else what the stored record said,
+   * else the prop for any caller that still hands one over. "" for a hop out of
+   * a chat with no session yet — there is no thread to continue, and that draft
+   * is keyed `new:<file>` precisely because of it.
+   */
+  const boundSessionId =
+    chatKeySession(chatKey ?? "")
+    || (chatSessionId ?? "")
+    || (saved.sessionId ?? "");
+  /**
+   * IS THERE ANYTHING IN THIS CARD WORTH KEEPING — words, or files. Nothing
+   * else (Akshil, 2026-09-12).
+   *
+   * The folder, the model, the effort, the permission mode, the time and the
+   * repeat rule are SETTINGS: they ride along with a draft, they are not what
+   * makes one. Gating the first write on `dirty` alone meant that opening the
+   * card and picking a folder — or opening the when-row and touching a time —
+   * minted a draft and put an "Untitled draft" row on the List for a form
+   * holding nothing anybody typed. An attachment counts only once it has a
+   * PATH: a chip whose upload has not answered names no file yet, which is the
+   * same rule the body's `attachments` uses two lines down.
+   */
+  const draftContent = !!title.trim() || !!message.trim()
+    || images.some((i) => i.path);
+  /**
+   * …AND ONCE A DRAFT EXISTS, EMPTYING IT IS A WRITE, not a silence. The body
+   * keeps being produced while the card HAS a record, so clearing the last words
+   * sends the empty form and the server turns that PUT into a delete
+   * (`drafts._empty_task`; for a chat record, into "clear the words, keep the
+   * settings" — contract §2). Without it the card went quiet at exactly the
+   * moment it had something to say, and the reported shape of that was: clear
+   * the text and the row reads "Untitled draft", then remove the attachment and
+   * the row never goes away at all.
+   *
+   * NOTHING IS WRITTEN UNTIL SOMEBODY CHANGES SOMETHING (design §4). `dirty` is
+   * the whole gate now: there is no write-at-mount arm any more, because a hop
+   * no longer arrives holding words that exist nowhere else — they are already
+   * on the record this card is about to edit. Open the card, press ✕, and
+   * nothing at all has happened.
+   *
+   * AN EDIT WRITES TOO, when it has a record to write into (`recordKey`) — see
+   * that constant. An Edit on a task with no session still writes nothing: it is
+   * a stored entry, not a draft.
+   */
+  const draftBody: TaskDraftForm | null = (!editing || !!recordKey) && dirty
+    && (draftContent || draftId !== null || !!recordKey)
+    ? {
+      title,
+      description: message,
+      target,
+      when: timePicked ? when : null,
+      repeat: repeatOn ? repeat : null,
+      model,
+      effort,
+      permission,
+      // Paths only once they exist: a chip whose upload has not answered names
+      // no file yet, and a draft holding "" would restore an empty chip.
+      attachments: images
+        .filter((i) => i.path)
+        .map((i) => ({ path: i.path, name: i.name, kind: i.kind })),
+      new_task_each_run: repeatOn ? newTaskEachRun : null,
+      // WHERE THIS TASK IS GOING, restated on every save — see `boundSessionId`.
+      session_id: boundSessionId,
+      // THE RULE `repeat` POINTS AT, when the choice is Custom — null the same
+      // moment `repeat` itself goes null, so a draft can never say "custom"
+      // with nothing behind it (Bugbot, PR #1118; see `TaskDraftForm.custom_rule`).
+      custom_rule: repeatOn && repeat === "custom" ? customRule : null,
+    }
+    : null;
+  /**
+   * ONE HOOK, TWO RECORDS. `recordKey` decides which store the same form goes
+   * into, and the two calls differ only in shape:
+   *
+   *   * a CHAT record takes the prose as ONE string — `joinDraft(title,
+   *     description)`, the composer's own box put back together — plus the
+   *     settings as a `form` patch. That is what makes the round trip lossless:
+   *     the composer reads `text`, the card reads `splitDraft(text)`, and
+   *     neither has a second copy of the other's half (contract §1);
+   *   * a TASK record takes the form as it always has, under a uuid this card
+   *     mints inside the write, so the id and the first save are one event and a
+   *     card cannot end up with an id and no stored draft.
+   *
+   * THE CONFLICT RULE IS THE COMPOSER'S (design §2). A 409 means the record
+   * moved under this card — the other tab, or the composer this hop came out of,
+   * still open behind it. Nothing focused in this form means the server's copy
+   * is simply newer, and the card closes onto it rather than showing a form that
+   * no longer exists; a reader mid-field keeps what they are typing, once, with
+   * the same soft toast the composer raises.
+   */
+  /**
+   * THE KEY THIS CARD IS THE EDITOR OF — the chat record it was opened on, or
+   * the task draft it has minted. `""` while it is neither, which is a card
+   * nobody has typed in yet.
+   */
+  const syncKey = recordKey || (draftId ? taskDraftKey(draftId) : "");
+  const autosave = useAutosave(draftBody, (value) => {
+    if (!value) return;
+    // ONE SYNCER, TWO SHAPES. `recordKey` decides which store the same form goes
+    // into, and the two statements differ only in shape:
+    //
+    //   * a CHAT record takes the prose as ONE string — `joinDraft(title,
+    //     description)`, the composer's own box put back together — plus the
+    //     settings as a `form` patch. That is what makes the round trip
+    //     lossless: the composer reads `text`, the card reads `splitDraft(text)`,
+    //     and neither has a second copy of the other's half (contract §1);
+    //   * a TASK record takes the form as it always has, under a uuid this card
+    //     mints at the first statement, so the id and the first save are one
+    //     event and a card cannot end up with an id and no stored draft.
+    if (recordKey) {
+      draftSyncer(recordKey).setText(
+        joinDraft(value.title, value.description),
+        value.attachments,
+        {
+          when: value.when,
+          repeat: value.repeat,
+          custom_rule: value.custom_rule,
+          model: value.model,
+          effort: value.effort,
+          permission: value.permission,
+          target: value.target,
+          new_task_each_run: value.new_task_each_run,
+        },
+        { defer: true },
+      );
+      return;
+    }
+    let id = draftIdRef.current;
+    if (!id) {
+      id = newTaskDraftId();
+      draftIdRef.current = id;
+      setDraftId(id);
+    }
+    // STATED, NOT SENT (Akshil, 2026-09-17): the card writes when the window
+    // loses focus, when the page goes, when it closes — not 600 ms after every
+    // keystroke. Same rule as the composers.
+    draftSyncer(taskDraftKey(id)).setTask(value, { defer: true });
+  }, { key: syncKey });
+  const autosaveRef = useRef(autosave);
+  autosaveRef.current = autosave;
+  // CLOSING THE CARD IS A SAVE MOMENT. Discard and Schedule have already said
+  // their piece (`reset(null)` + delete / forget), so this finds nothing to send
+  // on those roads; on a plain ✕ it carries the last edits.
+  useEffect(() => () => autosaveRef.current.flush(), []);
+  /**
+   * WHAT THIS CARD ANSWERS WHEN THE RECORD MOVED UNDER IT (design §2), read
+   * through a ref because the rule is registered with the KEY and the fields it
+   * asks about change on every keystroke.
+   *
+   * A 409 means somebody else wrote first — the other tab, or the composer this
+   * hop came out of, still open behind it. Nothing focused in this form means
+   * the server's copy is simply newer, and the card closes onto it rather than
+   * showing a form that no longer exists; a reader mid-field keeps what they are
+   * typing, once, with the same soft toast the composer raises.
+   */
+  const ruleRef = useRef<DraftConflictRule | null>(null);
+  ruleRef.current = {
+    // The card is a modal, so anything focused in a field IS this card's —
+    // there is nothing else on the page a caret can be in while it is open.
+    focused: () => {
+      const el = typeof document === "undefined" ? null : document.activeElement;
+      return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA");
+    },
+    localText: () => `${title}\u0000${message}`,
+    adopt: () => {
+      // A CARD CANNOT REPAINT ITSELF FROM A RECORD: every field is seeded in a
+      // `useState` initialiser, which is what makes a re-opened draft a fresh
+      // mount (shell/Scheduled's `key`). So adopting is closing — the record on
+      // the server is the newer one, and the card that was showing the older
+      // one has nothing left to say. Nobody typed anything here, by the rule
+      // that got us into this branch, so there is nothing to lose by it.
+      notify({ title: "That draft changed elsewhere", tone: "info" });
+      onClose();
+    },
+    onKept: () =>
+      notify({ title: "Updated elsewhere, kept your text", tone: "info" }),
+    // THE ID THE WRITE LANDED ON, when the store folded this form into a draft
+    // that already held this conversation (Bugbot, PR #1126). Adopting it keeps
+    // the Discard and the `draft_id` Schedule hands over pointing at the record
+    // that exists.
+    onTaskId: (id: string) => {
+      if (!id || id === draftIdRef.current) return;
+      draftIdRef.current = id;
+      setDraftId(id);
+    },
+  };
+  useEffect(() => {
+    if (!syncKey) return;
+    return draftSyncer(syncKey).watch({
+      focused: () => !!ruleRef.current?.focused(),
+      localText: () => ruleRef.current?.localText() ?? "",
+      adopt: (record) => ruleRef.current?.adopt(record),
+      onKept: () => ruleRef.current?.onKept?.(),
+      onTaskId: (id) => ruleRef.current?.onTaskId?.(id),
+    });
+  }, [syncKey]);
+  const recordKeyRef = useRef(recordKey);
+  recordKeyRef.current = recordKey;
+  /**
+   * THE RECORD THIS CARD IS EDITING CHANGED SOMEWHERE ELSE (design §3).
+   *
+   * Two things can happen to it while the card is open: the trash on its row is
+   * pressed (from the List behind it, the Board, the Cards wall, another window
+   * entirely), or somebody saves it — the composer this hop came out of, still
+   * mounted on the same key, or a second tab. Both arrive here the same way, on
+   * the change feed, with the key and the version.
+   *
+   * GONE CLOSES THE CARD, with the toast, because the form it is showing no
+   * longer stands for anything: leaving it up would let the reader go on editing
+   * a record that would be re-created by their next keystroke — which is the
+   * resurrection this whole design exists to make impossible.
+   *
+   * CHANGED IS LEFT TO THE NEXT SAVE. Every field here is seeded in a `useState`
+   * initialiser, so this card cannot repaint itself from a record; what it can
+   * do is refuse to overwrite one, and the 409 rule above does exactly that —
+   * the write is refused, and either the card closes onto the newer record or
+   * the reader's own words win with a toast.
+   *
+   * ONLY FOR A KEY THIS CLIENT HOLDS A VERSION FOR (contract §3) — WHEN THE FEED
+   * IS THE ONE SAYING IT: the announced key set is noisy, and closing a card on
+   * a `gone` for a record that never existed would be the worst possible
+   * reading of it. A discard made on THIS page carries `certain` and is acted on
+   * regardless, because the delete it came out of has already forgotten the very
+   * version the guard asks for (tasksPulse `announceDraftsGone`).
+   */
+  useEffect(() => onDraftChange((_changed, gone, certain) => {
+    const key = recordKeyRef.current;
+    const id = draftIdRef.current;
+    const mine = key || (id ? taskDraftKey(id) : "");
+    if (!mine) return;
+    if (!certain && draftVersion(mine) === undefined) return;
+    if (!gone.includes(mine)) return;
+    forgetDraftVersion(mine);
+    notify({ title: "Discarded elsewhere", tone: "info" });
+    onClose();
+  }), [onClose]);
+  /**
+   * DISCARD — the draft goes, and so does the card.
+   *
+   * THREE LINES, where it used to be six. `stop()` then `await settle()` before
+   * the DELETE was an ordering protocol against this card's own in-flight PUT;
+   * the version does that now, so a write still on the wire is refused by the
+   * server instead of landing after the delete and putting the row back. And
+   * `reset` is what stops the unmount flush from writing on the way out.
+   *
+   * WHICH RECORD depends on which one this card has been writing into — the
+   * chat record it was opened on, or the task draft it minted. One card, one
+   * record, so there is never a second one left standing.
+   */
+  const discard = async () => {
+    autosaveRef.current.reset(null);
+    // ONE STATEMENT TO THE ONE WRITER: this record should not exist. `handoff`
+    // waits for the server to agree, so the card closes on a fact rather than on
+    // a hope — and a write of this card's own that was still on the wire cannot
+    // land afterwards and put the row back, because the syncer is what it was
+    // waiting on.
+    if (syncKey) {
+      const sync = draftSyncer(syncKey);
+      sync.markDeleted();
+      await sync.handoff();
+    }
+    onClose();
+  };
+
+  const picked = useMemo(() => new Date(when), [when]);
+  const pickedOk = !Number.isNaN(picked.getTime());
+
+  // Ids so the lines this form prints are ATTACHED to the controls they are
+  // about, not merely near them: a screen reader announcing the date chip
+  // otherwise read a bare label with an unrelated line somewhere below (audit
+  // 2026-08-16). Only pathError is a refusal; the past-time note states a
+  // consequence and never blocks Save.
+  const pastHintId = useId();
+  const pathErrorId = useId();
+  // The new-folder note is described-by too — a screen reader must hear "this
+  // folder is about to be created" from the field, not only from the line under
+  // it. Only ever one of the two is on screen (a refusal and a promise about the
+  // same path cannot both be true), so they share the one slot.
+  const newFolderId = useId();
+  //: The path list's own id, so the input can point `aria-controls` and
+  //: `aria-activedescendant` at it and at one of its rows.
+  const recentsId = useId();
+  // …and the line a LOCKED path prints instead of either (design.md §2): not a
+  // refusal and not a promise, but the reason the field cannot be typed in.
+  // Same slot, for the same reason — a locked field has no recents to open and
+  // therefore no new folder to be about.
+  // …and the third: what the repeat does to this task's thread, attached to
+  // the checkbox that decides it.
+  const threadHintId = useId();
+
+  // The two when-dropdowns, and the time field's draft text (editable like
+  // Google's: type "8:30pm" or pick from the list; an unparseable draft
+  // falls back to what the field had).
+  const [dateOpen, setDateOpen] = useState(false);
+  const [timeOpen, setTimeOpen] = useState(false);
+  const dateBtnRef = useRef<HTMLButtonElement>(null);
+  const timeRef = useRef<HTMLInputElement>(null);
+  const [timeText, setTimeText] = useState(() =>
+    fmtTime(new Date(when).getHours() || 0, new Date(when).getMinutes() || 0),
+  );
+
+  const dateLabel = pickedOk
+    ? `${DAYS[picked.getDay()]}, ${MONTHS[picked.getMonth()]} ${picked.getDate()}` +
+      (picked.getFullYear() === new Date().getFullYear() ? "" : `, ${picked.getFullYear()}`)
+    : "Pick a date";
+
+  // Both setters mark the time as PICKED, and so does the Repeat tick: between
+  // them they are every way a person can state an opinion about when. See
+  // `timePicked`. Marked even when the new value equals the old one — reopening
+  // the grid and clicking today is still an answer to the question.
+  const setDatePart = (d: Date) => {
+    const t = pickedOk ? picked : new Date();
+    setWhen(toLocalInput(new Date(
+      d.getFullYear(), d.getMonth(), d.getDate(), t.getHours(), t.getMinutes(),
+    )));
+    setTimePicked(true);
+  };
+  const setTimePart = (h: number, m: number) => {
+    const d = pickedOk ? picked : new Date();
+    setWhen(toLocalInput(new Date(
+      d.getFullYear(), d.getMonth(), d.getDate(), h, m,
+    )));
+    setTimeText(fmtTime(h, m));
+    setTimePicked(true);
+  };
+  const commitTimeText = () => {
+    const parsed = parseTime(timeText);
+    if (parsed) setTimePart(parsed.h, parsed.m);
+    else if (pickedOk) setTimeText(fmtTime(picked.getHours(), picked.getMinutes()));
+  };
+
+  // The structured rule the current choice means; null for a one-off (and for
+  // "cron", whose legacy line is submitted verbatim instead).
+  const choices = useMemo(
+    () => repeatChoicesFor(pickedOk ? picked : new Date()),
+    [picked, pickedOk],
+  );
+  const rule: RecurrenceRule | null = useMemo(() => {
+    // The checkbox is the outer gate: an unticked Repeat submits no rule, full
+    // stop, whatever the (hidden) dropdown last said.
+    if (!repeatOn) return null;
+    if (repeat === "custom") return customRule;
+    if (repeat === "cron" || repeat === "none") return null;
+    return choices.find((c) => c.key === repeat)?.rule ?? null;
+  }, [repeatOn, repeat, customRule, choices]);
+
+  // Back to chat honours the SAME two-step dirty guard as the ✕ — one click
+  // must not silently abandon an adjusted form just because the exit points
+  // at the chat instead of nowhere (Bugbot, PR #548). First click re-labels
+  // the button for 2s; the second within that window really leaves.
+  const [backConfirm, setBackConfirm] = useState(false);
+  const backTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (backTimer.current !== null) window.clearTimeout(backTimer.current);
+    },
+    [],
+  );
+  //
+  // AND IT REVERSES NOTHING, because there is nothing to reverse (design "one
+  // record", §1). The hop used to delete the chat draft and mint a task draft in
+  // its place, so walking back had to undo that in three ordered steps — flush,
+  // settle, write the words onto the chat key, delete the task draft, navigate —
+  // with a separate arm for the bound case where the two "records" were secretly
+  // one. The card now edits the composer's own record, so Back to chat is a
+  // FLUSH and a navigation: the record is untouched, and the composer on the
+  // other side seeds from the very thing this card was writing into.
+  //
+  // FLUSH AND NOT `stop`: the last 600 ms of typing are still in the debounce,
+  // and the box being walked back to is where those keystrokes belong.
+  //
+  // WHERE IT LANDS is `?from=` when the hop carried one, and otherwise the
+  // record's own key turned into a route (`backChatHref`) — which is what the Draft
+  // chip's card has, since that press starts on this page and names no route.
+  const backHref = chatBack || backChatHref(recordKey, target);
+  const canGoBack = !!backHref;
+  const backToChat = async () => {
+    if (!canGoBack) return;
+    if (dirty && !backConfirm) {
+      setBackConfirm(true);
+      if (backTimer.current !== null) window.clearTimeout(backTimer.current);
+      backTimer.current = window.setTimeout(() => setBackConfirm(false), 2000);
+      return;
+    }
+    autosaveRef.current.flush();
+    navigateUrl(backHref);
+  };
+
+  // The replacement was created but the original could not be withdrawn: the
+  // one state where pressing Save again would mint a THIRD copy, so it
+  // disables the button outright and the error says what to do by hand.
+  const [replaced, setReplaced] = useState(false);
+
+  // ---- The session's own name, prefilled into Title ----------------------
+  // Steps 2 and 3 of the precedence (see sessionTitleOf): what the CONVERSATION
+  // is called — its `ai-title`, else its first user message — never the message
+  // being scheduled.
+  //
+  // Sourced from /api/tasks rather than from the deep link or a new endpoint:
+  // a session IS a task there (tasks.py `_collect`), so the row keyed on it
+  // already carries the resolved title AND `title_source`, which is what says
+  // WHICH of the two steps produced it — and the first user message is only
+  // reachable that way, since the server resolves it (`tasks_store.head`) but
+  // does not put it on the wire under a name of its own. The alternative —
+  // having the chat template put its title in the URL beside `message`,
+  // `target`, `session_id` and `back` — would hand us a string with no
+  // provenance, and one that is stale from the moment the link is built.
+  //
+  // BOTH paths that have a session use it, and for the same reason: the chat
+  // this form was deep-linked from (?new=1&session_id=…), and whatever session
+  // an edited entry carries — the thread it learned, or the chat it was
+  // scheduled from. The provenance that matters elsewhere (learnedSessionOf)
+  // does not matter here: either way that conversation is where this task's name
+  // comes from, and an untitled task is exactly the case where `ai-title` is the
+  // only name that exists. Refusing to look it up would leave the user retyping
+  // a name the app already knows.
+  //
+  // It only ever replaces the SYNCHRONOUS title (usually the empty string),
+  // never a typed one and never a USABLE stored one — a leaked stored title is not
+  // one of those, which is the whole reason this effect gets to run on such a row
+  // at all (initialTitleStateOf). Same discipline as the getConfig effect above,
+  // and for the same bug: `initial` moves with it, because a value the user did
+  // not type must not read as dirty and arm the close-twice guard.
+  // That pairing matters more now that the field starts blank: without it, every
+  // form opened from a chat would arrive already dirty and its ✕ would need two
+  // presses before the user had touched anything.
+  useEffect(() => {
+    // Whether to look this up at all was decided with the field's opening value,
+    // by the same call, so the two cannot disagree: "" means either a stored title
+    // won step 1 (nothing may outrank it) or there is no session to ask about. It
+    // deliberately does NOT re-derive that from `editing` — reading the raw stored
+    // title here is precisely the bug initialTitleStateOf exists to close.
+    if (!titleLookup) return;
+    let alive = true;
+    getTasks()
+      .then(({ tasks }) => {
+        const resolved = sessionTitleOf(tasks, titleLookup);
+        if (!alive || !resolved) return;
+        setTitle((prev) => (prev === derivedTitle ? resolved : prev));
+        setInitial((prev) =>
+          prev.title === derivedTitle ? { ...prev, title: resolved } : prev,
+        );
+      })
+      // A failed lookup is not worth reporting: the field is either already
+      // showing a stored title or blank with Save asking for one, and neither
+      // state is improved by an error banner about a name.
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [titleLookup, derivedTitle]);
+
+  // ---- Delete ------------------------------------------------------------
+  // Only when EDITING, and only for something the server will actually
+  // withdraw — see deleteActionFor. null means no button at all, which is the
+  // refusal: a control that 404s on press is worse than no control.
+  const del = deleteActionFor(editing);
+  // The same two-press idiom the ✕ and Back to chat use, for the same reason
+  // and with the same 2s window — except the second label names the
+  // CONSEQUENCE rather than asking, because stopping a series is not undoable
+  // from this page and "Are you sure?" is not what the user needs to read.
+  const [delConfirm, setDelConfirm] = useState(false);
+  const delTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (delTimer.current !== null) window.clearTimeout(delTimer.current);
+    },
+    [],
+  );
+  const remove = async () => {
+    const press = deletePress(del, delConfirm);
+    if (press === null || del === null) return;
+    if (press.do === "arm") {
+      setDelConfirm(true);
+      if (delTimer.current !== null) window.clearTimeout(delTimer.current);
+      delTimer.current = window.setTimeout(() => setDelConfirm(false), 2000);
+      return;
+    }
+    if (delTimer.current !== null) window.clearTimeout(delTimer.current);
+    setDelConfirm(false);
+    setBusy(true);
+    setError(null);
+    try {
+      // A TEMPLATE id here is the whole point: the server cancels the rule AND
+      // its materialized next run, which is what "stop this recurring job"
+      // means. An occurrence id would only skip one run — which the list and
+      // the calendar popover already offer, and which is the opposite thing.
+      await cancelScheduledMessage(press.id);
+      // `onCreated` is the page's "something changed, re-read" callback
+      // (Scheduled passes `reload`), and a delete is exactly that. A separate
+      // `onDeleted` prop would read better in isolation but would need the
+      // parent to pass it, and the reload it would trigger is the identical
+      // one — so this reuses the callback rather than growing the contract.
+      onCreated();
+      onClose();
+    } catch (e) {
+      // A 404 is not a failure: the entry really is gone, so the page is
+      // re-read (its row must not linger) and the modal stays open only long
+      // enough to say why nothing happened.
+      if ((e as { status?: number }).status === 404) onCreated();
+      setBusy(false);
+      setError(deleteFailureText(e, del.series));
+    }
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // A drop the instant before Save must still make the task: wait out the
+      // in-flight uploads, then read the paths off state. Failures already
+      // removed themselves (attachFiles' catch), so what remains is real.
+      await Promise.all([...pendingRef.current]);
+      // One pure function builds the whole body, so what actually goes on the
+      // wire can be asserted without a DOM (new-task-form.test.ts). A rule
+      // rides with its anchor, a legacy cron line replaces `due`, a CHAT's
+      // session is continued only while the task stays a one-off (resuming one
+      // conversation on every run compounds its context forever — Akshil,
+      // 2026-08-16; Bugbot, PR #548), and the task's OWN thread is carried
+      // through the re-create an edit really is.
+      // THE DRAFT STOPS HERE. The server deletes it as part of creating the
+      // task (it is handed `draft_id` or `draft_key` below), so the only thing
+      // left to do is make sure nothing this card has queued writes it back.
+      // `reset(null)` is the whole of that now: it forgets the pending debounce
+      // AND leaves the unmount flush with nothing to say. A PUT already on the
+      // wire needs no handling — it states the version it read, the create bumps
+      // past it, and the server refuses it.
+      //
+      // A HOP-SEEDED CARD NEEDS NO FLUSH FIRST any more either. There is no
+      // first write to force out: the words were already on the record before
+      // this card opened, so `draft_key` below names something that exists
+      // whether or not anybody has typed since (the bug that flush was added
+      // for cannot occur).
+      autosaveRef.current.reset(null);
+      // …AND THE SYNCER FORGETS IT. The debounce belongs to the KEY now, not to
+      // this card, so a keystroke 300 ms before Save would otherwise fire after
+      // the create and write the draft the server has just deleted straight back.
+      if (syncKey) draftSyncer(syncKey).forget();
+      await scheduleMessage(
+        buildSchedulePayload({
+          target,
+          message,
+          title,
+          when,
+          rule,
+          repeat,
+          legacyCron,
+          permission,
+          model,
+          effort,
+          // The two sources are kept APART here, because the payload treats
+          // them oppositely: the task's OWN thread (learned, on the entry)
+          // survives a repeat, a CHAT's does not. A one-off entry's stored id
+          // travels in the chat slot — see learnedSessionOf — and still
+          // outranks the deep link's, as it always did.
+          // …and a REOPENED draft's stored binding is the third source, for the
+          // card that has no `chatSessionId` because the hop that made it is
+          // long over. See `boundSessionId`.
+          sessionId: (!learnedSession && editing?.session_id) || boundSessionId,
+          learnedSessionId: learnedSession,
+          newTaskEachRun,
+          // The task's NUMBER has to survive the re-create an edit is; see
+          // `replacesEntryId`. Empty on a new task, which replaces nothing.
+          replacesEntryId: editing?.id ?? "",
+          // …and the draft this card was composed in, so the server can drop it
+          // in the same request. Empty when the form was never dirty enough to
+          // mint one, which is most one-line tasks.
+          //
+          // READ HERE, which is to say after the `settle` above — this payload
+          // is built once that await has returned, so the id is whatever the
+          // last write landed on rather than whatever was minted before it
+          // (Bugbot, PR #1126, 2026-09-12; the same ordering Discard and Back
+          // to chat now take). Naming the minted id instead left the bound
+          // draft standing beside the task it had just become.
+          draftId: draftIdRef.current ?? "",
+          // …and the CHAT record this card was editing, so the server deletes
+          // it and moves its TASK number onto the entry — `draftId`'s twin for
+          // the other kind of record (contract §5). Never both: a card edits one
+          // record.
+          draftKey: recordKey,
+          // Whether anybody chose this time, which is what decides if the task
+          // is a plan or a thing to run. See `timePicked`.
+          timePicked,
+          images: imagesRef.current.map((i) => i.path).filter(Boolean),
+          // Same list, same order, the names and kinds kept. Filtered on `path`
+          // like `images` above, so an upload that never answered is left out
+          // of BOTH fields rather than described in one of them.
+          attachments: imagesRef.current
+            .filter((i) => i.path)
+            .map((i) => ({ path: i.path, name: i.name, kind: i.kind })),
+        }),
+      );
+      rememberRecent(target);
+      if (editing) {
+        // Replacement first, THEN withdraw — a failed create must never leave
+        // the user with neither task. A 404 here is the fine race: the old
+        // run fired (or was cancelled elsewhere) while the form was open.
+        // Anything ELSE is the bad case — old and new both armed, an
+        // unattended double-run — so it is said out loud instead of closed
+        // over (the first cut swallowed every error here).
+        try {
+          await cancelScheduledMessage(editing.id);
+        } catch (e) {
+          if ((e as Error & { status?: number }).status !== 404) {
+            onCreated();
+            setReplaced(true);
+            setBusy(false);
+            setError(
+              "The new task is saved, but the old one couldn't be withdrawn — " +
+              "cancel it from the list so it doesn't also run.",
+            );
+            return;
+          }
+        }
+      }
+      onCreated();
+      onClose();
+    } catch (e) {
+      // The server's 400s are written for a human (bad path, bad cron, past
+      // due time) — show them verbatim rather than translating.
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  };
+
+  // A past time is no longer refused — by this form or by the server (design
+  // §9): missed work is queued and runs when the app next opens, so picking
+  // yesterday is a legitimate way to say "run this as soon as you can". What
+  // is left is a NOTE saying which of the two things happens.
+  //
+  // It used to be scoped to a one-off, on the reasoning that a rule's picked
+  // time is only the series' ANCHOR — it sets the pattern and nothing runs
+  // until the next future slot, so "as soon as it can" would have been a lie.
+  // SCH-13b ended that: a past-anchored rule now materializes a catch-up on
+  // its latest past slot and fires on the next tick, so a repeat kept silent
+  // here fired with nothing on the form saying so (Bugbot, PR #555). The
+  // anchor's pattern role is untouched — a monthly rule anchored on a past
+  // second Wednesday still means the second Wednesday — which is exactly why
+  // the two wordings differ rather than one covering both. See pastNoteFor.
+  const pastNote = pastNoteFor(pickedOk ? picked : null, repeatOn, rule, new Date());
+
+  // See saveEnabled: Title is the required prose field, and the description is
+  // not — a title alone is a whole task, and it is what goes on the wire as the
+  // message.
+  const gate = {
+    message,
+    title,
+    target,
+    pathError,
+    repeatOn,
+    repeat,
+    customRule,
+    legacyCron,
+    pickedOk,
+    replaced,
+    // Read ONLY by saveBlockedReason, which uses it to decide the fix rather
+    // than the verdict — `saveEnabled` ignores it, and must, since a locked
+    // target that does not exist is exactly as unsaveable as a typed one.
+    lockTarget,
+  };
+  const ready = saveEnabled(gate);
+  // The word on the primary button: what this press is about to DO, not the
+  // generic "Save" the card wore while it only ever wrote a row down. See
+  // saveActionLabel — and note it is read from the same `picked`/`repeatOn` the
+  // when-row edits, so folding the row away does not freeze the word: a card
+  // left on its default of now says Run, which is exactly what it does.
+  const actionLabel = saveActionLabel(pickedOk ? picked : null, repeatOn, new Date());
+
+  // What a press does when the form is not ready. Save is NOT disabled on that
+  // any more — see saveBlockedReason for why a dead button was the wrong answer
+  // — so this is the press's whole job: say the first thing that is missing and
+  // put the caret in it. `setError` is the banner the submit failures already
+  // use, so there is one place on the card that says why nothing happened.
+  const trySubmit = () => {
+    const blocked = saveBlockedReason(gate);
+    if (!blocked) {
+      submit();
+      return;
+    }
+    setError(blocked.text);
+    const el = blocked.field === "title" ? titleRef.current
+      : blocked.field === "target" ? pathRef.current
+        : null;
+    el?.focus();
+  };
+
+  return (
+    <Modal
+      title={editing ? "Edit task" : "New task"}
+      dialogClassName="new-task-dialog"
+      // …plus WHICH TASK this one came out of, when it came out of one
+      // (design.md B, Option 1). A chip, not a field: it states the fact the
+      // session id was already carrying silently, and pressing it opens that
+      // task. An Edit never wears it — that heading is the task.
+      //
+      // BESIDE THE HEADING AND NOT INSIDE IT (`titleAside`, not `title`). It
+      // rendered inside the `h2` for a round, which is the element the dialog is
+      // NAMED by (`aria-labelledby`): the name became "New task from TASK-003",
+      // and a `<button>` lived inside a heading, where a screen reader's heading
+      // walk reads it out with no way to press it. Same row, same place on
+      // screen — `.modal-head-title` is the flex row that keeps it there.
+      {...(editing || !sourceTask ? {} : {
+        titleAside: sourceTask.onOpen
+          ? (
+            <button
+              type="button"
+              className="new-task-source"
+              title={`Open ${shortTaskId(sourceTask.taskId)}`}
+              onClick={sourceTask.onOpen}
+            >
+              from {shortTaskId(sourceTask.taskId)}
+            </button>
+          )
+          // No door on this surface, so no control: the same chip, saying the
+          // same thing, with nothing to press. A button that answers a press
+          // with nothing is the worse of the two.
+          : <span className="new-task-source">from {shortTaskId(sourceTask.taskId)}</span>,
+      })}
+      onClose={onClose}
+      busy={busy}
+      width={460}
+      // THE CLOSE-TWICE GUARD IS OFF WHENEVER THERE IS A DRAFT TO CLOSE INTO
+      // (design.md, Decisions: "Modal close keeps the draft silently; Discard in
+      // footer. No prompt."). The guard exists to stop a ✕ discarding typed
+      // work; on a new-task card the work is not discarded — it is autosaved and
+      // the row is waiting on the List — so the confirm would be asking about a
+      // loss that does not happen. An EDIT keeps it: there is no draft there,
+      // and its ✕ really does throw the changes away.
+      dirty={editing ? dirty : false}
+      footer={
+        <>
+          {/* Destructive, so it sits at the far left of the footer, away from
+              Save — `.btn-danger-text` carries the margin-right:auto that
+              anchors it there. Present only on an Edit, and only when the
+              entry is actually withdrawable. `type="button"`, like every
+              control in this footer: the form has no submit, so Enter never
+              reaches it. */}
+          {del && (
+            <button
+              type="button"
+              className={"btn btn-danger-text new-task-delete"
+                + (delConfirm ? " is-armed" : "")}
+              title={del.title}
+              disabled={busy}
+              onClick={remove}
+            >
+              {ICON_TRASH}
+              {delConfirm ? del.confirm : del.label}
+            </button>
+          )}
+          {/* DISCARD — the deliberate way to be rid of a draft, and the only
+              one (design.md: close keeps it, this throws it away). Drawn only
+              once a draft actually exists: on an untouched card there is
+              nothing to discard, and a button offering to delete nothing is a
+              button that makes the reader wonder what it knows.
+
+              ONE SEAT, ONE SKIN (Akshil, 2026-09-12). Delete and Discard can
+              never both be on a card — `del` is an Edit's and `draftId` is a
+              new task's — so they are not two controls sharing a footer, they
+              are the same control under the two names the card can be in. It
+              therefore takes Delete's exact class (`.new-task-delete` carries
+              the glyph spacing, `.btn-danger-text` the `margin-right:auto` that
+              anchors the far-left seat) and Delete's trash glyph. Two weights
+              for one position read as a footer that moves its buttons around
+              depending on what you opened. The LABEL still differs, because the
+              verbs do: one withdraws a running task, one drops an unfinished
+              form. No arming step here — there is nothing scheduled to undo. */}
+          {(draftId || (recordKey && !editing)) && (
+            <button
+              type="button"
+              className="btn btn-danger-text new-task-delete"
+              disabled={busy}
+              title="Discard this draft"
+              onClick={discard}
+            >
+              {ICON_TRASH}
+              Discard
+            </button>
+          )}
+          {/* The way back completes the chat's round trip: chat → schedule →
+              adjust the draft → schedule again. Only shown when there is a chat
+              record behind this card — from anywhere else there is no "back".
+              Two ways it can have: the hop's own `?from=` route, and the record's
+              own key turned into one (see `backToChat`). */}
+          {canGoBack && (
+            <button type="button" className="btn btn-secondary schedule-back-chat"
+                    disabled={busy}
+                    onClick={() => void backToChat()}>
+              {backConfirm ? "Discard changes?" : "Back to chat"}
+            </button>
+          )}
+          {/* NOT disabled on `!ready`. A dead button is not a hint: the
+              commonest way to reach it is the commonest thing to forget (type a
+              name, press Save, leave the description empty) and the answer was
+              nothing at all — no message, no focus move, the card just sat there
+              (QA, 2026-08-18). The rules are unchanged; a press on a form that
+              cannot be saved now SAYS which field is missing and puts the caret
+              in it. See trySubmit / saveBlockedReason.
+
+              `aria-disabled` rather than `disabled` so the state is still
+              announced, while the button stays focusable and pressable — which
+              is the whole point. Only `busy` truly disables it: a second press
+              mid-save would schedule the message twice. */}
+          <button type="button" className="btn btn-primary schedule-save"
+                  disabled={busy} aria-disabled={!ready} onClick={trySubmit}>
+            {busy ? `${actionLabel === "Create" ? "Creating" : "Scheduling"}…` : actionLabel}
+            {/* No hotkey badge (Akshil, 2026-09-23): the chord it advertised
+                (⌘↩) is gone, and a bare ↩ beside "Create" said nothing a
+                reader would not try first. */}
+          </button>
+        </>
+      }
+    >
+      <div
+        className="schedule-form"
+      >
+        {/* ONE WRITING SURFACE, not two controls (Akshil, 2026-08-17, reference
+            image): the title and the description share a single borderless
+            area running from the header rule to the rows below it, the title
+            set large and the description quieter beneath it. Neither field
+            looks like an input — no border, no underline, no filled box — so
+            the top of the card reads as a document you type into rather than a
+            form with two fields in it. The wrapper is what makes that ONE
+            surface: it owns the block's vertical space and hands the slack to
+            the description, so a two-word entry does not leave the card
+            top-heavy. See `.new-task-write` in new-task.css for the whole
+            treatment, including what focus looks like when there is no box to
+            recolour.
+
+            TITLE FIRST, and the prominent one (Akshil, 2026-08-17: "title will
+            be the first field and then description will be the second field").
+            The folder and the time are facts ABOUT the task and stay quiet
+            beneath in the 26px icon gutter; neither of these two carries a
+            leading icon, because a 14px glyph beside a 20px face read as
+            debris and the gutter is what says "this is a detail".
+
+            REQUIRED, and the only required field on the card now — it is both
+            the task's name in the list and the first line of what Claude is sent
+            (composeTaskMessage). Prefilled from the chat draft's first line
+            where the form was deep-linked from a composer (splitDraft, which
+            takes that line OUT of the description so nothing is said twice), and
+            otherwise from the SESSION where there is one to read: its
+            `ai-title`, else its first user message — see sessionTitleOf for the
+            whole precedence and for what it refuses. Opened from the New task
+            button, or from a session with nothing to say for itself, the field is
+            blank and the requirement is what asks for a name — `aria-required`
+            says so rather than leaving a disabled Save as the only hint.
+
+            An <input>, not a textarea, and that is the whole overflow answer:
+            one line that never wraps and never grows. Long text scrolls
+            horizontally under the caret while the field has focus and ellipses
+            when it does not — see `.new-task-title` in new-task.css. */}
+        <div
+          className="new-task-write"
+          // The write block is the drop target — the part of the card that
+          // reads as "the message", which is what an image is attached TO.
+          onDragOver={(e) => {
+            if ([...e.dataTransfer.items].some((i) => i.kind === "file")) {
+              e.preventDefault();
+            }
+          }}
+          onDrop={(e) => {
+            if (e.dataTransfer.files?.length) {
+              e.preventDefault();
+              attachFiles(e.dataTransfer.files);
+            }
+          }}
+        >
+          <input
+            ref={titleRef}
+            type="text"
+            className="new-task-field new-task-title"
+            aria-label="What should Claude do?"
+            aria-required="true"
+            onPaste={pasteFiles}
+            placeholder={TITLE_PLACEHOLDER}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            // ENTER CREATES THE TASK; SHIFT+ENTER MOVES DOWN into the
+            // instructions (Akshil, 2026-09-23). It was the other way round —
+            // Enter walked the caret down and ⌘↩ saved — and the card asked
+            // for a chord to do the one thing it exists for. An IME
+            // composition's Enter commits the candidate, not the line, and is
+            // left alone. Goes through trySubmit, not submit, so a form that
+            // cannot be saved answers the same way the button does.
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+              e.preventDefault();
+              if (e.shiftKey) {
+                askRef.current?.focus();
+                return;
+              }
+              if (!busy) trySubmit();
+            }}
+            autoFocus
+          />
+
+          {/* …and the ADDITIONAL INSTRUCTIONS second: the rest of what Claude
+              is sent. The two fields are ONE message — the answer above is its
+              first line and this is the body under it (composeTaskMessage) —
+              which is what makes this field OPTIONAL as of 2026-08-18. "Update
+              the changelog" is a complete instruction, and the form used to make
+              the user type it twice: once to name the task and once to say it.
+              So no aria-required here, and Save no longer refuses an empty one.
+
+              It is named for what it ADDS rather than as a "description",
+              because the field above is now the one that asks the question: what
+              belongs here is the part that answer left out.
+
+              Quieter and smaller than the title, and it keeps the growth Title
+              deliberately does not have: multi-line, autogrowing with the text
+              from the floor `.new-task-ask` sets up to its max-height, then
+              scrolling. */}
+          <div className="new-task-ask-wrap">
+            <textarea
+              ref={askRef}
+              className="new-task-field new-task-ask"
+              rows={2}
+              aria-label="Additional instructions"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onPaste={pasteFiles}
+              // Enter creates the task here too; Shift+Enter is the textarea's
+              // own newline and is left to it (Akshil, 2026-09-23).
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.nativeEvent.isComposing || e.shiftKey) return;
+                e.preventDefault();
+                if (!busy) trySubmit();
+              }}
+            />
+            {/* The placeholder, drawn rather than set: a native `placeholder`
+                is one run of text, and this one is two — the words, and under
+                them the key that gets the caret here, in italics. Hidden the
+                moment there is text, like the native one; `aria-hidden`
+                because the field's `aria-label` already says what it is. */}
+            {!message && (
+              <div className="new-task-ask-hint" aria-hidden="true">
+                <span>{ASK_PLACEHOLDER}</span>
+                <em>{ASK_HINT_KEY}</em>
+              </div>
+            )}
+          </div>
+
+          {/* The attachments, minimal on purpose (Akshil, 2026-08-26: "just
+              the image and the x icon on it"): a bare thumbnail that OPENS the
+              viewer — a receipt this small proves a picture exists, it cannot
+              show what is in it — and an ✕ riding its corner. A NON-PICTURE
+              gets the same footprint with the doc glyph and a short filename in
+              place of the picture (thumbnail XOR glyph, D613), because a file is
+              the one attachment that cannot show what it is.
+
+              NO ＋ PICKER (D618): the row is chips and nothing else. The entry
+              points are paste on either field and drop anywhere on the card,
+              which is the gesture every user of this card actually makes; a
+              dashed square standing permanently in the row was chrome for the
+              one who does neither. */}
+          <div className="new-task-images">
+            {images.map((img) => (
+              <div
+                key={img.key}
+                className={"nt-img" + (img.path ? "" : " nt-img-up")}
+              >
+                <button
+                  type="button"
+                  className={"nt-img-open" + (img.kind === "file" ? " nt-img-doc" : "")}
+                  aria-label={img.kind === "image"
+                    ? "View image" : "Preview " + img.name}
+                  onClick={() => {
+                    setViewerKey(img.key);
+                    setViewerZoom(false);
+                  }}
+                >
+                  {img.kind === "image" && (img.thumb || img.path) ? (
+                    <img src={img.thumb ?? rawUrl(img.path)} alt="" />
+                  ) : (
+                    <>
+                      <span className="nt-img-glyph" aria-hidden="true">📄</span>
+                      <span className="nt-img-name">{img.name}</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="nt-img-x"
+                  aria-label="Remove attachment"
+                  onClick={() => {
+                    if (img.thumb) URL.revokeObjectURL(img.thumb);
+                    applyImages((prev) => prev.filter((i) => i.key !== img.key));
+                    setViewerKey((k) => (k === img.key ? null : k));
+                  }}
+                >
+                  {ICON_X}
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* The viewer (#shotview, ported): modal on purpose — the one thing
+              the user is doing here is looking at one attachment. A PICTURE is
+              fitted first; clicking the image swaps to natural size and the box
+              scrolls, which is the only way a card-sized column shows a wide
+              screenshot at a legible scale. Scrim click and Escape both close
+              it. */}
+          {viewer && viewer.kind === "image" && (
+            <div className="nt-shotview" role="dialog" aria-label="Attached image">
+              <div className="nt-shotview-scrim" onClick={closeViewer} />
+              <figure className={"nt-shotview-box" + (viewerZoom ? " zoom" : "")}>
+                <img
+                  className="nt-shotview-img"
+                  src={viewer.thumb ?? rawUrl(viewer.path)}
+                  alt="attached image"
+                  onClick={() => setViewerZoom((z) => !z)}
+                />
+                <figcaption className="nt-shotview-bar">
+                  <span className="nt-shotview-path">
+                    {viewer.path || "uploading…"}
+                  </span>
+                  <span className="nt-shotview-spacer" />
+                  <button
+                    type="button"
+                    className="nt-chip-x"
+                    onClick={closeViewer}
+                  >
+                    Close
+                  </button>
+                </figcaption>
+              </figure>
+            </div>
+          )}
+
+          {/* A FILE's viewer: the file in its OWN fused-render template, sealed
+              (D616). A name and a path answer "which file is this" and do not
+              answer "is this the RIGHT file", which is the question a viewer
+              exists for — and fused-render already owns a table for a .csv, a
+              schema for a .parquet, a page for a .md.
+
+              The frame is UNMOUNTED by this very conditional on every exit —
+              Close, Escape and the scrim all clear `viewer` — and that is the
+              load-bearing half rather than a tidy-up: a template is a RUNNING
+              document (a warm python worker behind it, a poll, possibly a map
+              redrawing), so one left mounted behind a shut modal goes on costing
+              all of it. */}
+          {viewer && viewer.kind === "file" && (
+            <div className="nt-shotview" role="dialog" aria-label="Attached file">
+              <div className="nt-shotview-scrim" onClick={closeViewer} />
+              <figure className="nt-shotview-box nt-shotview-doc">
+                {previewSrc && (
+                  <iframe
+                    className="nt-shotview-frame"
+                    {...THUMB_SEAL}
+                    src={previewSrc}
+                    title=""
+                    tabIndex={-1}
+                    aria-hidden="true"
+                    onLoad={() => setFrameLoaded(true)}
+                  />
+                )}
+                {(previewWait || (!!previewSrc && !frameLoaded)) && (
+                  <p className="nt-shotview-load">loading preview…</p>
+                )}
+                <figcaption className="nt-shotview-bar">
+                  <span className="nt-shotview-name">
+                    <span aria-hidden="true">📄</span> {viewer.name}
+                  </span>
+                  <span className="nt-shotview-path">
+                    {viewer.path || "uploading…"}
+                  </span>
+                  <span className="nt-shotview-spacer" />
+                  <button
+                    type="button"
+                    className="nt-chip-x"
+                    onClick={closeViewer}
+                  >
+                    Close
+                  </button>
+                </figcaption>
+              </figure>
+            </div>
+          )}
+        </div>
+
+        {/* The path is a combobox, Google-style: focusing it drops the last
+            few folders the user scheduled against, with Browse as the
+            dropdown's last row (Akshil, 2026-08-15 — the standalone Browse
+            button next to the field moved in here). Blur closes it, but only
+            when focus truly leaves the wrap — clicking a row moves focus INTO
+            the dropdown, and closing on that blur would eat the click. */}
+        {/* NOT THERE AT ALL inside an app's Tasks tab (Akshil, 2026-09-19: "in
+            dedicated tasks when we open the new task modal, hide the path field").
+            It used to sit here disabled with a line saying why; a control whose
+            one answer is already known is a control the card is better off
+            without. The target is still saved — `target` is seeded from the
+            scope and never touched — and Save's own check still refuses a path
+            it could not clear. */}
+        {!lockTarget && (
+        <div className="schedule-form-line">
+          {ICON_FOLDER}
+          <div
+            className="schedule-recents-wrap"
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                setRecentsOpen(false);
+              }
+            }}
+            // On the WRAP, not the input: a row reached by Tab is focusable
+            // too, and Escape from it must dismiss the list, not bubble to
+            // the modal's close handler (Bugbot, PR #541).
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && recentsOpen) {
+                e.stopPropagation();
+                setRecentsOpen(false);
+                setPathAt(-1);
+                if (document.activeElement !== pathRef.current) {
+                  suppressOpen.current = true;
+                  pathRef.current?.focus();
+                }
+              }
+              // ARROWS, TAB AND ENTER, read by the Explorer address bar's own
+              // key map (`completionKeyAction`) and dispatched the way it
+              // dispatches them.
+              //
+              // TAB ACCEPTS (Akshil, 2026-09-18). This round called it the other
+              // way — "Tab leaves a form field" — and that was the wrong call
+              // here: the Explorer completes on Tab, this field is the same kind
+              // of control, and one address bar in the app that answers Tab
+              // differently from the other is worse than one that takes the key.
+              // It only ever fires while the list is OPEN with rows in it;
+              // everywhere else Tab is untouched and moves focus, because
+              // `completionKeyAction` answers `none` when the list is shut.
+              //
+              // …BUT ONLY ONTO A ROW THE READER ARROWED TO (review, 2026-09-19).
+              // `completionKeyAction` answers Tab with row 0 when nothing is
+              // highlighted (`tabDefaultIndex`), which is right for the
+              // Explorer — there row 0 completes the segment being typed — and
+              // wrong here: row 0 is a folder from LAST WEEK, and Tab out of a
+              // freshly typed path replaced it with that folder. Tab with
+              // nothing arrowed to is left alone, so it does what Tab does and
+              // moves on.
+              const act = completionKeyAction(
+                e.key, recentsOpen, pathAt, pathRows.length);
+              if (act.type === "tab-accept" && pathAt < 0) return;
+              if (act.type === "move") {
+                e.preventDefault();
+                setPathAt(moveHighlight(pathAt, act.delta, pathRows.length));
+              } else if (act.type === "tab-accept" || act.type === "enter-accept") {
+                e.preventDefault();
+                const row = pathRows[act.index];
+                if (!row) return;
+                // THE NEW-FOLDER SUGGESTION ANSWERS WITH THE PATH THE FIELD
+                // ALREADY HOLDS, so taking it is only ever "close the list" —
+                // the same thing its click has always done. Named by index
+                // rather than by shape: it is the one row whose text is a NAME
+                // and not an address, and writing that name into the field
+                // would throw away the path it was derived from (caught in the
+                // browser — Enter on it turned `/Users/me/Desktop/fu` into
+                // `fu`).
+                if (act.index === newFolderAt) {
+                  setRecentsOpen(false);
+                  setPathAt(-1);
+                  return;
+                }
+                // TAB PUTS IT IN THE FIELD, ENTER ANSWERS WITH IT. Tab leaves
+                // the list open on a path the reader can go on editing; Enter
+                // settles, because a folder on this list is a whole address
+                // rather than a way towards one.
+                if (act.type === "tab-accept") acceptPath(row);
+                else pickPath(row);
+              }
+            }}
+          >
+            <input
+              ref={pathRef}
+              type="text"
+              // A locked field never wears the red: the line it prints is a
+              // statement, not a refusal, and a border the reader cannot act on
+              // is an alarm with no exit. Save still refuses a path the check
+              // could not clear, and says so in the banner it already has.
+              className={"field-control"
+                + (pathError && !lockTarget ? " is-invalid" : "")
+                + (lockTarget ? " new-task-target-lock" : "")}
+              aria-invalid={!lockTarget && pathError !== null}
+              // LOCKED INSIDE AN APP (design.md §2): the field still SHOWS the
+              // target — the reader has to be able to see what the task runs
+              // against — but it is not a control there. `disabled` is what
+              // makes that true of the whole combobox rather than only of the
+              // typing: no focus, so `openRecents` never fires, so the list, the
+              // Browse row and the picker are all unreachable without a second
+              // rule to keep them in step. `readOnly` beside it is for the
+              // reader, not the browser: it says the value is the value.
+              disabled={lockTarget}
+              readOnly={lockTarget}
+              // The new-folder row only exists while the list is open, so it is
+              // only pointed at while it is there — a describedby aimed at a
+              // node that is not in the document says nothing at all.
+              aria-describedby={
+                pathError
+                  ? pathErrorId
+                  : newFolder && recentsOpen
+                    ? newFolderId
+                    : undefined
+              }
+              placeholder="Add folder or file"
+              // Not a combobox when there is nothing to expand: announcing one
+              // promises a list that a disabled field can never produce.
+              role={lockTarget ? undefined : "combobox"}
+              aria-expanded={lockTarget ? undefined : recentsOpen}
+              // THE ROW THE ARROWS ARE ON, announced. Focus never leaves this
+              // input while the list is walked — the same discipline the
+              // dropdowns above this field keep — so the highlighted row has to
+              // be named here or a screen reader is told nothing moved.
+              aria-controls={recentsOpen ? recentsId : undefined}
+              aria-activedescendant={
+                recentsOpen && pathAt >= 0
+                  ? (pathAt === newFolderAt
+                      ? newFolderId : `${recentsId}-${pathAt}`)
+                  : undefined
+              }
+              value={target}
+              onFocus={(e) => {
+                // THE WHOLE PATH IS SELECTED ON ARRIVAL (Akshil, 2026-09-19:
+                // "when I select the field it should select the whole path, and
+                // I can replace it directly"). The field opens holding an
+                // address the reader most often wants to replace, not edit, so
+                // the first keystroke replaces it — and a bare word is the
+                // project search one line up. Only on focus: a second click
+                // places the caret like any text field, so editing is still
+                // there for whoever wants it.
+                e.currentTarget.select();
+                if (suppressOpen.current) {
+                  suppressOpen.current = false;
+                  return;
+                }
+                openRecents();
+              }}
+              // The mouse-up that ends the focusing click would collapse the
+              // selection to a caret in Safari and Chrome alike; swallowed once,
+              // for that click only, so the selection made on focus survives it.
+              // Armed on the mouse-DOWN that finds the field unfocused — not on
+              // focus itself — so a Tab into the field never leaves a swallow
+              // waiting for the first real click.
+              onMouseDown={(e) => {
+                selectOnUp.current = document.activeElement !== e.currentTarget;
+              }}
+              onMouseUp={(e) => {
+                if (!selectOnUp.current) return;
+                selectOnUp.current = false;
+                e.preventDefault();
+              }}
+              onClick={openRecents}
+              onChange={(e) => setTarget(e.target.value)}
+            />
+            {recentsOpen && (
+              // mousedown preventDefault: keep focus ON the input while a row
+              // is clicked. Safari never focuses <button> on click, so the
+              // blur handler's relatedTarget is null there and the list would
+              // unmount before its click fired (Bugbot, PR #541).
+              <div
+                ref={recentsRef}
+                className="schedule-recents"
+                style={popStyle(pathRef.current, 240, true, true)}
+                onMouseDown={(e) => e.preventDefault()}
+                // The pointer leaving takes the highlight with it — the same
+                // rule the dropdowns at the top of this file keep, so a row left
+                // lit under a pointer that has gone is never the row an Enter
+                // would take.
+                onMouseLeave={() => {
+                  setPathAt(-1);
+                  pathTip.hide();
+                }}
+              >
+                {/* THE ROWS SCROLL; THE VERBS DO NOT (Akshil, 2026-09-18:
+                    "Browse… and + New folder are scrolling WITH the results").
+                    They are not results — they are the two ways out of a list
+                    that did not have the answer — and a way out that scrolls
+                    off the bottom of fifty folders is a way out you have to go
+                    looking for.
+
+                    So the panel is a FRAME now: this box takes whatever height
+                    is left under the cap and scrolls, and the footer below it is
+                    a sibling that keeps its own. No arithmetic — `flex: 1 1
+                    auto` with `min-height: 0` against a `flex: 0 0 auto` footer
+                    is what makes "the total never exceeds the cap" a fact about
+                    the layout rather than a number to keep in step.
+
+                    THE LISTBOX MOVED HERE WITH THE OPTIONS. `aria-controls` and
+                    `aria-activedescendant` on the field point at a list, and the
+                    list is the scroller — the verbs underneath are buttons, not
+                    options, and were never in the ring. */}
+                <div
+                  ref={recentsRef}
+                  id={recentsId}
+                  role="listbox"
+                  aria-label="Folders"
+                  className="schedule-recents-scroll"
+                >
+                {/* THE REMEMBERED FOLDERS, in `pathRows`' own order — which is
+                    what makes `aria-activedescendant` and the arrow ring agree
+                    with what is on screen. */}
+                {pathRows.map((p, i) => {
+                  // The LAST row is the new-folder suggestion when there is
+                  // one; it is a different shape and draws itself below. Same
+                  // index `pathRows` put it at, or the ring and the markup part
+                  // company the moment the path check refuses something.
+                  if (i === newFolderAt) return null;
+                  return (
+                    <button
+                      key={p.path}
+                      id={`${recentsId}-${i}`}
+                      type="button"
+                      role="option"
+                      aria-selected={pathAt === i}
+                      className={"schedule-picker-row" + (pathAt === i ? " is-active" : "")}
+                      onMouseEnter={() => setPathAt(i)}
+                      // THE WHOLE PATH WHILE THE POINTER IS ON THE ROW, with no
+                      // delay — pointing at a row IS the question. On focus
+                      // too, so a row reached by Tab is told the same thing.
+                      onPointerEnter={(e) => pathTip.show(e.currentTarget, p.path)}
+                      onPointerLeave={pathTip.hide}
+                      onFocus={(e) => pathTip.show(e.currentTarget, p.path)}
+                      onBlur={pathTip.hide}
+                      onClick={() => pickPath(p)}
+                    >
+                      {ICON_FOLDER}
+                      {/* THE NAME, and the address beside it, muted. The
+                          Explorer's rows print `item.name` and never the
+                          address, because the address is in the field one line
+                          above; a row on THIS list did not come from that line
+                          — it is remembered, or it was searched for — so it says
+                          where it is, quietly.
+
+                          MIDDLE-TRUNCATED, and only as far as it has to be
+                          (`FitPath`, which measures this row): the start says
+                          which part of the machine, the end says which folder,
+                          and the segments in between are the ones every path
+                          here shares. The hover tooltip carries the whole of
+                          it, and so does the span's `aria-label`. */}
+                      <span className="schedule-recents-path">{p.name}</span>
+                      {p.where && (
+                        <FitPath
+                          className="schedule-recents-where"
+                          path={tildePath(p.where, home)}
+                          fullPath={p.path}
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+                {/* A SEARCH THAT FOUND NOTHING STILL ANSWERS. Only ever while
+                    SEARCHING: an empty recents list is a card nobody has used
+                    yet, and "No project matches" would be a wrong answer to a
+                    question nobody asked. Same sentence and same shape as the
+                    Tasks page's own project menu. */}
+                {pathSearching && !pathRows.length && (
+                  <p className="schedule-recents-empty">No project matches</p>
+                )}
+                {/* What the typed path IS, answered where the other answers
+                    about folders are — in the dropdown, in the same row shape
+                    as them (Akshil, 2026-08-20: "this UI should be in
+                    dropdown"; it was an inline note under the field that pushed
+                    the rest of the card down as you typed). A BUTTON like every
+                    row around it: it started as an inert status and a click on
+                    it did nothing, which read as broken next to five siblings
+                    that all accept the click. Picking it picks the path the
+                    field already holds, so the click's whole job is to close
+                    the list — same ending as picking any folder above. The
+                    badge carries the fact and the line under it says when it
+                    becomes true, because a badge alone reads as a label on a
+                    folder that is already there.
+
+                    LAST, UNDER THE REMEMBERED FOLDERS, and not first as it was
+                    for one round — see `pathRows` for the ArrowDown-Enter that
+                    created a folder nobody asked for. */}
+                {newFolderAt >= 0 && (
+                  <button
+                    type="button"
+                    id={newFolderId}
+                    role="option"
+                    aria-selected={pathAt === newFolderAt}
+                    className={"schedule-picker-row schedule-recents-new"
+                      + (pathAt === newFolderAt ? " is-active" : "")}
+                    onMouseEnter={() => setPathAt(newFolderAt)}
+                    onClick={() => setRecentsOpen(false)}
+                  >
+                    {ICON_FOLDER}
+                    <span className="schedule-recents-new-text">
+                      <span className="schedule-recents-new-top">
+                        {/* Read out of the ring rather than off `newFolder`
+                            again: one value, so the row and the Enter that
+                            takes it can never name two different folders. */}
+                        <span className="schedule-picker-name"
+                              title={pathRows[newFolderAt]?.path}>
+                          {pathRows[newFolderAt]?.name}
+                        </span>
+                        <span className="schedule-new-badge">New folder</span>
+                      </span>
+                      <span className="schedule-recents-new-why">
+                        Created when the task is saved
+                      </span>
+                    </span>
+                  </button>
+                )}
+                </div>
+                {/* THE FOOTER — outside the scroller, so it is on screen
+                    whatever the list is doing. */}
+                <div className="schedule-recents-foot">
+                {/* A separator ELEMENT, not a border-top on Browse: the border
+                    version sat flush against the row's hover wash and read as
+                    part of the button rather than as the line between the
+                    found paths and the verbs (Akshil, 2026-08-20). Full-bleed
+                    across the panel, the way every menu draws this line. */}
+                <div className="schedule-recents-sep" role="separator" />
+                <button
+                  type="button"
+                  className="schedule-picker-row schedule-recents-browse"
+                  onClick={() => {
+                    setRecentsOpen(false);
+                    openPicker();
+                  }}
+                >
+                  {/* The empty icon column, so the verb's label starts on the
+                      same edge as every folder above it (audit 2026-08-16). */}
+                  <span className="schedule-picker-gutter" aria-hidden="true" />
+                  Browse…
+                </button>
+                {/* The second verb, under Browse (Akshil, 2026-08-20). Typing a
+                    name into the field is the fast way to a new folder and
+                    needs no button; this is the way in for someone who does not
+                    yet know it is allowed. It opens the SAME panel Browse does,
+                    already naming — one flow with the picker's own affordance,
+                    not a second one. */}
+                <button
+                  type="button"
+                  className="schedule-picker-row schedule-recents-mk"
+                  onClick={() => {
+                    setRecentsOpen(false);
+                    openPicker(true);
+                  }}
+                >
+                  {/* The plus lives in the icon column, where every folder
+                      above carries its glyph — "+ New folder" as label text put
+                      the word on a different edge from every other label in
+                      the list (Akshil, 2026-08-20). */}
+                  {ICON_PLUS}
+                  New folder
+                </button>
+                </div>
+                {/* THE HOVER TOOLTIP, portalled to `<body>` from here —
+                    rendered inside the panel so the list closing takes it with
+                    it, drawn outside every stacking context this modal makes so
+                    nothing can cover it. */}
+                {pathTip.host}
+              </div>
+            )}
+          </div>
+        </div>
+        )}
+        {!lockTarget && pathError && (
+          <span id={pathErrorId} className="field-hint schedule-form-bad schedule-form-sub"
+                role="alert">
+            {pathError}
+          </span>
+        )}
+        {picking && (
+          // Slides in BESIDE the card (position:fixed; the card shifts left
+          // via the :has() rule in schedule.css) — inside the card it was
+          // "too small to see anything" (Akshil, 2026-08-16).
+          <ExplorerPanel
+            // Keyed by which verb opened it, so "+ New folder" always arrives
+            // naming even when it displaces a Browse panel still animating out.
+            key={pickerNaming ? "naming" : "browse"}
+            startNaming={pickerNaming}
+            start={target.trim() || home || "/"}
+            onPick={(p) => {
+              pickedFromBrowser.current = true;
+              setTarget(p);
+              rememberRecent(p);
+            }}
+            // A folder NAMED in the picker hands focus back to the field —
+            // WITHOUT popping the list over the form (Akshil, 2026-08-20: the
+            // dropdown kept coming back after "+ New folder"). The picker was
+            // the confirmation; the field now shows the path, and the list is
+            // one click away if anyone wants the verdict row too.
+            onName={() => {
+              suppressOpen.current = true;
+              window.setTimeout(() => pathRef.current?.focus(), 0);
+            }}
+            onClose={() => {
+              closePicker();
+              pickedFromBrowser.current = false;
+            }}
+            closing={pickingOut}
+          />
+        )}
+
+        {recurOpen && (
+          <CustomRecurrence
+            initial={customRule}
+            anchor={pickedOk ? picked : new Date()}
+            onDone={(r) => {
+              setCustomRule(r);
+              closeRecur();
+            }}
+            onCancel={() => {
+              closeRecur();
+              // No rule was committed: fall back — but only if the select
+              // still says "Custom…". The card stays live while the panel is
+              // open, and a newer pick made meanwhile must not be wiped by
+              // the panel's cancel (Bugbot, PR #548).
+              if (!customRule)
+                setRepeat((r) => (r === "custom" ? repeatBefore.current : r));
+            }}
+            closing={recurOut}
+          />
+        )}
+
+        {/* WHEN, and everything that hangs off it, now lives HERE (Akshil,
+            2026-08-23) — open from the start when the card is being used to
+            plan (`planning`: the calendar, a slot click, an edit) and folded
+            away otherwise. A task typed on the List or the Board is
+            overwhelmingly one to run, and the when-row was a field everybody
+            scrolled past to reach Save; behind the disclosure it costs one
+            click for the people who want it and nothing at all for the people
+            who do not. The row is unchanged — same controls, same rules — it
+            has only moved. */}
+        <details className="schedule-form-more" open={moreOpen}
+                 onToggle={(e) => setMoreOpen(e.currentTarget.open)}>
+          {/* The disclosure is a QUIET row, not a button: secondary text and a
+              chevron, the same object the task list opens its threads with
+              (`tasks-caret`). It used to be accent yellow, which made the one
+              thing on the card the user rarely needs the loudest thing on it —
+              and the accent belongs to Save. The chevron is drawn here rather
+              than as a CSS glyph so it is the app's own mark at the app's own
+              weight: a text triangle sat on the baseline while the label sat on
+              its x-height, which is the misalignment no amount of nudging fixed.
+              It rotates 90° on open (▸ → ▾), so the row is one object that
+              turns. */}
+          <summary>
+            <span className="schedule-form-more-caret" aria-hidden="true">
+              {ICON_CHEVRON}
+            </span>
+            More options
+          </summary>
+          {/* Google's when-row, its controls included: a date field that drops
+              a month grid and a time field that drops a 15-minute list (Akshil,
+              2026-08-15). Both write into the single `when` string. */}
+          <div className="schedule-form-line">
+            {ICON_CLOCK}
+            <div className="schedule-when">
+              <div
+                className="schedule-pop-wrap"
+                onBlur={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+                    setDateOpen(false);
+                }}
+                // Escape dismisses the GRID, not the modal around it — same
+                // contract as every other dropdown here.
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && dateOpen) {
+                    e.stopPropagation();
+                    setDateOpen(false);
+                  }
+                }}
+              >
+                <button ref={dateBtnRef} type="button"
+                        className="schedule-when-field"
+                        aria-describedby={pastNote ? pastHintId : undefined}
+                        aria-expanded={dateOpen}
+                        onClick={() => { setDateOpen((o) => !o); setTimeOpen(false); }}>
+                  {dateLabel}
+                </button>
+                {dateOpen && (
+                  <div className="schedule-pop" style={popStyle(dateBtnRef.current, 300)}
+                       onMouseDown={(e) => e.preventDefault()}>
+                    {/* No floor at all now. A past day is a one-off saying "run
+                        this as soon as you can" (design §9), and for a rule it
+                        is legitimate too — it says "start this pattern, and run
+                        the one I missed". The date is still the series' ANCHOR,
+                        which is what makes "monthly on the second Wednesday"
+                        expressible by picking a past second Wednesday; what
+                        changed is that the server no longer waits for the next
+                        future slot to materialize from. It catches up on the
+                        latest past one first (SCH-13b), which is why picking a
+                        past day under a standing Repeat prints a note of its own
+                        rather than nothing. */}
+                    <MiniCalendar
+                      selected={pickedOk ? picked : new Date()}
+                      onPick={(d) => { setDatePart(d); setDateOpen(false); }}
+                    />
+                  </div>
+                )}
+              </div>
+              <div
+                className="schedule-pop-wrap"
+                onBlur={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+                    setTimeOpen(false);
+                }}
+              >
+                <input
+                  ref={timeRef}
+                  type="text"
+                  className="schedule-when-field schedule-when-time"
+                  aria-describedby={pastNote ? pastHintId : undefined}
+                  aria-expanded={timeOpen}
+                  aria-label="Time"
+                  value={timeText}
+                  onFocus={(e) => { setTimeOpen(true); setDateOpen(false); e.target.select(); }}
+                  onChange={(e) => setTimeText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { commitTimeText(); setTimeOpen(false); }
+                    if (e.key === "Escape" && timeOpen) { e.stopPropagation(); setTimeOpen(false); }
+                  }}
+                  onBlur={commitTimeText}
+                />
+                {timeOpen && (
+                  <div className="schedule-pop schedule-pop--time"
+                       style={popStyle(timeRef.current, 208)}
+                       onMouseDown={(e) => e.preventDefault()}>
+                    <TimeList
+                      selected={{ h: pickedOk ? picked.getHours() : 9, m: pickedOk ? picked.getMinutes() : 0 }}
+                      onPick={(h, m) => { setTimePart(h, m); setTimeOpen(false); }}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+            {/* Repeat is a tick on the when-row, not a dropdown that is always
+                open (design §6): most tasks run once, and the menu they never
+                use was the loudest thing under the time. Unticking clears the
+                rule outright — see toggleRepeat. */}
+            <CheckField
+              className="new-task-check--repeat"
+              label="Repeat"
+              checked={repeatOn}
+              onChange={toggleRepeat}
+            />
+          </div>
+          {/* Not a refusal any more: past-due work is queued and runs when the
+              app next opens (design §9), so this says what will happen instead
+              of asking for a different answer. WHICH of the two things it says is
+              pastNoteFor's decision — a repeat's past anchor gets its own
+              sentence, because SCH-13b makes it one catch-up run and then the
+              pattern, not "as soon as it can" full stop.
+
+              One element for both wordings, so it keeps the id the date and time
+              fields point `aria-describedby` at, and stays directly under the row
+              it is about: printed after the repeat row it read as a complaint
+              about the recurrence rule (audit 2026-08-16). `role="status"` earns
+              its keep twice over now — ticking Repeat rewrites this line in
+              place, and a silent swap is the one thing worse than no line. */}
+          {pastNote && (
+            <span id={pastHintId} className="field-hint new-task-past schedule-form-sub"
+                  role="status">
+              {pastNote}
+            </span>
+          )}
+          {repeatOn && (
+          <>
+          <div className="schedule-form-line schedule-form-line--sub">
+            <Dropdown
+              ariaLabel="Repeats"
+              className="schedule-repeat"
+              value={
+                repeat === "custom" && customRule
+                  ? describeRule(customRule, pickedOk ? picked : new Date())
+                  : repeat === "cron"
+                    ? describeRepeats(legacyCron)
+                    : choices.find((c) => c.key === repeat)?.label ?? "Does not repeat"
+              }
+              options={[
+                // "Does not repeat" is gone from the menu: the tick above IS
+                // that answer now, and a dropdown that can contradict the
+                // checkbox it hangs from is two controls for one question.
+                ...choices
+                  .filter((c) => c.key !== "none")
+                  .map((c) =>
+                    c.key === "custom" && repeat === "custom" && customRule
+                      ? { key: "custom", label: describeRule(customRule, pickedOk ? picked : new Date()) }
+                      : { key: c.key, label: c.label },
+                  ),
+                // Legacy cron templates keep their line under a key of their
+                // own — the form no longer writes cron, but editing one must
+                // not silently rewrite the rule.
+                ...(legacyCron ? [{ key: "cron", label: describeRepeats(legacyCron) }] : []),
+              ]}
+              onPick={(v) => {
+                if (v === "custom") {
+                  // The dialog answers what "Custom…" means; the choice only
+                  // commits once Done says so. One side panel at a time — the
+                  // recurrence panel takes Browse's spot beside the card.
+                  repeatBefore.current = repeat;
+                  openRecur();
+                  setRepeat("custom");
+                } else {
+                  setRepeat(v);
+                  // A non-custom pick makes an open recurrence panel moot.
+                  if (recurOpen) closeRecur();
+                }
+              }}
+            />
+            {/* A task IS a Claude session, so a repeating task sends every run
+                into its own thread by construction — that is the default and
+                needs no flag. This is the opt-OUT: tick it and each occurrence
+                mints a fresh task, with a session and a TASK-nnn of its own
+                (design §6).
+
+                "FRESH", not "New" (Akshil, 2026-08-18): the card's own button says
+                New task, so "New task each run" read as a second thing the form
+                could create rather than as what this run's thread does. The flag,
+                the wire (`new_task_each_run`) and the behaviour are untouched —
+                this is the word the user reads. */}
+            <CheckField
+              label="Fresh task each run"
+              checked={newTaskEachRun}
+              onChange={setNewTaskEachRun}
+              describedBy={threadHintId}
+            />
+          </div>
+          {/* The thread this repeat writes into, said out loud. It is the one
+              thing about a repeating task that was invisible: a task IS a
+              session, so every run lands in the same chat — and an edit that
+              silently dropped that chat cost the user everything it had built
+              with nothing on screen to notice. Editing a task that already has
+              a thread says so in particular, because THAT is the sentence worth
+              reading before you change anything. */}
+          <span id={threadHintId} className="field-hint schedule-form-sub new-task-thread">
+            {newTaskEachRun
+              ? "Each run starts a new chat."
+              : learnedSession
+                ? "Every run adds to the chat this task has already started."
+                : "Every run adds to the same chat."}
+          </span>
+          </>
+          )}
+          {/* Inside the same 26px icon gutter every other control hangs from —
+              the details block was flush with the card edge, so the one control
+              behind it was the only one in the form that did not line up
+              (audit 2026-08-16). */}
+          <div className="field schedule-form-sub">
+            <span className="field-label">Permissions</span>
+            <Dropdown
+              ariaLabel="Permissions"
+              value={permissionLabel(permission)}
+              // The KEY is what gets submitted; the label is only how the mode
+              // is said. The raw keys ("acceptEdits") were the server's
+              // vocabulary printed at the user (audit 2026-08-16), and an
+              // unknown key still shows itself rather than being hidden.
+              options={(permissionModes.length ? permissionModes : ["auto"]).map((m) => ({
+                key: m,
+                label: permissionLabel(m),
+              }))}
+              onPick={setPermission}
+            />
+            <span className="field-hint">
+              The task runs unattended. Auto approves safe actions and holds the rest.
+            </span>
+          </div>
+          {/* WHICH Claude, and HOW HARD — the same two things the chat's
+              composer row asks with pills, asked here as fields because this
+              card is a form and the row is a toolbar.
+
+              They live at the BOTTOM of More options, under Permissions, and
+              that is the whole reason they are askable at all rather than
+              prominent: a model is the rarest thing anyone changes about a
+              task, and both default to "Default", which sends nothing and lets
+              the session detect the project's own config. Nothing about them
+              appears on the task row or the calendar chip (design: the card
+              asks, the list stays quiet) — the only other place they surface is
+              this same card reopened on an edit, prefilled.
+
+              ONE ROW, two equal columns (Akshil, 2026-09-03). They are one
+              decision read together — "Fable, thinking high" is the
+              sentence — and stacking them spent two full rows of the card's
+              least-used section saying half of it each. Permissions stays on
+              its own line above: it is a policy with a consequence to explain,
+              and these two are a pair of names.
+
+              Neither carries a hint any more. Model's ("Default lets the run
+              use whatever this project already uses") restated what the word
+              Default already says, and one hint under one of a pair of side-by-
+              side fields lands as a note about the pair. */}
+          <div className="schedule-form-sub new-task-run-pair">
+            <div className="field">
+              <span className="field-label">Model</span>
+              <Dropdown
+                ariaLabel="Model"
+                value={taskRunLabel(TASK_MODELS, model)}
+                // Same contract as Permissions above: the KEY is submitted, the
+                // label is only how it is said. `taskRunOptions` is what keeps
+                // an unrecognised stored value selectable instead of silently
+                // resetting the task to the default on the next edit.
+                options={taskRunOptions(TASK_MODELS, model)}
+                onPick={pickModel}
+              />
+            </div>
+            <div className="field">
+              {/* "Thinking", not "Effort" (the CLI's word for the flag): the
+                  flag is `--effort`, but what the user is choosing is how long
+                  Claude gets to think before it acts, and the chat's own pill
+                  says the same thing. The wire is untouched — this is the
+                  label. */}
+              <span className="field-label">Thinking</span>
+              <Dropdown
+                ariaLabel="Thinking"
+                value={taskRunLabel(TASK_EFFORTS, effort)}
+                options={taskRunOptions(TASK_EFFORTS, effort)}
+                onPick={pickEffort}
+              />
+            </div>
+          </div>
+        </details>
+
+        {error && <ErrorBanner>{error}</ErrorBanner>}
+      </div>
+    </Modal>
+  );
+}

@@ -1,0 +1,5865 @@
+// The Tasks page's two task views — the List (an accordion per task) and the
+// Board (columns of task cards).
+//
+// What changed, and it is the whole point: the page no longer MERGES two feeds.
+// It used to hold the scheduler's entries in one hand and Claude Code's session
+// summaries in the other and reconcile them here, which meant the client owned
+// a model — what counts as one unit of work, what its title is, which column it
+// belongs in — that the server had a better claim to. `/api/tasks` now returns
+// that model, already merged, already titled, already counted and already
+// sorted newest-first. These components render it and decide nothing.
+//
+//   TASK-002   one Claude session, one thread
+//   ├─ MSG-003  newest first
+//   ├─ MSG-002
+//   └─ MSG-001
+//
+// The model, in one line: a task IS a Claude session, and §1
+// (the model), §3 (ids), §7 (unread), §8 (these two views).
+//
+// The visual vocabulary is the one the previous views established and the
+// calendar still speaks — the bordered status ring, the live ping, the folder
+// chip, the 260px lane, the 52px collapsed rail — so the three views read as
+// one page. Those live in styles/schedule.css; everything this file adds (the
+// accordion, the thread rows, the id chips, the unread dot) is in
+// styles/tasks.css.
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { DragEvent as ReactDragEvent } from "react";
+import {
+  cancelScheduledMessage,
+  forceStart,
+  getTaskMessages,
+  markTaskMessageRead,
+  markWholeTaskRead,
+  resendScheduledMessage,
+  runScheduledNow,
+  scheduleMessage,
+  archiveTask,
+  unarchiveTask,
+} from "@platform/lib/api";
+import { notify } from "@platform/lib/notifications";
+import { useNow } from "@platform/lib/clock";
+import { EraseTaskModal } from "./EraseTaskModal";
+import { canRunDraft, runDraftNow, runRowDraftNow } from "./draft-run";
+import {
+  deleteChatDraft,
+  deleteTaskDraft,
+  peekDraftSyncer,
+  taskDraftKey,
+} from "@platform/lib/drafts";
+import { announceTasksChanged } from "@platform/lib/tasksChanged";
+import { announceDraftsGone, dropListingKeys, restoreListingRows } from "./tasksPulse";
+import type { Task, TaskMessage } from "@platform/lib/api";
+import { navigateUrl } from "@platform/lib/router";
+import { useMarginWheel } from "./useMarginWheel";
+import { BOARD_COLUMNS, BOARD_LANES, laneOf } from "./schedule-lib";
+import type { BoardColumn, BoardLane } from "./schedule-lib";
+import {
+  EMPTY_FILTERS,
+  EMPTY_LIST_MEMORY,
+  LANE_CHOICE_KEY,
+  LIST_MEMORY_KEY,
+  UNREAD_LABEL,
+  basename,
+  cancelIntent,
+  carryMarkToHeld,
+  draftRing,
+  draftHeldByPeek,
+  draftTag,
+  dropAction,
+  dropLanes,
+  filingIntent,
+  filterTasks,
+  filtersForView,
+  firstLine,
+  groupByColumn,
+  heldMessages,
+  hasDraft,
+  isChatDraftTask,
+  isDraftTask,
+  peekOpenable,
+  isDraggable,
+  isExpandable,
+  isFailedTask,
+  isUpcomingTask,
+  needsAttention,
+  laneRolledUp,
+  laneUnread,
+  sortForList,
+  taskListKeys,
+  showsRowActions,
+  markAllRead,
+  markRead,
+  markReadIntent,
+  messageEditEntry,
+  messageHref,
+  messageStamp,
+  nextMessageId,
+  taskFile,
+  messageWhenTitle,
+  scheduledMark,
+  openMessageHref,
+  openThreadIntent,
+  opensElsewhere,
+  SHOW_PAGE_DOOR,
+  parseLaneChoices,
+  parseListMemory,
+  laneCountLabel,
+  laneSplitAt,
+  LANE_SPLIT_LABEL,
+  canForceStart,
+  FORCE_START_HINT,
+  FORCE_START_LABEL,
+  messageState,
+  queueCaption,
+  QUEUED_WORD,
+  QUEUE_CAPTION_SEP,
+  usageLimitCaption,
+  projectMatches,
+  projectOptions,
+  relativeWhen,
+  shortTaskId,
+  settleMarkAllRead,
+  spansProjects,
+  ringFailed,
+  taskColumn,
+  taskRunIntent,
+  taskUnread,
+  taskUnreadLabel,
+  cardTitleLine,
+  taskWhen,
+  threadView,
+  tildePath,
+  toggleExpanded,
+  unmarkAllRead,
+  unmarkRead,
+  unreadMarker,
+  upcomingEditEntry,
+  eraseBlocked,
+  ERASE_BLOCKED_HINT,
+} from "./tasks-lib";
+import type {
+  FilingIntent,
+  LaneChoices,
+  ListMemory,
+  OpenThreadIntent,
+  OutcomeTag,
+  QueueCaption,
+  QueueOverride,
+  TaskFilters,
+  TaskRunIntent,
+} from "./tasks-lib";
+import { missingFolderHint, taskFolder, toastMissingFolder } from "./useMissingFolders";
+import { useProjectQueueEnabled } from "@apps/claude/feature-flag";
+
+// The page composes these from one import; re-exported here so Scheduled.tsx
+// takes its filter type, its empty value and its filter function from the same
+// module it takes the views from.
+import { useRowFit } from "./row-fit";
+import {
+  PEEK_OPEN_CLASS,
+  peekItemProps,
+  closePeek,
+  openPeek,
+  usePeekHost,
+  usePeekedKey,
+} from "./task-peek-store";
+
+export { EMPTY_FILTERS, filterTasks, filtersForView, projectOptions, tildePath, basename };
+export type { TaskFilters };
+
+/**
+ * Whether ANY hover-revealed action is drawn on this page.
+ *
+ * OFF at Akshil's request, 2026-08-17: "hide them, keep the functionality but hide
+ * them", and then again over the message rows — "hide the hover actions for now,
+ * that's what I said", said of the pencil on a message row. So the flag covers all
+ * three groups rather than the task row's alone:
+ *
+ *   * the List task row: Mark read, Run now / Re-run, Open chat
+ *   * the List message row: Edit, Cancel / Skip this run
+ *   * the Board card: Run now / Re-run
+ *
+ * ARCHIVE IS NO LONGER ONE OF THEM (Akshil, 2026-08-18: bring the archive button
+ * back, visible on hover). It is out from behind the flag on BOTH views at once —
+ * it is one button on one kind of element, and a List that files a task where a
+ * Board cannot is the divergence this page's whole vocabulary is written against.
+ * It is still hover-revealed and still `.tasks-act`, so nothing about the strip's
+ * geometry or its reveal changed; it is only no longer gated. Each remaining
+ * button now carries its OWN guard on this flag rather than the group carrying
+ * one, which is what lets Archive sit in its old place in the order instead of
+ * jumping to the front of a strip that comes back.
+ *
+ * ONE flag for all of them, deliberately: a flip must restore the whole page's
+ * chrome at once, and two switches is how half of it comes back. Everything behind
+ * it is still built and still decided by tasks-lib (markReadIntent, taskRunIntent,
+ * archiveIntent, openThreadIntent, cancelIntent), still spent through the shared
+ * performers, and still tested. Only the RENDER is gated, and only here.
+ *
+ * WHAT IS UNREACHABLE WHILE THIS IS OFF, because it is worth writing down rather
+ * than discovering: Mark read (the whole-task clear), Run now / Re-run from this
+ * page, Open chat as a button — and CANCEL, which is the one that costs a
+ * capability rather than a shortcut, since stopping a message that has not gone out
+ * has no other control on this page. It survives elsewhere (the queue dock's card,
+ * the Claude pane's own banner, and deleting the schedule from the task form). Row
+ * clicks are untouched throughout: a leaf row still opens its message, a
+ * multi-message row still toggles, a message row still opens its turn.
+ *
+ * NOT RENDERED rather than hidden with CSS, which is the one thing worth being
+ * careful about: an `opacity: 0` button is still in the tab order, so a keyboard
+ * would land on an invisible control and press it blind. (Archive, which IS
+ * rendered, is hidden the other way on purpose — see `.tasks-act` in tasks.css:
+ * hover-revealed by opacity precisely so a keyboard can still reach it.) The
+ * geometry that keeps
+ * the strip off the title (`.tasks-card-acts` and `--tasks-card-head-h` in
+ * tasks.css) stays exactly as it is — it is what the strip comes back to.
+ *
+ * Annotated `boolean` on purpose: as a bare `false` literal TypeScript narrows
+ * every guarded branch to dead code, and flipping the flag would then be a type
+ * change rather than a value change.
+ */
+const SHOW_ROW_ACTIONS: boolean = false;
+
+/** How far left of the first button the hover strip's wash begins — the
+ *  `padding-left` of `.tasks-acts-inner` (tasks.css). The strip repeats a
+ *  suffix mark only when the mark's inline copy sits inside this. */
+const STRIP_FADE_PX = 28;
+
+
+// ---- icons -------------------------------------------------------------------
+// The page's own recipe (ScheduleCalendar's `icon`): a 24-viewBox lucide
+// geometry at stroke 2 with round caps, inlined rather than pulled from a
+// package this app does not depend on.
+const icon = (paths: React.ReactNode, size = 14) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {paths}
+  </svg>
+);
+
+/** The merged filter trigger's mark — a funnel, the one glyph that means
+ *  "narrow this" without naming which facet. */
+const ICON_FILTER = icon(<polygon points="3 4 21 4 14 12.5 14 20 10 18 10 12.5" />, 13);
+const ICON_SEARCH = icon(<><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>, 13);
+const ICON_CHEVRON = icon(<polyline points="9 18 15 12 9 6" />, 13);
+// There is no ICON_CHEVRON_DOWN any more (2026-08-18). It was the down-chevron on
+// the thread's dashed "Show N more" button, and that button is gone — expanding a
+// task fetches the whole thread by itself. ICON_CHEVRON, the row's own disclosure,
+// is a different glyph and is untouched.
+const ICON_CIRCLE_DOT = icon(
+  <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="1.5" /></>, 13);
+const ICON_FOLDER = icon(
+  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />,
+  12,
+);
+// The mark a task about ONE DOCUMENT wears after its title. Paired with
+// ICON_FOLDER above and drawn at the same 12px: the two answer the same
+// question ("what is this task about") at two scales.
+const ICON_FILE = icon(
+  <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+  <path d="M14 2v6h6" /></>,
+  12,
+);
+// There is no ICON_CLOCK/ICON_CHAT pair here any more (2026-08-18). A clock on a
+// scheduled message and a speech bubble on a chat one used to sit between the
+// status ring and MSG-003 on every thread row, saying where the message came
+// from. Removed at Akshil's request: it is a third glyph on a 12.5px line whose
+// first two already carry the state and the id, and nothing on the page acts on
+// the distinction. `.tasks-msg-kind` went from tasks.css with it. A clock on the
+// TASK row (2026-09-10, "this task has a run booked") followed it out the next
+// day (Akshil, 2026-09-11: "remove that icon").
+//
+/** THE SCHEDULE MARK after the title (Akshil, 2026-09-11: "for done/blocked/
+ *  archive tasks with schedule message let's show a schedule icon [clock] after
+ *  the title rather than 'in 1h' … if it is repeating we show repeat icon, if
+ *  scheduled once we show clock icon, we don't show both"). One glyph, chosen
+ *  by tasks-lib.scheduledMark: circle arrows (lucide `refresh-cw`) for an
+ *  occurrence of a template, a clock (lucide `clock`) for a one-off. Both at
+ *  the file mark's 12px and drawn beside it — the same kind of caption on the
+ *  title: what the task is about, and that it runs by itself. The instant is
+ *  in the tooltip; the row's one time column stays the row's. */
+const ICON_REPEAT = icon(
+  <><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+    <path d="M21 3v5h-5" />
+    <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+    <path d="M8 16H3v5" /></>,
+  12,
+);
+const ICON_CLOCK = icon(
+  <><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 16 14" /></>,
+  12,
+);
+/** Open as page — the arrows that mean "out of here and into the whole thing",
+ *  the same mark the side peek's header wears for the same act. */
+/**
+ * OPEN IN EXPLORER — ONE GLYPH, EVERYWHERE (design.md, Header + list state v2).
+ *
+ * It is the Cards wall's door (MenuIcons.folder's outline), and it is now also
+ * the List row's, the Board card's and the peek header's. Until 2026-09-14 the
+ * rows and cards wore an `⤢` diagonal-arrows mark while the wall wore the
+ * folder — two pictures for one act, on one page, three inches apart. The
+ * folder is the one that says WHERE the press lands; the arrows only said
+ * "bigger", which is also what a maximise button says.
+ *
+ * The PATH is exported rather than a finished element: the three surfaces draw
+ * their icons at different sizes and stroke weights (12/2 on a row, 16/1.6 in
+ * a card head), and a shared element would have to pick one and be wrong twice.
+ * One shape, stated once; each site keeps its own weight.
+ */
+export const ICON_OPEN_FOLDER_PATH =
+  "M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l1.8 2h8a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z";
+
+/** THE DOOR IS A WORD NOW, on the row and on the card alike (Akshil,
+ *  2026-09-14 — design.md, Polish batch 4). `ICON_OPEN_FOLDER_PATH` above is
+ *  still the page's door SHAPE and is still drawn in the peek's ⋮, where a menu
+ *  row wants a mark; out here, in a strip of glyph buttons that are all verbs, a
+ *  folder was the one picture a reader had to be told the meaning of. "Open"
+ *  says the act, in the header and on the row in the same word.
+ *
+ *  AND THE MARK IN FRONT OF IT IS AN EXTERNAL LINK (Polish batch 5): an arrow
+ *  leaving a box towards the upper right, which is the web's own "this goes
+ *  somewhere else". The "→" it replaces trailed the word and meant "forward",
+ *  which is what the peek's own Next chevron means three inches away.
+ *
+ *  11px, and no `viewBox` gymnastics: it sits beside 11px text, not in a 22px
+ *  square with the other marks. */
+export const ICON_OPEN_EXTERNAL = icon(
+  <>
+    <path d="M7 17 17 7" />
+    <path d="M8 7h9v9" />
+  </>,
+  11,
+);
+/** The row's and the card's one door, in full: the mark and its label.
+ *
+ *  EXPORTED like `ICON_OPEN_FOLDER_PATH` beside it, and for the same reason:
+ *  the Cards wall lives in TaskCards.tsx and draws this very door, so the words
+ *  are stated once here rather than typed again over there and left to drift. */
+export const OPEN_DOOR_LABEL = (
+  <>
+    {ICON_OPEN_EXTERNAL}
+    Open
+  </>
+);
+/** The peeked row's own close, beside `ICON_OPEN` because the two swap. */
+const ICON_CLOSE = icon(<path d="M6 6l12 12M18 6L6 18" />, 12);
+const ICON_OPEN = icon(
+  <><path d="M15 3h6v6" /><path d="M10 14 21 3" />
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></>, 13);
+const ICON_PENCIL = icon(
+  <><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></>, 13);
+/** THE DRAFT MARK — lucide `pencil-line`, the pencil with the ruled line under
+ *  it (design.md, Round 2: a lucide `PencilLine`, not the pencil character).
+ *
+ *  It is NOT `ICON_PENCIL` above, which is Edit — a verb, on a button, in the
+ *  row's action strip. This one is a noun on a chip: the pencil WITH its line is
+ *  Slack's own draft mark and the whole reference this feature is built against,
+ *  and drawing the two the same would make an inert badge read as a control.
+ *  11px, a step under the row's other marks, because it sits inside a pill that
+ *  already carries a word — the glyph is the mark's tone, the word is its
+ *  content (Akshil, 2026-09-11).
+ *
+ *  The path data is lucide-react's own `pencil-line`, copied verbatim out of
+ *  `node_modules/lucide-react/dist/esm/icons/pencil-line.mjs` rather than drawn
+ *  by hand. What was here before was a hand-edited `ICON_PENCIL` with a stub
+ *  stroke bolted on — it read as a broken Edit glyph at 11px, because it was
+ *  one (Akshil, 2026-09-11). */
+const ICON_PENCIL_LINE = icon(
+  <><path d="M13 21h8" />
+    <path d="m15 5 4 4" />
+    <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /></>,
+  11);
+// The two halves of Cancel, drawn apart because they MEAN different things
+// (tasks-lib.cancelIntent): a one-off is stopped for good (lucide `ban`), an
+// occurrence of a repeat is stepped over and the rule runs on (`skip-forward`).
+const ICON_BAN = icon(
+  <><circle cx="12" cy="12" r="9" /><path d="m5.6 5.6 12.8 12.8" /></>, 13);
+const ICON_SKIP = icon(
+  <><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" x2="19" y1="5" y2="19" /></>, 12);
+// The two halves of run-now, drawn apart for the same reason Cancel's are: one
+// call, but "start this early" and "start this again" are not the same sentence
+// to the person clicking. lucide `play` and `rotate-ccw`.
+const ICON_PLAY = icon(<polygon points="6 3 20 12 6 21 6 3" />, 12);
+/* FORCE START WEARS ITS OWN NAME, not a glyph (Akshil, 2026-09-21). A bolt sat
+   in this seat for a day and it was the wrong bet: the strip beside it already
+   holds a play triangle that means "start this early", and a second start-ish
+   shape one press away is a guess a reader has to hover to settle. The two
+   words are the shortest thing that cannot be misread, and the chat's own card
+   has said them from the start — one verb, one wording, three surfaces
+   (`FORCE_START_LABEL`, platform/lib/queue). */
+const ICON_RERUN = icon(
+  <><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" /></>, 13);
+// Mark the whole task read. lucide `check-check` — the double tick every
+// messaging app on the machine already uses for "seen", which is exactly the
+// fact this button asserts. The DOUBLE tick and not a single one: a single
+// check is the shape of a checkbox, and a row action wearing it would read as
+// a toggle that is currently on.
+/** A speech bubble, for the thread count on a List row (D448).
+ *
+ *  SQUARE-CORNERED (Akshil, 2026-08-24: "make this icon boxy icon for
+ *  messages"). It was lucide `message-circle` — a round bubble whose outline is
+ *  one continuous curve — and at 12px beside a digit that curve is a blob. This
+ *  is `message-square`: a rectangle with a tail, whose corners give the glyph
+ *  the same flat edges as everything else on the row (the id chip, the folder
+ *  pill, the file mark), so it reads as a mark in this row's vocabulary rather
+ *  than as the one round thing in it. Same 12px, same stroke, same box. */
+const ICON_MSG = icon(
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
+  12,
+);
+
+const ICON_MARK_READ = icon(
+  <><path d="M18 6 7 17l-5-5" /><path d="m22 10-7.5 7.5L13 16" /></>, 13);
+// Filing away. lucide `archive`: a lidded box with a pull-slot in the front.
+export const ICON_ARCHIVE = icon(
+  <><rect x="2" y="3" width="20" height="5" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+    <path d="M10 12h4" /></>, 13);
+// Taking it back out. lucide `archive-restore` — the SAME box, opened at the
+// front, with something lifting out of it. That kinship is the whole reason for
+// using the pair rather than inventing a mark: the two buttons occupy ONE slot on
+// a row (`.tasks-rowmark`), never both at once, so a reader has to be able to tell
+// which one they are pointing at from the shape alone, and "same box, arrow out"
+// answers that in a glance where a generic undo curl would not.
+//
+// The box's walls are two short paths rather than one closed body, which is what
+// leaves the gap the arrow comes through. Same 13px, same stroke, same lid as
+// above, so the two glyphs sit on each other exactly.
+export const ICON_UNARCHIVE = icon(
+  <><rect x="2" y="3" width="20" height="5" rx="1" />
+    <path d="M4 8v11a2 2 0 0 0 2 2h2" />
+    <path d="M20 8v11a2 2 0 0 1-2 2h-2" />
+    <path d="m9 15 3-3 3 3" />
+    <path d="M12 12v9" /></>, 13);
+// Taking it away for good. lucide `trash-2`: a lidded bin with a handle and two
+// bars in the body.
+//
+// A BIN, NOT AN ✕, and deliberately not a variation on the archive box above:
+// Archive and Delete sit within a few pixels of each other on the Cards wall's
+// door strip, and the whole reason the archive pair share a shape is so a reader
+// can tell the two DIRECTIONS of one reversible verb apart at a glance. The
+// irreversible verb must therefore share nothing with them — different
+// silhouette, and (tasks.css / task-cards.css) the only glyph on this page that
+// goes red under the pointer besides Cancel.
+//
+// 12px, the row's mark size, so it sits on the "Folder missing" line it prefixes
+// rather than out-weighing the words it belongs to.
+export const ICON_TRASH = icon(
+  <><path d="M3 6h18" />
+    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+    <path d="M6 6v14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V6" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" /></>, 12);
+
+// ---- leaf components ---------------------------------------------------------
+
+const STATUS_LABELS: Record<BoardColumn, string> = {
+  ...(Object.fromEntries(
+    BOARD_COLUMNS.map((c) => [c.key, c.label]),
+  ) as Record<BoardColumn, string>),
+  // …and the one status that is not a column. Spelled here because the array is
+  // the board's lanes and a draft has none (schedule-lib's note on BoardColumn),
+  // but the ring on a draft row still has to have a word to announce.
+  draft: "Draft",
+};
+
+/**
+ * The bordered ring — the ONE mark a unit of work wears, on all three views.
+ *
+ * HUE is the status. `failed` repaints it red without moving the row out of its
+ * column: a failed or missed run IS settled, but folding away the only failure
+ * signal would let a dead turn read as a clean one.
+ *
+ * `needs_attention` wears BLOCKED'S RED with a "!" in the middle (schedule.css)
+ * rather than a hue of its own: the card draws in the Blocked lane, so a hue
+ * that argued with that lane would be the one place on the page where the
+ * colour and the column disagree. The glyph is the whole difference between the
+ * lane's two members.
+ *
+ * SHAPE is the read-state (2026-08-18). The centre dot used to mean "settled" and
+ * was drawn on every Done and Failed ring; it now means "not looked at yet", and a
+ * read one is hollow. That is the whole of the unread vocabulary on this page — the
+ * grey dot that used to trail the title is gone, because a row carrying a ring AND
+ * a dot a few characters apart makes a reader decode two marks to answer one
+ * question. Colour did not move, so nothing was traded: the ring still names its
+ * state in the hue it always did.
+ *
+ * The dot is drawn on EVERY column, and the CSS gate is `--unread` alone. It was
+ * scoped to the terminal two for a few hours the same day, on the reasoning that
+ * nothing is unread until it has finished — but a recurring or rescheduled task
+ * sits in Upcoming, its next run ahead of it, while its thread still holds output
+ * from a past run nobody has read. So the combination is real, and the gate drew a
+ * hollow ring under a tooltip that said "1 unread". Which states can occur is the
+ * server's business and taskUnread's; this component's business is to draw what it
+ * is handed, and the stylesheet's is not to have an opinion about the lane.
+ *
+ * `unread` draws the dot. `count`, when given, is what the mark stands for and
+ * turns into the tooltip — "3 unread" — and it is passed by CONTAINERS only: a
+ * task row over its thread, a lane header over its cards. A leaf message's dot
+ * already means "unread" all by itself and a hover repeating that is a caption on
+ * a symbol that needs none (Akshil, 2026-08-18), so a leaf passes `unread` alone
+ * and keeps the status word as its tooltip.
+ *
+ * The count never replaces the accessible name, it extends it: a screen reader
+ * hears "Done, 3 unread" rather than losing the status it came for.
+ *
+ * AND SO DOES THE FILL, WITH OR WITHOUT A COUNT. The name was extended only when
+ * `count` was set, which left every LEAF — the thread rows and the calendar's
+ * popover rows, all of which pass `unread` alone — announcing "Done" whether or
+ * not the reader had seen it. The dot was the only carrier of the fact and it is
+ * not one for anybody who cannot see it (bugbot, PR #596). A leaf now says "Done,
+ * unread": the bare word, because a leaf's mark stands for one message and there
+ * is no number to give. The visual rule is untouched — this is the same one bit
+ * the shape carries, said out loud.
+ *
+ * THE COUNT'S TOOLTIP IS NOT A `title` (2026-08-18). The browser holds a native
+ * tooltip back for one to two seconds, and for a four-character readout that is
+ * the same as not offering it at all. It goes to `data-tip`, which schedule.css
+ * draws on hover after 300ms. `title=""` rather than no title: an element with no
+ * `title` lets the browser walk up for one, and this sits inside a lane header
+ * that has "Collapse Done" and a row that has the task's full title.
+ *
+ * A leaf keeps its `title` — the status word, no count, and a slow native tooltip
+ * is the right speed for a word nobody is waiting on.
+ */
+/**
+ * THE QUEUE'S CAPTION, with its one actionable token drawn as a link —
+ * "after TASK-038 | 3rd".
+ *
+ * One component for the List row, the Board card and the chat header, because
+ * the sentence is one sentence: `tasks-lib.queueCaption` writes the words, this
+ * places them, and no view holds an opinion about either.
+ *
+ * THE HOLDER LEADS AND THE PLACE FOLLOWS (Akshil, 2026-09-19). The id is both
+ * what the reader came to the row for and the only word on it they can press,
+ * and it used to arrive last — after a clause that had already spent the width a
+ * narrow row has to give, so the one actionable token was the first to be cut.
+ *
+ * THE ID IS THE LINK AND "after" IS NOT. The reader's question about the thing
+ * in their way is what it is doing, and TASK-038 is where that is answered — so
+ * it is a press, with the holder's own title on the pointer. That title used to
+ * be INK, quoted inside this caption, and it was the first thing to push the id
+ * off the end of a 340px row (Akshil, 2026-09-12). A holder with no session to
+ * open yet is plain text rather than a link to nothing.
+ *
+ * `e.stopPropagation()`: every host is itself a press (a row opens its
+ * conversation, a card opens its own), and a link inside one must not also fire
+ * the thing it sits in — the id goes to the HOLDER's chat and nowhere else,
+ * while every other pixel of the caption goes where the row goes.
+ */
+export function QueueCaptionText({ queue }: { queue: QueueCaption }) {
+  return (
+    <>
+      {queue.after && (
+        <>
+          {"after "}
+          {queue.aheadHref ? (
+            <a
+              className="tasks-queue-ahead"
+              href={queue.aheadHref}
+              title={queue.aheadTitle || undefined}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {queue.ahead}
+            </a>
+          ) : (
+            <span className="tasks-queue-ahead" title={queue.aheadTitle || undefined}>
+              {queue.ahead}
+            </span>
+          )}
+          {queue.place && QUEUE_CAPTION_SEP}
+        </>
+      )}
+      {queue.place}
+      {/* Neither half known: the status word itself, which is the whole of what
+          the server was able to say. */}
+      {!queue.after && !queue.place && QUEUED_WORD}
+    </>
+  );
+}
+
+export function StatusIcon({
+  status,
+  failed,
+  label,
+  unread,
+  count,
+  draftHeld,
+}: {
+  status: BoardColumn;
+  failed?: boolean;
+  label?: string;
+  /** Fill the centre — there is something in here nobody has looked at. */
+  unread?: boolean;
+  /** What that fill stands for, on a container. Omitted on a leaf. */
+  count?: number;
+  /** A RED centre dot — this row looks settled and is holding words nobody has
+   *  sent (tasks-lib.draftRing, which is also what gates it to the two settled
+   *  lanes). Never asked of a container ring: a lane header holding one drafty
+   *  card is not itself unfinished. */
+  draftHeld?: boolean;
+}) {
+  // NOT over `needs_attention` (mirrors `taskStatus` in schedule-lib.ts): the
+  // flag says the newest run BROKE, and a row parked on a card right now is
+  // still going — collapsing it into "Blocked" here would announce and tool
+  // a waiting ring as broken.
+  const text = label
+    ?? (failed && status !== "needs_attention"
+      ? "Blocked"
+      : (STATUS_LABELS[status] ?? status));
+  const many = taskUnreadLabel(count ?? 0);
+  // What the FILL is worth in words. The count when there is one, the bare word
+  // when there is not — and nothing at all on a hollow ring, which is the point:
+  // a read mark has nothing to announce. `many` is null at count 0, so a container
+  // that is drawn unread but merged to zero still says "unread" rather than
+  // dropping the fact the ink is showing.
+  const said = many ?? (unread ? UNREAD_LABEL.toLowerCase() : null);
+  // …and the draft, which is a fact about this row and not about the ring's
+  // lane, so it is stated after the status rather than folded into `said`: "Done
+  // with an unsent draft" is two things, and a reader who cannot see the dot
+  // needs both. Ahead of the unread count deliberately — the unsent sentence is
+  // the one a person can still do something about.
+  const marks = [draftHeld ? "unsent draft" : null, said]
+    .filter(Boolean).join(", ");
+  return (
+    <span
+      className={
+        `schedule-ring schedule-ring--${status}` +
+        (failed ? " schedule-ring--failed" : "") +
+        (unread ? " schedule-ring--unread" : "") +
+        (draftHeld ? " schedule-ring--draft-held" : "")
+      }
+      aria-label={marks ? `${text}, ${marks}` : text}
+      data-tip={many ?? ""}
+      title={many ? "" : text}
+    >
+      {/* THE WAITING MARK IS AN ELEMENT, not a pseudo, and that is not a style
+          preference — a ring has exactly two pseudos and BOTH are already spent
+          on this very component. `::after` is the unread fill, and `::before` is
+          the fast count tooltip every container ring carries (`[data-tip]`,
+          schedule.css), which outranked a `::before` of ours on precisely the
+          rows the mark matters most on: a task row waiting on an answer wore no
+          "!" at all, because it also had "1 unread" to say. Found in the live
+          app, after the CSS looked right in isolation.
+
+          `aria-hidden` because the ring's `aria-label` already reads "Needs
+          attention" — a screen reader announcing a bare "!" after it would be
+          the same fact twice, in punctuation. */}
+      {status === "needs_attention" && (
+        <span className="schedule-ring-bang" aria-hidden="true">!</span>
+      )}
+    </span>
+  );
+}
+
+/* There is no `LivePulse` any more (2026-08-18). It was a blue `--activity` disc
+   that followed a live task's title on the List row and sat in the Board card's
+   head, and it meant "a turn is in flight right now" — a finer fact than the
+   In Progress lane, which also holds a queued turn that has not started.
+
+   It went because of what it LOOKED like rather than what it said. With the whole
+   unread vocabulary reduced to the status ring, the ping was the last free-
+   standing dot on the page, and a small filled circle after a title is what unread
+   means everywhere else in this app and every other. Akshil, 2026-08-18, on a
+   screenshot of a row reading "…sk workflow analysis ●": that blue dot should not
+   be there. A mark that says "running" in the exact shape the page uses for "you
+   have not read this" is a mark that will be misread every time.
+
+   What still carries "in flight": the In Progress ring's yellow, the queue dock,
+   and the row's own relative time. The `task.live` flag is untouched on the model
+   and in tasks-lib (openThreadIntent and the run intents still read it), so
+   restoring a mark for it later is a rendering decision, not a data one — it just
+   cannot be a filled dot after a title. */
+
+/** The folder a task's work happens in — the folder's own name, with the whole
+ * path (with ~ for home) as the tooltip. Deliberately not an initials avatar:
+ * that stands for a PERSON, and a directory is not one.
+ *
+ * NO GLYPH ANY MORE (Akshil, 2026-08-24: "in folder name we have folder icon,
+ * let's remove that"). The chip carried a 12px folder in front of its name, and
+ * the name is already the name of a folder — the glyph restated the one thing the
+ * chip could not be mistaken about, on the busiest end of the row, on every row.
+ * What it cost was width the title needed and a second small mark next to the
+ * message bubble and the file mark, which are marks that DO say something the
+ * text does not.
+ *
+ * The glyph is not gone from the row, it MOVED: it follows the title now, in the
+ * same slot the file mark uses, on the tasks that have no file mark to wear
+ * (`.tasks-row-file` in the row below). There it answers a question the row
+ * otherwise cannot — is this task about the whole folder, or one document in it
+ * — which is worth a mark, where "this folder chip contains a folder" was not. */
+export function IdentityChip({ name, title, onPick, active = false }: {
+  name: string;
+  title?: string;
+  /** Is the page filtered to this folder right now? Only meaningful with
+   * `onPick` — it is the pressed state of a control, not a fact about a label.
+   * It paints the chip as an ON pill and turns its press into "let it go". */
+  active?: boolean;
+  /** Makes the chip a TAG: pressed, it filters the page to this folder (Akshil,
+   * 2026-08-23). Given one, the chip becomes a real button — hover wash, focus
+   * ring, `stopPropagation` so it never counts as a press on the row it sits in.
+   * Without one it stays the plain label it has always been, which is what the
+   * board card and every other reader want. */
+  onPick?: () => void;
+}) {
+  if (!name) return null;
+  const body = <span className="schedule-tv-id-name">{name}</span>;
+  if (!onPick) {
+    return (
+      <span className="schedule-tv-id" data-hint={title || name}>{body}</span>
+    );
+  }
+  // A SHIELD around the tag, and the tag back at its own size (Akshil,
+  // 2026-08-24, final pass on this chip).
+  //
+  // The problem it solves is what the row does with the gap AROUND the pill. The
+  // row is one big stretched link, so the few pixels above, below and beside the
+  // chip belonged to the ROW: hovering them raised the task's title and clicking
+  // them opened the task — a click a pixel outside a filter chip navigating away
+  // is the worst possible outcome for a near-miss. Two earlier passes tried to
+  // fix it by growing the BUTTON to the row's full height, and both were wrong in
+  // the same way: `border-radius` draws on the padding box, so the hover wash
+  // grew with the target into a slab around an 11px word ("that is such a bad
+  // design and hover").
+  //
+  // So the two jobs are split across two elements. This span is the shield: it
+  // occupies the band, it sits above the stretched link so the link never
+  // receives a pointer there, and it does NOTHING — `title=""` stops the
+  // browser walking up to the row's tooltip, `cursor: default` says it is not a
+  // control, and `stopPropagation` covers the row's own click handler on the arm
+  // that has one. The button inside is the whole live target: its own size, its
+  // own wash, its own tooltip, its own press.
+  return (
+    <span
+      className="schedule-tv-id-shield"
+      /* EMPTY, not absent, and it is the whole reason the band says nothing: the
+         ROW carries `data-hint={task.title}`, and `hints.ts` resolves a hint by
+         walking up with `closest("[data-hint]")` — so without this the band
+         would answer with the task's name, which is exactly what it must not
+         do. An empty value is found first and resolves to no hint, the same job
+         `title=""` used to do against the native tooltip. */
+      data-hint=""
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        className={"schedule-tv-id schedule-tv-id--tag" + (active ? " is-on" : "")}
+        // The tooltip says what the press DOES, on top of the path it already
+        // said: a chip that only ever labelled something gives the reader no
+        // reason to try clicking it. On an ON chip it says the opposite thing,
+        // because that is what the press now does.
+        //
+        // A NATIVE `title`, by owner call after the custom panel drew displaced
+        // from the chip it captioned. Having one OF ITS OWN is also what stops
+        // the walk up to the row's, which is what put the task's name here.
+        data-hint={active ? `Showing only ${title || name} — press to clear` : `Show only ${title || name}`}
+        aria-label={active ? `${name} — showing only this folder, press to clear` : `Show only ${name}`}
+        aria-pressed={active}
+        onClick={(e) => {
+          e.stopPropagation();
+          onPick();
+        }}
+      >
+        {body}
+      </button>
+    </span>
+  );
+}
+
+/** TASK-002 / MSG-003. These are DESIGNED identifiers (§3) — allocated once,
+ * never renumbered — so unlike a session uuid they are meant to be read, said
+ * out loud and searched for. Monospaced, because a column of them is scanned. */
+function IdChip({ id, kind }: {
+  id: string;
+  kind: "task" | "message";
+}) {
+  // NOTHING AT ALL FOR AN EMPTY ID. A draft row carries no TASK-NNN — the
+  // number is allocated when it becomes a scheduled task, exactly as for a
+  // `pending:` entry — and an empty chip is a 20px box of border saying nothing
+  // where every other row says its name.
+  if (!id) return null;
+  return (
+    <span className={`tasks-id tasks-id--${kind}`}>{kind === "task" ? shortTaskId(id) : id}</span>
+  );
+}
+
+/**
+ * THE ONE MARK FOR WORDS NOBODY HAS SENT — a pencil and the word `Draft` — and,
+ * on the List and the Board, the control that filters the page down to them
+ * (design.md, Round 2: "It is a filter tag").
+ *
+ * WHY IT IS ITS OWN COMPONENT. It is built out of `.tasks-outcome-pill` — the
+ * page's one pill shape, which the retired "Stopped" mark used to wear too
+ * (dropped 2026-09-24: the row's own "Interrupted by you" says it) — but it
+ * does two things a plain pill cannot. It carries a GLYPH, because the pencil is the mark a reader learns
+ * this feature by (Slack's own, the reference UI); and it is PRESSABLE, because
+ * the chip that says "there are drafts here" is the natural place to ask for
+ * only those.
+ *
+ * WHERE IT SITS: at the right end of the row (Akshil, 2026-09-11). It moved
+ * there from beside the id, and the move is the point — the right end is where
+ * this page keeps its TAGS, while the id end is where the row says what it IS.
+ * The folder chip kept it company there until 2026-09-15, when Akshil moved
+ * that one LEFT, between the id and the title: a folder is part of what the
+ * row is, a draft is a state it is in, and the two ends now say those two
+ * different things.
+ *
+ * `onPick` is what makes it a control, exactly as on `IdentityChip`: without one
+ * it is the plain badge the Cards wall wants, with one it is a real button
+ * inside the same shield — so a near-miss in the row's padding does nothing
+ * rather than opening the task. `active` is the ON pill, in the accent, for the
+ * reason the folder chip's is: while a filter is on, the thing that set it has
+ * to say so on the rows it is acting on.
+ */
+export function DraftChip({ draft, onPick, active = false }: {
+  draft: OutcomeTag;
+  /** Is the page filtered to drafts right now? Only meaningful with `onPick`. */
+  active?: boolean;
+  /** Makes the chip a TAG. Omitted where the view has no draft filter (the
+   *  Cards wall), where it stays the label it started as. */
+  onPick?: () => void;
+}) {
+  // The words themselves are the tooltip — the first line of what was typed —
+  // for the reason tasks-lib.draftTag gives: the chip already says "draft", and
+  // what a reader hovering it wants is a glimpse of the sentence.
+  const body = (
+    <>
+      <span className="tasks-draft-pill-icon" aria-hidden>{ICON_PENCIL_LINE}</span>
+      {draft.text}
+    </>
+  );
+  if (!onPick) {
+    return (
+      <span className="tasks-outcome-pill tasks-draft-pill" title={draft.title}>
+        {body}
+      </span>
+    );
+  }
+  // The shield, and every word of `IdentityChip`'s note about it applies here
+  // unchanged: the row is one stretched link, so the band around a small pill
+  // belongs to the row unless something stands over it doing nothing.
+  return (
+    <span
+      className="schedule-tv-id-shield"
+      data-hint=""
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        className={"tasks-outcome-pill tasks-draft-pill" + (active ? " is-on" : "")}
+        // What the press DOES, on top of the words it already showed — and the
+        // opposite sentence once it is on, because that is what the press now
+        // does. `data-hint` rather than `title` for the page's own reason: the
+        // native tooltip arrives a second late, which for a chip is not at all.
+        data-hint={
+          active
+            ? `Showing only drafts — press to clear\n${draft.title}`
+            : `${draft.title}\nShow only drafts`
+        }
+        aria-label={active ? "Showing only drafts, press to clear" : "Show only drafts"}
+        aria-pressed={active}
+        onClick={(e) => {
+          e.stopPropagation();
+          onPick();
+        }}
+      >
+        {body}
+      </button>
+    </span>
+  );
+}
+
+/* There is no `UnreadDot` any more (2026-08-18). It was a 7px grey dot trailing a
+   task's title on the List row and the Board card, and before that a numeric pill
+   in the same slot; both are gone the same way, and for the reason written out in
+   full at tasks-lib.taskUnreadLabel — a row already carries a status ring, and a
+   second mark a few characters away, saying a different thing about the same unit
+   of work, is one glyph too many to scan. Read-state is the ring's SHAPE now
+   (StatusIcon above); the count survives as that ring's tooltip. */
+
+// ---- toolbar: search + status + project --------------------------------------
+
+// ---- the filter popover's geometry -------------------------------------------
+// The menus are `position: fixed`, measured off their trigger, exactly as every
+// dropdown in NewJobModal is and for the same reason: an absolutely-positioned
+// panel is clipped by the nearest scrolling/hidden ancestor, and this one has
+// two of them — `.prefs-page { overflow-y: auto }` and `.schedule-page {
+// overflow: hidden }`. The Project menu shipped cut off at the bottom with a
+// handful of its 28 folders showing (Akshil, screenshot). Fixed escapes the
+// clip; when the viewport below the trigger is shorter than the panel, it opens
+// upward instead.
+//
+// This is safe here because nothing in the chain is TRANSFORMED — a transformed
+// ancestor becomes the containing block for its fixed descendants and would
+// re-anchor the panel to it, clip and all (which is why schedule.css slides its
+// cards with `left` rather than `transform`). Checked: `.prefs-page`,
+// `.schedule-page`, `.schedule-main` and `.schedule-toolbar` set none.
+
+/** The panel's width, and schedule.css's own `.schedule-tv-pop { width }` — kept
+ * in step here only so a menu near the right edge can be pushed back inside the
+ * window. */
+const POP_WIDTH = 190;
+/** The tallest a menu grows before it scrolls inside itself. 28 projects is a
+ * real number on this machine and a 28-item column is not a menu, it is a page. */
+const POP_MAX_HEIGHT = 320;
+/** Below the trigger, and off the window's own edges. */
+const POP_GAP = 6;
+const POP_EDGE = 8;
+
+/**
+ * Where the panel goes and how tall it may get. Height is never SET — the menu
+ * sizes to its content, so two statuses draw a two-row menu — only capped, and
+ * the cap is the smaller of POP_MAX_HEIGHT and the room actually there.
+ */
+function popStyle(el: HTMLElement | null): React.CSSProperties {
+  const r = el?.getBoundingClientRect();
+  if (!r) return { position: "fixed" };
+  const below = window.innerHeight - r.bottom - POP_GAP - POP_EDGE;
+  const above = r.top - POP_GAP - POP_EDGE;
+  // Flip only when up is genuinely roomier: a menu that jumps above its trigger
+  // to gain twenty pixels is a menu that moved for nothing.
+  const up = above > below && below < POP_MAX_HEIGHT;
+  const room = Math.max(120, Math.min(POP_MAX_HEIGHT, up ? above : below));
+  const left = Math.max(
+    POP_EDGE,
+    Math.min(r.left, window.innerWidth - POP_WIDTH - POP_EDGE),
+  );
+  const s: React.CSSProperties = {
+    position: "fixed",
+    left,
+    right: "auto",
+    maxHeight: room,
+  };
+  if (up) s.bottom = window.innerHeight - r.top + POP_GAP;
+  else s.top = r.bottom + POP_GAP;
+  return s;
+}
+
+/** A dismissable popover trigger, shared by the two filter menus: click away or
+ * Escape closes it. Dismissal is the whole contract — the panel is fixed and
+ * therefore outside every clip on the page, so one left open hangs over the
+ * board. */
+function FilterMenu({
+  label,
+  slot,
+  count,
+  badge = true,
+  name,
+  icon: glyph,
+  onClear,
+  children,
+}: {
+  label: string;
+  /** WHICH FILTER THIS IS, as a `data-filter` on the trigger's wrapper —
+   *  "status", "project", or "all" for the merged one.
+   *
+   *  The toolbar's fit ladder hides the two in a stated order (Project, then
+   *  Status — shell/row-fit.ts `TOOLBAR_DROPS`), and before this the two
+   *  wrappers were the same element with the same class: the ladder could only
+   *  address them positionally (`:last-of-type`), which named whichever one
+   *  happened to be painted last rather than the one it meant. */
+  slot: string;
+  count: number;
+  /** DRAW THE COUNT BADGE. False when the label already says what is chosen:
+   *  the Project menu prints the chosen folder's NAME as its label (Akshil,
+   *  2026-09-19: "show the project name in that instead of 'Project 1'"), and a
+   *  "1" after a name is the same fact said twice. `count` still decides whether
+   *  the ✕ half is live, so the split control is unchanged. */
+  badge?: boolean;
+  /** WHAT THE FACET IS CALLED, for the two accessible names — "Clear the
+   *  project filter" and "Filter by Project". Defaults to `label`, which is
+   *  right while the label is the facet's name; the Project menu prints the
+   *  chosen FOLDER's name as its label once one is chosen, and a ✕ announced as
+   *  "Clear the fused-render filter" has lost the word that says what kind of
+   *  filter it is. */
+  name?: string;
+  /** The trigger's glyph. Defaults to the ring, which is the STATUS menu's own
+   *  mark — that is the vocabulary this page states a status in, so on that menu
+   *  the ring is the label said twice and it belongs there.
+   *
+   *  It was the default for BOTH menus, and hardcoded (Akshil, 2026-08-24: "this
+   *  icon next to project in filters is not accurate, change the icon to
+   *  something related to projects"). A ring beside the word Project claims a
+   *  status is being filtered — the one thing the ring means everywhere else on
+   *  this page — so the two menus read as two status filters, one of them
+   *  mislabelled. A prop rather than a `label === "Project"` branch inside:
+   *  which glyph belongs to a filter is the caller's fact, not this popover's. */
+  icon?: React.ReactNode;
+  /** Drop THIS menu's selections. Given one, the trigger becomes a split
+   *  control — `[ ⊙ Project 1 | ✕ ]` — whenever the count is non-zero.
+   *
+   *  Attached to the menu rather than standing off to one side, because that is
+   *  what it acts on: a lone "Clear" on the bar had to mean all three controls
+   *  at once (there is no room for one per menu), so undoing a project filter
+   *  also threw away a status filter and a search the user had not finished
+   *  with. It also sat as a fourth box in a row of three that were menus, which
+   *  is how it came to look misaligned — it was not the same kind of thing. */
+  onClear?: () => void;
+  children: (close: () => void) => React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement | null>(null);
+  const btn = useRef<HTMLButtonElement | null>(null);
+  const [style, setStyle] = useState<React.CSSProperties>({ position: "fixed" });
+  // Whether the ✕ is a control right now. Its BOX is always there — see the
+  // markup below — so this decides what the half does, never how wide the pair
+  // is.
+  const splittable = !!onClear && count > 0;
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => setStyle(popStyle(btn.current));
+    place();
+    const away = (e: MouseEvent) => {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    // A fixed panel does not travel with its trigger, so anything that MOVES the
+    // trigger has to re-measure it. `capture` because the movement that happens
+    // on this page is a scroll inside the list or the board, and a scroll does
+    // not bubble.
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    // …AND ANYTHING THAT MOVES IT WITHOUT MOVING THE WINDOW (Akshil, 2026-09-14:
+    // "don't move the dropdown position"). The toolbar's search field is its
+    // designed slack (`flex: 0 1 260px`, schedule.css), so a control that grows
+    // is paid for by the search shrinking — and every trigger after it slides
+    // left by that much, under a panel pinned where it was placed on open. The
+    // reserved boxes below are what stop the growth; this is the belt to that
+    // pair of braces, and it also covers the folding label ladder (row-fit.ts)
+    // and anything else that reflows the row under an open menu.
+    const ro = new ResizeObserver(place);
+    if (btn.current) ro.observe(btn.current);
+    // The row itself, not just the trigger: a sibling growing moves this button
+    // without resizing it, and only the container sees that.
+    if (wrap.current?.parentElement) ro.observe(wrap.current.parentElement);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      ro.disconnect();
+    };
+  }, [open]);
+
+  // THE PICK ITSELF, which is the case the observers above are least likely to
+  // catch in time: a press inside the panel re-renders this trigger in the same
+  // commit, and a `ResizeObserver` answers a frame later — one frame of the
+  // panel standing somewhere the trigger no longer is. A layout effect runs
+  // before the browser paints, so the two move together or not at all.
+  useLayoutEffect(() => {
+    if (open) setStyle(popStyle(btn.current));
+  }, [open, count, splittable]);
+
+  return (
+    <div className="schedule-tv-pop-wrap" data-filter={slot} ref={wrap}>
+      <span className="schedule-tv-filter-group">
+        <button
+          type="button"
+          ref={btn}
+          className={"schedule-tv-filter-btn" + (splittable ? " is-split" : "")}
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {/* THE TRIGGER'S WIDTH IS NOT THE MENU'S PROBLEM ANY MORE (Akshil,
+              2026-09-14: "if on click you close the dropdown then it solves the
+              shifting"). It said the chosen folder's NAME for a round, then held
+              an empty badge and an empty ✕ slot for another — a reserved gap
+              between Project, Status and + New task that read as a layout bug.
+              Both are gone: the badge and the ✕ appear only with something to
+              count or clear, as on main, and every press CLOSES the menu (the
+              `close` the children are handed), so the next open measures the
+              trigger where it now stands. The observers above still cover a
+              reflow under an open menu. */}
+          {glyph ?? ICON_CIRCLE_DOT} <span className="schedule-fit-lbl">{label}</span>
+          {badge && count > 0 && <span className="schedule-tv-filter-count">{count}</span>}
+        </button>
+        {splittable && (
+          <button
+            type="button"
+            className="schedule-tv-filter-x"
+            /* Says WHICH filter it drops. "Clear" on its own was the ambiguity
+               this replaces, and a bare ✕ beside a label is read as belonging
+               to it only if the accessible name agrees. */
+            title={`Clear the ${(name ?? label).toLowerCase()} filter`}
+            aria-label={`Clear the ${(name ?? label).toLowerCase()} filter`}
+            onClick={onClear}
+          >
+            ✕
+          </button>
+        )}
+      </span>
+      {open && (
+        <div
+          className="schedule-tv-pop tasks-pop"
+          role="group"
+          aria-label={`Filter by ${name ?? label}`}
+          style={style}
+        >
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * HOW MANY FOLDERS EARN A SEARCH BOX.
+ *
+ * Below this the list IS the search: seven rows are read in one glance, and a
+ * field above them is a control that costs a press and answers a question
+ * nobody had. The number the real complaint came from is the other end — the
+ * radiogroup's own note already reckons in "28 folders" — and a machine with
+ * that many tasks is one where the reader knows the folder's name and cannot
+ * find its row.
+ */
+const PROJECT_SEARCH_MIN = 8;
+
+/**
+ * THE PROJECT FACET — every folder that has a task, one of them chosen, and
+ * (once there are enough of them) a box to find one by name.
+ *
+ * ITS OWN COMPONENT so the typed query lives exactly as long as the popover
+ * does: `FilterMenu` renders its children only while open, so opening the menu
+ * again is a fresh mount and a fresh empty box. Held on `TaskFilterControls`
+ * instead, a query would outlive the press that closed the menu and the next
+ * open would come up already filtered, with a reason four clicks in the past.
+ *
+ * THE SEARCH IS THE PAGE'S OWN, not a second one. The field is the toolbar's
+ * search field — same wrapper, same magnifier, same `field-control` — and the
+ * rule behind it is the toolbar's too (`tasks-lib.projectMatches`: case-folded
+ * substring over the name the row prints — the name only, not the path behind
+ * it, since the menu shows names). Nothing here touches the file index: that
+ * is a search of the DISK, in a language of its own (globs, `~` escapes —
+ * DECISIONS-one-search-language.md), and these rows
+ * are a list this page is already holding.
+ */
+function ProjectFacet({
+  projects,
+  home,
+  chosen,
+  onPick,
+  takeFocus = false,
+}: {
+  projects: string[];
+  home: string;
+  /** The folder the filter is pinned to, or "" for All projects. */
+  chosen: string;
+  /** A row was pressed — a path, or "" for All projects. Closing the menu is
+   *  the caller's half, exactly as it was when these rows were inline. */
+  onPick: (path: string) => void;
+  /**
+   * SHOULD THE BOX TAKE THE CARET ON OPEN?
+   *
+   * True on the Project menu, where this facet IS the whole panel and a reader
+   * who opened it to find a folder can start typing. False in the MERGED menu
+   * (the toolbar's last fit rung), where Status is drawn above this and
+   * autofocusing here would silently skip the reader past it — the box is still
+   * there, one Tab away, which is where a second facet's field belongs.
+   */
+  takeFocus?: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const searching = projects.length >= PROJECT_SEARCH_MIN;
+  const shown = useMemo(
+    () => (searching ? projects.filter((p) => projectMatches(p, query)) : projects),
+    [projects, query, searching],
+  );
+  // ALL PROJECTS IS NOT A SEARCH RESULT. It is the state of having no filter,
+  // so it leads the list when the reader is reading the list — and steps aside
+  // the moment they are asking a question, where a row that answers every query
+  // is noise at the top of the answers.
+  const allRow = !query.trim();
+
+  // WALKING THE RADIOS. Up/Left and Down/Right step, Home/End jump, and the
+  // step WRAPS — a radiogroup is a ring, and the alternative is an arrow press
+  // at the end of the list that does nothing.
+  //
+  // FOCUS ONLY, not selection. A radiogroup's arrows conventionally pick as they
+  // move, and that is wrong here: every pick re-filters the page behind the
+  // popover, so arrowing past four folders would run four filters the reader
+  // never asked for. The pick stays on the press — Space and Enter, which a
+  // `<button>` gives for nothing.
+  //
+  // Sibling elements rather than a ref list: the rows ARE this handler's
+  // siblings inside the group (`currentTarget.parentElement`), and a query for
+  // the role is the same fact the markup already states.
+  const onRadioKey = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
+    if (!keys.includes(e.key)) return;
+    const group = e.currentTarget.parentElement;
+    if (!group) return;
+    const rows = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]'));
+    const at = rows.indexOf(e.currentTarget);
+    if (at < 0) return;
+    e.preventDefault();
+    const next = e.key === "Home" ? 0
+      : e.key === "End" ? rows.length - 1
+        : e.key === "ArrowUp" || e.key === "ArrowLeft"
+          ? (at - 1 + rows.length) % rows.length
+          : (at + 1) % rows.length;
+    rows[next]?.focus();
+  };
+
+  // TYPE, THEN ARROW DOWN INTO THE ANSWERS — the one key the box owes the list,
+  // and the same gesture the New task card's path field answers. Enter takes
+  // the only remaining folder, because by then the reader has already named it
+  // and a second press on a list of one is a press for nothing. Escape is
+  // deliberately NOT caught: it closes the menu, which is what it does
+  // everywhere else on this page (`FilterMenu`'s own listener).
+  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const group = e.currentTarget.closest(".schedule-tv-pop")
+        ?.querySelector<HTMLElement>('[role="radio"]');
+      group?.focus();
+      return;
+    }
+    if (e.key === "Enter" && shown.length === 1 && query.trim()) {
+      e.preventDefault();
+      onPick(shown[0]);
+    }
+  };
+
+  return (
+    <>
+      {searching && (
+        // The toolbar's own search field, in a popover. `schedule-tv-search`
+        // carries the magnifier's positioning and `field-control` the box; the
+        // one class of its own is what stops the 260px width the toolbar wants
+        // from pushing a 190px panel open.
+        <div className="schedule-tv-search schedule-tv-pop-search">
+          <span className="schedule-tv-search-icon" aria-hidden>{ICON_SEARCH}</span>
+          <input
+            type="search"
+            className="field-control schedule-tv-search-input"
+            value={query}
+            placeholder="Find a folder…"
+            aria-label="Find a folder"
+            autoFocus={takeFocus}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onSearchKey}
+          />
+        </div>
+      )}
+      {/* RADIOS, not checkboxes, and the roles say so: exactly one of these rows
+          is on at any moment, and `aria-pressed` would promise a reader they
+          could hold two at once.
+
+          AND A RADIOGROUP AROUND THEM, because a lone radio role is a role with
+          nothing to belong to: a screen reader announces "radio button" and can
+          say neither which set it is in nor "3 of 7". The group is what carries
+          the facet's name too, which is the half the loose rows never had.
+
+          `display: contents` ON THE WRAPPER (`.schedule-tv-pop-radiogroup`,
+          schedule.css) so it is a box in the accessibility tree and no box in
+          the layout: the panel styles its rows as its own flex children and an
+          element with a real box between the two would squeeze 28 project rows
+          into 28 slivers. It is NOT invisible to the SELECTOR, though —
+          `display` is layout and `>` is the DOM — so tasks.css's
+          `.schedule-tv-pop.tasks-pop > … > .schedule-tv-pop-item` rule names
+          this wrapper as a step on the way down.
+
+          ARROWS MOVE, because in a radiogroup they are how you move: Tab
+          reaches the group and the arrows walk it (`onRadioKey`). Roving
+          tabindex for the same reason — a group is ONE tab stop, and 28 folders
+          that each took their own would make Tab out of this popover a 28-press
+          errand. */}
+      <div className="schedule-tv-pop-radiogroup" role="radiogroup" aria-label="Project">
+        {/* ALL PROJECTS IS A ROW, not the absence of one. An empty filter is a
+            real state of this control, and a menu with no row lit reads as a
+            press that did not take — so the state gets a place in the list, at
+            the top, lit. It wears the facet's own folder glyph for the same
+            reason the status rows wear rings: the glyph column is what makes
+            the labels line up, and a row missing it reads as a different kind
+            of thing. */}
+        {allRow && (
+          <button
+            type="button"
+            className={"schedule-tv-pop-item" + (chosen ? "" : " is-on")}
+            role="radio"
+            aria-checked={!chosen}
+            tabIndex={chosen ? -1 : 0}
+            onKeyDown={onRadioKey}
+            onClick={() => onPick("")}
+          >
+            <span className="schedule-tv-folder-icon" aria-hidden>{ICON_FOLDER}</span>
+            <span className="tasks-pop-label">All projects</span>
+          </button>
+        )}
+        {shown.map((path) => {
+          const on = chosen === path;
+          return (
+            <button
+              type="button"
+              key={path}
+              className={"schedule-tv-pop-item" + (on ? " is-on" : "")}
+              role="radio"
+              aria-checked={on}
+              // ROVING TABINDEX, and the ring has to have a way in even when the
+              // chosen row is filtered out from under it: the first row takes
+              // the tab stop whenever nothing on screen is the chosen one.
+              tabIndex={on || (!shown.some((p) => p === chosen) && !allRow
+                               && path === shown[0]) ? 0 : -1}
+              onKeyDown={onRadioKey}
+              title={tildePath(path, home)}
+              onClick={() => onPick(path)}
+            >
+              <span className="schedule-tv-folder-icon" aria-hidden>{ICON_FOLDER}</span>
+              <span className="tasks-pop-label">{basename(path)}</span>
+            </button>
+          );
+        })}
+      </div>
+      {/* A QUESTION WITH NO ANSWER STILL GETS ONE. An empty panel under a box
+          somebody just typed into reads as a control that broke; this says the
+          folder is not among the ones that have tasks, which is the true and
+          useful sentence. Not a row — nothing to press. */}
+      {searching && shown.length === 0 && (
+        <p className="schedule-tv-pop-empty">No folder matches</p>
+      )}
+    </>
+  );
+}
+
+
+export function TaskFilterControls({
+  filters,
+  projects,
+  home = "",
+  onChange,
+  hideArchiveStatus = false,
+  merged = false,
+}: {
+  filters: TaskFilters;
+  /** Every folder that has a task — `projectOptions(tasks)`. */
+  projects: string[];
+  home?: string;
+  onChange: (next: TaskFilters) => void;
+  /**
+   * True while the Calendar is the active view (Akshil, 2026-08-20). The
+   * calendar draws nothing for an archived task — see tasks-lib.filtersForView
+   * for the full argument — which makes Archive a dead option in this same
+   * popover on that view alone: picking it always empties the grid, with
+   * nothing on screen to say why. List and Board keep the row.
+   *
+   * The STORED value is untouched either way (one `TaskFilters` still backs
+   * all three views); this only hides the row and the count that follow from
+   * it — a person's Archive tick made on List survives a switch to Calendar
+   * and back, it is just not counted or offered while the calendar cannot
+   * act on it.
+   */
+  hideArchiveStatus?: boolean;
+  /**
+   * THE LAST RUNG OF THE TOOLBAR'S LADDER (shell/row-fit.ts): the two triggers
+   * become ONE, and its popover holds both lists under their own headings.
+   *
+   * Not a different control — the same `FilterMenu`, the same rows, the same
+   * presses. What goes is the second trigger's width, which at a 360px toolbar
+   * is the difference between the row fitting and the row wrapping.
+   */
+  merged?: boolean;
+}) {
+  // By LANE, like taskMatches: a tick is on when any stored status draws in
+  // this lane, and turning it off removes every status of that lane — so a
+  // stray `needs_attention` can never leave a filter applied that no checkbox
+  // shows (review, #1018).
+  const laneOn = (key: BoardColumn) => filters.statuses.some((s) => laneOf(s) === laneOf(key));
+  const toggleStatus = (key: BoardColumn) =>
+    onChange({
+      ...filters,
+      statuses: laneOn(key)
+        ? filters.statuses.filter((s) => laneOf(s) !== laneOf(key))
+        : [...filters.statuses, key],
+    });
+
+  // LANES, not statuses (Akshil, 2026-09-06: "blocked should be clubbed and
+  // needs attention"): the Board draws a parked run in the Blocked lane, and
+  // the filter offers the lanes the Board draws, so one Blocked tick brings
+  // both the broken run and the one waiting on you. taskMatches matches by
+  // lane for the same reason.
+  const statusColumns = hideArchiveStatus
+    ? BOARD_LANES.filter((c) => c.key !== "archived")
+    : BOARD_LANES;
+  // Excludes Archive from the badge for the same reason the row is hidden: a
+  // count that includes a facet the popover will not even show would read as
+  // a filter this menu cannot explain.
+  const statusCount = hideArchiveStatus
+    ? filters.statuses.filter((s) => s !== "archived").length
+    : filters.statuses.length;
+
+  // ONE PROJECT AT A TIME (design.md, 2026-09-14). The STORED shape is still a
+  // list — `taskMatches` asks it with `includes` and every caller that composes
+  // a `TaskFilters` keeps working — but this menu only ever writes zero or one
+  // of them: a reader narrows to the folder they are working in, and "these two
+  // of my six projects" is not a question anybody asked of this page. Pressing
+  // the row that is already on clears it, so the All row is reachable without
+  // aiming at it.
+  const pickProject = (path: string) =>
+    onChange({
+      ...filters,
+      projects: filters.projects[0] === path ? [] : [path],
+    });
+
+  // THE ROWS, ONCE. Both shapes of this control — two triggers or one — draw
+  // exactly these, so a press cannot mean something different at a narrow
+  // width than it does at a wide one.
+  //
+  // AND EVERY PRESS CLOSES THE MENU (Akshil, 2026-09-14), Status included even
+  // though it can hold several ticks: the menu is anchored to a trigger whose
+  // badge changes width on the press, and a closed menu cannot be standing in
+  // the wrong place. One more open per extra tick is the price.
+  const statusRows = (close: () => void = () => {}) =>
+    statusColumns.map((col) => {
+      const on = laneOn(col.key);
+      return (
+        <button
+          type="button"
+          key={col.key}
+          className={"schedule-tv-pop-item" + (on ? " is-on" : "")}
+          aria-pressed={on}
+          onClick={() => {
+            toggleStatus(col.key);
+            close();
+          }}
+        >
+          <StatusIcon status={col.key} />
+          <span>{col.label}</span>
+        </button>
+      );
+    });
+  const projectRows = (close: () => void, takeFocus = false) => (
+    <ProjectFacet
+      projects={projects}
+      home={home}
+      takeFocus={takeFocus}
+      chosen={filters.projects[0] ?? ""}
+      onPick={(path) => {
+        if (path) pickProject(path);
+        else onChange({ ...filters, projects: [] });
+        close();
+      }}
+    />
+  );
+
+  return (
+    <div className="schedule-tv-filters">
+      <div className="schedule-tv-search">
+        <span className="schedule-tv-search-icon" aria-hidden>{ICON_SEARCH}</span>
+        <input
+          type="search"
+          className="field-control schedule-tv-search-input"
+          value={filters.search}
+          placeholder="Search tasks…"
+          aria-label="Search tasks"
+          onChange={(e) => onChange({ ...filters, search: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") e.currentTarget.blur();
+          }}
+        />
+      </div>
+
+      {/* MERGED, at the toolbar's last rung (see `merged`): one trigger, both
+          lists, each under its own heading. The rows are the very same
+          elements the two menus draw — built from the same two renderers
+          below — so nothing about a press changes with the width of the
+          window. */}
+      {merged ? (
+        <FilterMenu
+          label="Filters"
+          slot="all"
+          count={statusCount + filters.projects.length}
+          icon={ICON_FILTER}
+          onClear={() => onChange({ ...filters, statuses: [], projects: [] })}
+        >
+          {(close) => (
+            <>
+              <p className="schedule-tv-pop-head">Status</p>
+              {statusRows(close)}
+              {projects.length > 1 && (
+                <>
+                  <p className="schedule-tv-pop-head">Project</p>
+                  {projectRows(close)}
+                </>
+              )}
+            </>
+          )}
+        </FilterMenu>
+      ) : (
+        <>
+      <FilterMenu
+        label="Status"
+        slot="status"
+        count={statusCount}
+        onClear={() => onChange({ ...filters, statuses: [] })}
+      >
+        {statusRows}
+      </FilterMenu>
+      {/* Project is auto-detected from the tasks themselves (§10), so the menu
+          is simply absent on a machine whose tasks all live in one folder —
+          a control with one choice is not a choice. */}
+      {projects.length > 1 && (
+        <FilterMenu
+          /* THE CHOSEN FOLDER'S NAME, when one is chosen (Akshil, 2026-09-19:
+             "when we have an item selected in that filter, let's show the
+             project name in that instead of 'Project 1'"). One folder is the
+             only count this radio facet can reach, so the name says everything
+             the badge did and the badge stands down (`badge={false}` below).
+             The trigger widens to fit the name and the toolbar's fit ladder
+             re-measures — a press CLOSES the menu, so the panel is never open
+             while the trigger moves (the 2026-09-14 shifting fix holds). */
+          label={filters.projects.length === 1 ? basename(filters.projects[0]) : "Project"}
+          badge={filters.projects.length !== 1}
+          name="Project"
+          slot="project"
+          count={filters.projects.length}
+          /* A FOLDER, because a project on this page IS a folder — it is
+             auto-detected from where each task's work happens, and the same
+             glyph now marks a folder-scoped task at the end of its title and
+             every folder row in the New-task picker. One mark, one meaning. */
+          icon={ICON_FOLDER}
+          onClear={() => onChange({ ...filters, projects: [] })}
+        >
+          {/* THE CARET GOES TO THE BOX here and not in the merged menu above:
+              this panel IS the project facet, so a reader who opened it can
+              start typing. Wrapped rather than passed by name because the
+              second argument is what says so. */}
+          {(close) => projectRows(close, true)}
+        </FilterMenu>
+      )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- read bookkeeping --------------------------------------------------------
+// Clicking a message marks it read, and the dot has to go NOW: the page polls
+// on a 20-second interval, and a dot that outlives its own click reads as a
+// click that failed. So the write goes to the server AND into a local set that
+// is merged over whatever the next poll returns, until the server's own answer
+// catches up. The set is never pruned — an id that is already read costs one
+// string, and pruning it against a list that changes under us is how a dot
+// comes back.
+
+function useReadSet() {
+  const [read, setRead] = useState<Set<string>>(() => new Set());
+  const clear = (taskKey: string, m: TaskMessage) => {
+    if (!m.unread) return;
+    setRead((cur) => markRead(cur, taskKey, m.message_id));
+    // Fire and forget as far as the NAVIGATION goes — the click is leaving the
+    // page, so a refusal has nobody left to be told — but the mark itself is
+    // taken back on one (tasks-lib.unmarkRead). "The next poll brings the dot
+    // back" was not true: the local entry outranks the poll for as long as this
+    // component lives, so a write nobody noticed failing hid the dot until the
+    // List remounted.
+    void markTaskMessageRead(taskKey, m.message_id).catch(() => {
+      setRead((cur) => unmarkRead(cur, taskKey, m.message_id));
+    });
+  };
+  // The whole task, on the row's own button and on any gesture that opens the
+  // thread. Two halves, both from tasks-lib.markAllRead: a concrete id for every
+  // message this component HOLDS, and one observation-stamped sentinel for the
+  // ones outside the window, whose ids it has never seen.
+  //
+  // `held` is tasks-lib.heldMessages, never the listing window on its own: after
+  // Show more the thread on screen is all 89, and ids off the three the listing
+  // carried would zero the count over 86 dots that nothing could take back.
+  const clearAll = (task: Task, held?: TaskMessage[]) => {
+    setRead((cur) => markAllRead(cur, task, held));
+  };
+  // The other direction of the same seam: a thread that has only just ARRIVED,
+  // under a mark that is still standing. Show more's reply is a read of the value
+  // the press overrode, so its `unread` flags are pre-mark — and nothing refetches
+  // them. tasks-lib.carryMarkToHeld decides whether the mark still covers them.
+  const carryAll = (task: Task, held: TaskMessage[]) => {
+    setRead((cur) => carryMarkToHeld(cur, task, held));
+  };
+  // ...and the way back, which is the half that was missing. `held` is the list
+  // the press wrote its concrete ids from, captured BEFORE the request went out:
+  // a poll can replace the thread while the write is in flight, and a rollback
+  // has to remove what was actually written.
+  const restoreAll = (taskKey: string, held: TaskMessage[]) => {
+    setRead((cur) => unmarkAllRead(cur, taskKey, held));
+  };
+  // The server's own answer to the mark, spent through the one rule that reads
+  // it (tasks-lib.settleMarkAllRead): a non-zero count means the press did not
+  // clear the row after all.
+  const settleAll = (
+    taskKey: string,
+    held: TaskMessage[],
+    answer: { unread: number },
+  ) => {
+    setRead((cur) => settleMarkAllRead(cur, taskKey, held, answer));
+  };
+  return { read, clear, clearAll, carryAll, restoreAll, settleAll };
+}
+
+/** The whole-task half of useReadSet, for the two performers below — they are
+ * module functions rather than hooks, so the marks are handed to them. */
+interface ReadMarks {
+  clearAll: (task: Task, held?: TaskMessage[]) => void;
+  restoreAll: (taskKey: string, held: TaskMessage[]) => void;
+  settleAll: (
+    taskKey: string,
+    held: TaskMessage[],
+    answer: { unread: number },
+  ) => void;
+}
+
+// ---- the run, for both views -------------------------------------------------
+
+/**
+ * Spend a TaskRunIntent: the ONE place either view turns `kind` into a call.
+ *
+ * The List had this inline and the Board had no run action at all (Akshil,
+ * 2026-08-17: "I have a rerun option in list, I have a rerun option in calendar,
+ * but I don't have a rerun option in Kanban"). Adding one meant either copying
+ * the two-call switch into the card's owner or lifting it here, and copying it is
+ * how the two views start disagreeing about what "Re-run" does.
+ *
+ * WHICH message and WHICH call are still not decided here — that is
+ * tasks-lib.taskRunIntent, the same function the drag's dropAction asks. This
+ * only performs it, and returns the sentence the caller should show: the server's
+ * own note when a re-send was queued rather than sent, "" when there is nothing
+ * to say. Refusals THROW, so each caller can put them in its own note line.
+ */
+async function performRun(
+  intent: Pick<TaskRunIntent, "kind" | "entryId">,
+): Promise<RunOutcome> {
+  if (intent.kind === "resend") {
+    const res = await resendScheduledMessage(intent.entryId);
+    return { note: res.note ?? "", queued: null };
+  }
+  const res = await runScheduledNow(intent.entryId);
+  // HELD, NOT REFUSED (api.RunNowResult). Under the project queue a folder that
+  // is busy with another task keeps this message pending and gives it priority —
+  // running something now IS a skip — so nothing failed, nothing was lost, and
+  // the honest report is where the work now stands rather than an error. The
+  // caller paints the row from this; the server's own change feed replaces it.
+  if (res.ok === false && res.reason === "queued") {
+    return {
+      note: "",
+      queued: {
+        status: "queued",
+        queue_position: res.position ?? 1,
+        queue_ahead: res.ahead ?? "",
+        queue_ahead_title: res.ahead_title ?? "",
+        queue_priority: true,
+      },
+    };
+  }
+  return { note: "", queued: null };
+}
+
+/** What a run attempt actually did: a sentence to show ("" for the ordinary
+ *  case), and — when the project queue held it — the claim the row should paint
+ *  until the server's own answer lands. Keyless, because the caller is the one
+ *  holding the task. */
+interface RunOutcome {
+  note: string;
+  queued: Omit<QueueOverride, "key"> | null;
+}
+
+/** Send a queued task to the head of its folder's line. NEVER interrupts the
+ *  run in flight — the server's answer is always a position, never "running
+ *  now" — and the claim it returns says exactly that, so the card moves to the
+ *  top of the lane on the press rather than on the next poll.
+ *
+ *  Refusals THROW, like performRun: a 400 here means the row was not queued
+ *  after all (the folder freed while the pointer was moving), and the server's
+ *  sentence is the right thing to show. */
+/** Run a queued task's oldest waiting message NOW, beside whatever owns its
+ *  folder — `POST /api/tasks/queue/force`, whose docstring carries the rule.
+ *
+ *  NOT A PROMOTION AND SO NO OVERRIDE TO RETURN. The old skip verb answered a
+ *  claim the row had to paint (position 1) because no listing would say it for
+ *  a while. This one starts a RUN: the row's own status is what changes, the
+ *  listing is what says so, and a re-read is both cheaper and more honest than
+ *  a hand-built `in_progress` this page would then have to defend against the
+ *  next lap.
+ *
+ *  BY TASK KEY, which is the right name here: this press is on a row that IS a
+ *  task, and the server resolves that task's oldest due message itself — the
+ *  same message the pump would have started for it. The chat's card names one
+ *  ENTRY instead, for the reason `api.forceStart` records.
+ *
+ *  Refusals THROW: a 409 means the conversation cannot take
+ *  the message yet (a send in flight, a live turn) and the server's sentence is
+ *  the right thing to show. */
+async function performForceStart(task: Task): Promise<void> {
+  await forceStart({ key: task.key });
+}
+
+/**
+ * DISCARD ONE DRAFT — the trash on a draft row, in every view. True if the
+ * draft is actually gone.
+ *
+ * A draft is text nobody has sent, so there is no confirm step: the New task
+ * modal's own Discard has never had one either, and a dialog over an unfinished
+ * sentence is a ceremony about nothing (design.md, PR C).
+ *
+ * IT IS THREE LINES NOW, and the two mechanisms it used to need are gone with
+ * the design that made them necessary (design "one record", §2). It used to have
+ * to reach whatever else on the page was WRITING this draft — a composer mounted
+ * on the same key, the New task modal open on this very form — stand its autosave
+ * down, wait for its in-flight PUT to settle, and undo all of that if the DELETE
+ * then failed. A version does the ordering instead: the DELETE states the version
+ * it read, and a write still in the air states an older one, so it is refused
+ * rather than landing after and putting the row back. Nothing has to be told, so
+ * nothing has to be untold.
+ *
+ * `dropListingKeys` takes the row off every surface at once — the List, the
+ * Board, the Cards wall and the chat's Recent list all read one held listing —
+ * and `restoreListingRows` puts it back when the server refuses. The other
+ * writer, if there is one, hears the delete through the change feed
+ * (`tasksPulse.onDraftChange`) within a second.
+ *
+ * EXPORTED because four surfaces press it — the List row, the Board card, the
+ * Cards wall and the chat's Recent list — so "the draft is gone" cannot come to
+ * mean four different sequences.
+ */
+export async function discardDraft(task: Task): Promise<boolean> {
+  // THE CHIP CASE, and it is the one that does NOT drop a row (design §5). An
+  // ordinary task whose composer is holding unsent words wears the Draft on the
+  // List, the Board and the Cards wall — and on the wall it is the ONLY way a
+  // draft is ever drawn, because a card is a transcript and a draft row has no
+  // session (tasks-lib.cardsForTasks). Discarding it throws the words away and
+  // leaves the task exactly where it is, so the optimistic drop below would be
+  // a lie: the row stays and loses its chip on the next listing.
+  if (!isDraftTask(task)) {
+    if (!task.draft || !task.session_id) return false;
+    const out = await dropDraft(task.session_id, "");
+    if (out) announceDraftsGone([task.session_id]);
+    announceTasksChanged();
+    return out;
+  }
+  const chat = isChatDraftTask(task);
+  // A chat draft's row key IS the key it is filed under (`new:<file>`); a task
+  // draft's row is `draft:<id>` and the id is what the routes take.
+  const id = chat ? "" : task.draft_id;
+  dropListingKeys([task.key]);
+  // A task row with no `draft_id` is a row this build cannot delete — nothing is
+  // sent, and the row goes back rather than silently vanishing.
+  const out = chat || id ? await dropDraft(chat ? task.key : "", chat ? "" : id ?? "") : false;
+  if (out) announceDraftsGone([chat ? task.key : taskDraftKey(id ?? "")]);
+  else restoreListingRows([task]);
+  announceTasksChanged();
+  return out;
+}
+
+/**
+ * THE DELETE ITSELF, and WHO makes it.
+ *
+ * A draft this document is WRITING has one writer — the syncer for its key —
+ * and the trash has to go through it rather than around it: a DELETE fired
+ * beside a composer's pending PUT is the pair that ordering by hand never got
+ * right, and saying "this record should not exist" to the thing that owns the
+ * order is the whole of the fix. `handoff` then waits for the server to agree,
+ * so the row is restored on a refusal exactly as it was before.
+ *
+ * A draft NOBODY on this page is writing — the ordinary case for the List, a
+ * row for a chat in another window — has no syncer, and the plain conditional
+ * DELETE this has always made is right for it.
+ */
+async function dropDraft(chatKey: string, taskId: string): Promise<boolean> {
+  const key = chatKey || (taskId ? taskDraftKey(taskId) : "");
+  if (!key) return false;
+  const sync = peekDraftSyncer(key);
+  if (sync) {
+    sync.markDeleted();
+    // …AND THE ANSWER IS THE DELETE'S, NOT THE DESIRED STATE'S (`removed`).
+    // `ok` asks "does the server hold what this page last asked for", and a
+    // keystroke arriving in the editor behind this list while the DELETE is on
+    // the wire moves that state on to a PUT — so `ok` could say the trash had
+    // failed although the record the reader pressed it on was gone, and the row
+    // came back.
+    return (await sync.handoff()).removed;
+  }
+  const out = chatKey
+    ? await deleteChatDraft(chatKey)
+    : await deleteTaskDraft(taskId);
+  return out.ok;
+}
+
+/**
+ * Take one task back out of Archive, and return the sentence to show for it.
+ *
+ * THE SENTENCE IS THE POINT, and it is why this is a function rather than a call.
+ * Unarchiving names no lane: the server drops the filing and DERIVES where the
+ * task belongs from its thread, so the card is about to appear somewhere the
+ * reader did not choose and cannot predict — a different lane on the Board, a
+ * different rank on the List, quite possibly off screen. Three gestures reach
+ * this (the List's button, the card's button, the drag out of the lane) and all
+ * three go through one call so they cannot drift.
+ *
+ * Refusals THROW, exactly like performRun, so each caller puts them in its own
+ * note line. Success says nothing — see the body.
+ */
+async function performUnarchive(key: string): Promise<void> {
+  // NO SENTENCE (Akshil, 2026-09-21: "I don't need this message, I know what I
+  // did"). The ring redrawing in its new state IS the receipt, on every surface
+  // that can press this. `unfiled: false` — the server saying nothing changed —
+  // is likewise left to the unchanged ring. Refusals still throw.
+  await unarchiveTask(key);
+}
+
+/**
+ * Spend an OpenThreadIntent: the ONE place either view opens a conversation.
+ *
+ * Both gestures that go to a thread come through here — the Board card's click
+ * and the List row's Open chat button. The Board had this inline and the List's
+ * button navigated and marked nothing, so the same gesture to the same href came
+ * back with the badge cleared or not depending on which view you were in (the
+ * List's button was the one place that still disagreed). Lifting it is the same
+ * move performRun made above, for the same reason: two copies is how the two
+ * views start disagreeing again.
+ *
+ * WHETHER anything is marked is not decided here — that is
+ * tasks-lib.openThreadIntent, which answers `markRead: false` when the count is
+ * already zero and offers no intent at all for a task with no session. This only
+ * performs it.
+ *
+ * The local clear goes FIRST, so the pill cannot outlive its own press (the page
+ * polls on a 20s interval). The server call is ONE whole-task request, and the
+ * navigation is OUTSIDE the guard and never waits on it — but the answer is no
+ * longer thrown away. A refusal takes the mark back and a non-zero remaining
+ * count settles it (tasks-lib.settleMarkAllRead), because "the next poll brings
+ * it back" was never true of a local override that outranks the poll. Nobody is
+ * shown a sentence here — the press left the page — so the correction IS the
+ * whole report: the pill is there again when the reader comes back.
+ *
+ * `held` is passed IN rather than read off `task.messages` here, and it is not
+ * optional. This press hops away, so the view it marks is usually unmounted a
+ * frame later and its read set goes with it — but "usually" is not a rule to
+ * write a mark against: the frames before the hop still paint, and this is the
+ * SAME gesture as the row's own Mark read button on a thread the row may have
+ * expanded to all 89. A mark that covered less here than there would be a rule
+ * that depended on which button you pressed. The List hands over what the thread
+ * holds (tasks-lib.heldMessages); the Board hands over its card's window, which
+ * is all a card ever holds — it has no Show more.
+ */
+function performOpen(
+  task: Task,
+  intent: OpenThreadIntent,
+  marks: ReadMarks,
+  held: TaskMessage[],
+): void {
+  if (intent.markRead) {
+    marks.clearAll(task, held);
+    void markWholeTaskRead(task.key)
+      .then((answer) => marks.settleAll(task.key, held, answer))
+      .catch(() => marks.restoreAll(task.key, held));
+  }
+  // THE SIDE PEEK TAKES THE PRESS when the Tasks page is hosting one, and the
+  // mark above still happens either way — opening the thread is what clears it,
+  // and where the thread opens is not the badge's business
+  // (.claude-design/task-side-peek/design.md; `openPeek` answers false wherever
+  // there is no peek, which is every other surface in the app).
+  //
+  // Here rather than at the two call sites because THIS is the one place either
+  // view turns an OpenThreadIntent into a hop, and a second copy of the
+  // question is how the List and the Board start disagreeing again.
+  if (openPeek(task.key)) return;
+  navigateUrl(intent.href);
+}
+
+// ---- List view: one accordion per task ---------------------------------------
+
+/** How long the list keeps trying to reach the offset it was left at. Rows grow
+ * as their threads land, so the target is unreachable for the first few frames;
+ * past this it is a list that simply cannot be that tall any more. */
+const RESTORE_WINDOW_MS = 3000;
+/** Scroll fires per frame; the store is written once the reader pauses. */
+const WRITE_DEBOUNCE_MS = 150;
+
+/** Per-TAB, per-sitting (sessionStorage): "where I was a moment ago" is not a
+ * preference, and a week-old offset restored into a list of different rows is a
+ * surprise rather than a memory. A blocked store costs the memory, never the
+ * page — the read runs during first render. */
+function readListMemory(): ListMemory {
+  try {
+    return parseListMemory(sessionStorage.getItem(LIST_MEMORY_KEY));
+  } catch {
+    return EMPTY_LIST_MEMORY;
+  }
+}
+
+function writeListMemory(memory: ListMemory): void {
+  try {
+    sessionStorage.setItem(LIST_MEMORY_KEY, JSON.stringify(memory));
+  } catch {
+    // best-effort; a full or blocked store never breaks the list
+  }
+}
+
+export function TaskList({
+  tasks,
+  home = "",
+  stale = false,
+  missing,
+  onEditEntry,
+  onOpenDraft,
+  onOpenBoundDraft,
+  onReload,
+  onQueued,
+  onPickProject,
+  pinnedProjects = [],
+  onPickDraft,
+  draftOn = false,
+  floored = false,
+  emptyLabel = "Nothing to show here.",
+}: {
+  /** Already filtered, in the SERVER's order. Never re-sorted here. */
+  tasks: Task[];
+  /** A queue verb landed here: paint the claim over the row until the server's
+   * own answer arrives (tasks-lib.QueueOverride). The page holds the claims —
+   * see TaskBoard's own note for why they must outlive this component. */
+  onQueued?: (override: QueueOverride) => void;
+  /** $HOME, only so a folder tooltip can say "~/Desktop/fused". */
+  home?: string;
+  /** Folders the disk no longer has (Scheduled → useMissingFolders). A row in one
+   * says so and stays on the page instead of opening an Explorer error. */
+  missing?: ReadonlySet<string>;
+  /** Is this empty list a FAILURE rather than an answer? A failed poll sets
+   * `tasks` to `[]` exactly like a filter that matched nothing does (Scheduled
+   * `tasksFailed`), and the scroll memory below has to tell them apart: a list
+   * the reader emptied is worth forgetting the offset for, a list the network
+   * lost is not. Defaults false, so a caller that never fails never has to
+   * think about it. */
+  stale?: boolean;
+  /** Open the schedule form on a message that has not gone out yet. Omitted ⇒
+   * no edit affordance; the thread is then read-only, which is all a thread of
+   * already-sent messages could ever be anyway. */
+  onEditEntry?: (entryId: string) => void;
+  /** Re-open an unfinished New task form (a `state: "draft"` row — design.md,
+   *  "Reopen path"). Editing a draft row is the ONLY way back to it, so a list
+   *  that draws draft rows without this would draw rows whose press does
+   *  nothing; omitted ⇒ the row is inert, exactly as an unresolvable pending
+   *  row is. */
+  onOpenDraft?: (task: Task) => void;
+  /** Open the New task form BOUND TO THIS CONVERSATION — the thread's leading
+   *  draft line, when the words it is quoting are in a form rather than in the
+   *  composer (`task.draft.kind === "form"`; Bugbot, PR #1126). Mirrors
+   *  `onOpenDraft` in every way but which draft it is about: that one is a draft
+   *  ROW's press, this one is a session row's, and a bound draft has no row.
+   *  Omitted ⇒ the line falls back to opening the chat, which is what it always
+   *  did. */
+  onOpenBoundDraft?: (task: Task) => void;
+  /** Re-read the list after a cancel lands (or fails) — the row has to correct
+   * itself to whatever the server actually did, and a failed cancel is a race
+   * the server won, not a no-op.
+   *
+   * OPTIONAL, unlike the Board's, and Cancel is drawn with or without it: the
+   * page polls anyway, so omitting this costs one poll interval of a row
+   * still saying "Scheduled" — not a stuck row, and nothing worth withholding
+   * the affordance over. */
+  onReload?: () => void;
+  /** Narrow the page to ONE project — what a press on a row's folder chip means
+   * (Akshil, 2026-08-23). The chip was already the answer to "where did this
+   * happen"; making it pressable turns it into the way to ask "what else
+   * happened there", which is the question a reader has the moment they notice
+   * the folder. It writes the SAME `projects` filter the toolbar's popover owns,
+   * so there is one filter with two ways in and the toolbar keeps showing (and
+   * clearing) what is on.
+   *
+   * Optional: without it the chip stays the plain label it has always been. */
+  onPickProject?: (project: string) => void;
+  /** The projects the page is currently FILTERED to — the toolbar's own
+   * `projects` value (Akshil, 2026-08-23). Two jobs, both about not hiding the
+   * thing the reader just pressed: it keeps the folder chip drawn when the
+   * filter has narrowed the list to one project (`spansProjects` would
+   * otherwise take it away at exactly the moment it became the answer to "what
+   * am I looking at"), and it is what a chip reads to know it is the one that
+   * is ON. */
+  pinnedProjects?: string[];
+  /** THE DRAFT TAG'S PRESS, the exact counterpart of `onPickProject` above
+   *  (design.md, Round 2): it toggles one boolean on the same shared
+   *  `TaskFilters` the toolbar owns, so the chip and the filter are one thing.
+   *  Optional — without it the chip is a plain badge, which is what every view
+   *  that has no draft filter wants. */
+  onPickDraft?: () => void;
+  /** Is that filter on right now? The chip's pressed state, and the only
+   *  row-level trace this filter has — it is set from the rows and there is no
+   *  popover carrying a count for it. */
+  draftOn?: boolean;
+  /** IS THE MIDDLE PANE AT ITS FLOOR (task-peek-store `planRoom`)? The pane has
+   *  stopped shrinking and scrolls sideways instead, so the rows stop folding
+   *  their marks and the list's content takes the width they need
+   *  (shell/row-fit.ts `pickRowFit`, design.md Fix batch 6 §2). Handed down
+   *  from the page, which is where the frame's own `data-floored` is written.
+   *  Default false, so every caller that is not the peek's host is unchanged. */
+  floored?: boolean;
+  emptyLabel?: string;
+}) {
+  // Collapsed by default (§8), so the set holds what is OPEN — an empty set is
+  // the resting state and needs no seeding from a list that changes on every
+  // poll. Seeded from THIS TAB's memory, though: opening a task's chat leaves the
+  // page, and coming back to a collapsed list scrolled to the top made reading
+  // three threads out of ninety three trips through the same scrollbar.
+  //
+  // Read once, into a ref, because both halves of the memory are initial state:
+  // re-reading it later would fight the writes below.
+  const memory = useRef<ListMemory>(readListMemory());
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(memory.current.expanded),
+  );
+  // WHERE THE READER JUST WAS. Seeded from the same memory as the two above and
+  // restored with them: a list of ninety near-identical rows gives no clue which
+  // one you came back out of, so "now the next one" meant re-finding the last
+  // one first (Akshil, 2026-08-18). Held in state as well as in the memory ref
+  // because it is also LIVE — the row lights the moment it is pressed, so the
+  // highlight is the page acknowledging the press rather than something that
+  // only appears after a round trip.
+  const [selected, setSelected] = useState(() => memory.current.selected);
+  // …and the row whose conversation is open in the side peek RIGHT NOW, which
+  // is a different claim from `selected` above and outranks it visually (the
+  // halo, styles/task-peek.css). Null everywhere the peek is not hosted.
+  // IS THE FEATURE ON AND ON THIS PAGE (task-peek-flag.ts, `task_peek_enabled`).
+  // Off, every line below that mentions the peek stands down and the list is
+  // byte-for-byte the list this page has always rendered.
+  const peekOn = usePeekHost();
+  // BOTH HOOKS, UNCONDITIONALLY, and the flag is spent on the VALUE. `host`
+  // starts false and flips true in a layout effect, so a view that painted its
+  // first commit with the feature off would grow a hook on the next render —
+  // which React throws on outright ("rendered more hooks than during the
+  // previous render"). A conditional hook is never worth the render it saves.
+  const peekedKey = usePeekedKey();
+  const peeked = peekOn ? peekedKey : null;
+  const select = (key: string) => {
+    setSelected(key);
+    remember({ ...memory.current, selected: key });
+  };
+  // Full threads fetched by Show more, keyed by task. They REPLACE the three
+  // the listing carried rather than appending to them, so no message is ever
+  // drawn twice.
+  const [loaded, setLoaded] = useState<Record<string, TaskMessage[]>>({});
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const { read, clear, clearAll, carryAll, restoreAll, settleAll } = useReadSet();
+
+  // The latest poll's tasks, readable from ACROSS an await. showMore closes over
+  // the render its button was pressed in, and the question it asks when the fetch
+  // lands — is the whole-task mark still standing? — is a question about what the
+  // server is quoting NOW, so a task one poll stale would answer it about numbers
+  // nobody is looking at any more.
+  const latest = useRef(tasks);
+  useEffect(() => {
+    latest.current = tasks;
+  }, [tasks]);
+
+  // Whether a row draws its folder chip at all, in two halves. The first is the
+  // old rule: a chip every visible row repeats distinguishes nothing
+  // (tasks-lib.spansProjects). The second is what a FILTER changes about that
+  // (Akshil, 2026-08-23) — narrowing to one project makes every row agree,
+  // which used to make the chips vanish; but the chip is now the control that
+  // did the narrowing, and a control that deletes itself on use leaves the
+  // reader with no on-screen answer to "which folder is this" and nothing to
+  // press to get back. So a pinned project keeps its chip, wearing the state.
+  const pinnedKey = pinnedProjects.join("\u0000");
+  const showProject = useMemo(
+    () => spansProjects(tasks) || pinnedKey !== "",
+    [tasks, pinnedKey],
+  );
+
+  // The list's rows: the BOARD's order, flattened (tasks-lib.sortForList, whose
+  // note carries the argument — one ordering function for every view, so the
+  // same tasks cannot read in two sequences depending on which tab is open).
+  // Memoised for the same reason `showProject` is: this runs on every keystroke of
+  // the search box and the answer only moves when the rows do.
+  //
+  // `now` IS a dep, and it has to be (2026-09-15). The old note here said the
+  // order can only change when a run does — but half of what `sortForList` asks
+  // is "is this scheduled for LATER" (tasks-lib.groupByColumn), and that stops
+  // being true with nothing changing at all: a task due at 14:00 belongs in
+  // Upcoming at 13:59 and in a settled lane at 14:01, and the page sat on the
+  // wrong answer until something else happened to re-render it. `useNow` ticks
+  // once a MINUTE and is shared by every reader of that cadence, which is the
+  // resolution the rows print anyway — so this re-sorts sixty times an hour, not
+  // once a second.
+  const now = useNow();
+  const rows = useMemo(() => sortForList(tasks, now), [tasks, now]);
+  /**
+   * THE ROWS' REACT KEYS, and the reason they are not `task.key` any more.
+   *
+   * A message waiting in a folder's line is `pending:<entry>` and becomes its
+   * session id the moment it is dispatched — one task, two names — so a row
+   * keyed on the name unmounted and remounted at the handover and the reader
+   * watched it blink out and come back running (Akshil QA, 2026-09-18).
+   * `taskListKeys` answers with the task's NUMBER where it can vouch that one
+   * number names one row here, and with `task.key` everywhere else; with the
+   * queue off it is `task.key` for every row and nothing has changed.
+   */
+  const queueOn = useProjectQueueEnabled();
+  const rowKeys = useMemo(() => taskListKeys(rows, queueOn), [rows, queueOn]);
+
+  /**
+   * Open or close a task — and, on the way OPEN, fetch the rest of its thread.
+   *
+   * There is no "Show 23 more" button any more (Akshil, 2026-08-18). The chevron
+   * showed three messages and then a dashed button under them, so reading a thread
+   * of twenty-six was two gestures for one intention: a person who expanded a task
+   * asked for the task, not for a sample of it.
+   *
+   * THE CAP WAS NEVER A RENDERING CHOICE, which is why removing it is a fetch and
+   * not a slice. The listing endpoint sends three messages per row on purpose — it
+   * runs for every task on the page, and a full transcript parse per task would not
+   * survive a few hundred of them (server routers/tasks.py `_row`) — so the other
+   * twenty-three genuinely are not in the client's hands when the row is drawn.
+   * The button was the press that went and got them. The press is gone; the trip
+   * still happens, now triggered by the disclosure itself.
+   *
+   * Guarded three ways so it is exactly one trip: only when OPENING, only when the
+   * server's own count says the window is short (threadView `more`, asked without
+   * `loaded` so it means "is the listing truncated?"), and never while a fetch for
+   * this task is already in flight or already landed. A closed-and-reopened task
+   * re-reads nothing — `loaded` outlives the expansion, deliberately, because the
+   * thread it holds is still the thread.
+   */
+  const toggle = (task: Task) => {
+    const opening = !expanded.has(task.key);
+    setExpanded((cur) => toggleExpanded(cur, task.key));
+    if (opening && threadView(task).more && !loaded[task.key] && !loading[task.key]) {
+      void showMore(task);
+    }
+  };
+
+  const showMore = async (task: Task) => {
+    setLoading((cur) => ({ ...cur, [task.key]: true }));
+    setErrors((cur) => {
+      const next = { ...cur };
+      delete next[task.key];
+      return next;
+    });
+    try {
+      const r = await getTaskMessages(task.key);
+      const thread = r.messages ?? [];
+      setLoaded((cur) => ({ ...cur, [task.key]: thread }));
+      // This reply is a READ, and a read can be of a value we have already
+      // overridden: if the reader pressed Mark read (or Open chat) a moment ago,
+      // the server had not applied it when it composed this thread, so 86
+      // messages are about to arrive flagged unread — and `more` is false now, so
+      // nothing ever refetches them. carryAll adopts the standing mark onto them,
+      // and does nothing at all once that mark has expired. Asked against the
+      // freshest task we have, because "is the mark still standing?" is a question
+      // about the newest poll and not about the render this press came from.
+      const fresh = latest.current.find((t) => t.key === task.key) ?? task;
+      carryAll(fresh, thread);
+    } catch (e) {
+      // Said under the thread it belongs to, not as a page banner: the rest of
+      // the list is intact and only this one thread failed to open.
+      //
+      // `loaded` is deliberately left UNSET here, and that is what makes the
+      // failure recoverable rather than terminal: every guard that asks "do we
+      // already have this thread?" still answers no, so the very same call can be
+      // made again. The error line's Retry button is that call (TaskNode
+      // `onRetry`), and this function clears the error on its way back in, so a
+      // retry that succeeds leaves nothing stale behind it.
+      setErrors((cur) => ({ ...cur, [task.key]: (e as Error).message }));
+    } finally {
+      setLoading((cur) => ({ ...cur, [task.key]: false }));
+    }
+  };
+
+  // A row restored from memory was never TOGGLED, so nothing went and got the
+  // rest of its thread — it would sit there showing the listing's three messages
+  // with no button left to ask for the other twenty-three. Same trip the chevron
+  // makes, made once, the first time a task list arrives.
+  const restoredThreads = useRef(false);
+  useEffect(() => {
+    if (restoredThreads.current || tasks.length === 0) return;
+    restoredThreads.current = true;
+    for (const key of memory.current.expanded) {
+      const task = tasks.find((t) => t.key === key);
+      if (task && threadView(task).more) void showMore(task);
+    }
+    // Runs on every poll and does something exactly once — the guard above is
+    // what makes it a restore rather than a refetch loop.
+  }, [tasks]);
+
+  // ---- where the list stood ---------------------------------------------------
+  // `.tasks-list` is its own scroller (styles/tasks.css), so this is one element's
+  // scrollTop and not the window's — which is also why restoring it cannot fight
+  // the explorer's msg-anchor scroll: that happens on a different page entirely.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // How much of the row's right-hand cluster this width can afford. The
+  // scroller is the box that must never grow a horizontal bar, so it is the box
+  // that is measured (shell/row-fit.ts states the rule and why it is not a
+  // breakpoint).
+  const fit = useRowFit(listRef, peekOn, floored);
+  // The offset still owed to the reader, or null once it has been paid (or given
+  // up on). Rows grow as their fetched threads land, so the wanted offset is
+  // often past the end of the list for the first few frames; it is re-applied
+  // every render until the content is tall enough to honour it.
+  const owed = useRef<number | null>(memory.current.scroll || null);
+  // The last offset THIS code set, so a scroll event can be told apart from the
+  // reader's own — theirs cancels the restore, and nothing else does.
+  const settled = useRef<number | null>(null);
+
+  // Is there a list on screen at all? Asked once, up here, because three separate
+  // things below turn on it: when the restore deadline opens, whether an empty
+  // list is worth forgetting an offset over, and the recovery immediately below.
+  const hasRows = tasks.length > 0;
+  const hadRows = useRef(false);
+  if (hasRows) hadRows.current = true;
+
+  // ROWS COME BACK, AND THE OFFSET HAS TO BE WAITING WHEN THEY DO (bugbot,
+  // 2026-08-18). Holding the memory across a failed poll only got the reader
+  // halfway there: `owed` is seeded once at mount and cleared the moment the
+  // restore is paid, so by the time a poll fails there is nothing owed any more.
+  // The rows came back twenty seconds later, the scroller remounted at zero, and
+  // the preserved offset sat in the store with nothing left to read it — the
+  // reader landed at the top, which is the exact outcome preserving the memory
+  // was meant to prevent.
+  //
+  // So a stale empty ARMS the restore again rather than merely not destroying it.
+  // `settled` is reset with it: the scroller that comes back is a new element at
+  // zero, and the offset this code last set belonged to the old one.
+  //
+  // A layout effect, and deliberately ABOVE the one that pays the restore, so
+  // both run in the same commit and in that order — the re-arm lands before the
+  // payer reads `owed`, and the rows are restored in the frame they return in
+  // rather than one frame later.
+  const staleEmptied = useRef(false);
+  if (!hasRows && stale && hadRows.current) staleEmptied.current = true;
+  useLayoutEffect(() => {
+    if (!hasRows || !staleEmptied.current) return;
+    staleEmptied.current = false;
+    owed.current = memory.current.scroll || null;
+    settled.current = null;
+  }, [hasRows]);
+
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (owed.current === null || !el) return;
+    const top = Math.min(owed.current, Math.max(el.scrollHeight - el.clientHeight, 0));
+    if (Math.abs(el.scrollTop - top) > 1) el.scrollTop = top;
+    settled.current = el.scrollTop;
+    if (top >= owed.current - 1) owed.current = null;
+  });
+
+  // The restore window closes on its own. Without this, a list that can never
+  // grow tall enough (rows deleted since the visit) would keep pinning itself to
+  // the bottom on every poll.
+  //
+  // IT OPENS ON THE FIRST ROWS, NOT ON MOUNT (bugbot, 2026-08-18). Tasks arrive
+  // from a fetch, so this component mounts against an empty list and stays that
+  // way for as long as the request takes; a deadline started at mount was
+  // therefore spending most of itself — sometimes all of it, on a cold server or
+  // a slow disk — waiting for the rows it was meant to be measuring. The window
+  // is supposed to be "a few seconds of settling once there is something to
+  // settle", so `hasRows` is what starts the clock.
+  //
+  // It re-arms on every false→true, which is what the stale recovery above needs:
+  // a restore armed again when the rows return needs a deadline of its own, and
+  // the one from the first load is long since spent.
+  useEffect(() => {
+    if (!hasRows) return;
+    const t = setTimeout(() => {
+      owed.current = null;
+    }, RESTORE_WINDOW_MS);
+    return () => clearTimeout(t);
+  }, [hasRows]);
+
+  // One writer for both halves, so the stored row is always whole. Debounced,
+  // because the scroll half fires per frame and this leaves the page by pushState
+  // (an unmount that a dropped write would silently lose is not worth the risk of
+  // relying on).
+  const writeTimer = useRef<number | null>(null);
+  const remember = (next: ListMemory) => {
+    memory.current = next;
+    if (writeTimer.current !== null) clearTimeout(writeTimer.current);
+    writeTimer.current = window.setTimeout(() => {
+      writeTimer.current = null;
+      writeListMemory(memory.current);
+    }, WRITE_DEBOUNCE_MS);
+  };
+  useEffect(
+    () => () => {
+      if (writeTimer.current !== null) {
+        clearTimeout(writeTimer.current);
+        writeListMemory(memory.current);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    remember({ ...memory.current, expanded: [...expanded] });
+  }, [expanded]);
+
+  // A wheel out in the empty band either side of the 1050px column reaches the
+  // list (useMarginWheel — shared with the Cards wall, and the history of why
+  // the geometry is left alone is written there).
+  useMarginWheel(listRef);
+
+  const onScroll = () => {
+    const el = listRef.current;
+    if (!el) return;
+    // Whose scroll was this? The layout effect above records every offset IT
+    // sets in `settled`, so an event landing on that exact offset is the echo of
+    // this code's own write and an event landing anywhere else is the reader.
+    const mine = settled.current !== null && Math.abs(el.scrollTop - settled.current) <= 1;
+    settled.current = el.scrollTop;
+    // A RESTORE IN PROGRESS WRITES NOTHING (bugbot, 2026-08-18). The restore is
+    // paid in instalments — the wanted offset is past the end of a list whose
+    // rows are still growing as their threads land, so the layout effect gets
+    // partway there, and partway again, until the content is tall enough. Every
+    // one of those partial offsets used to be saved over the real one, so a
+    // reader who left at 1200px and came back to a list that momentarily only
+    // reached 300 had their position quietly rewritten to 300 — the memory
+    // destroyed by the act of restoring it. Only the reader's own scroll is a
+    // statement about where they want to be, so only the reader's own is stored.
+    if (mine) return;
+    // And their scroll means they have chosen where to be: the owed offset stops
+    // being owed.
+    owed.current = null;
+    remember({ ...memory.current, scroll: el.scrollTop });
+  };
+
+  // AN EMPTY LIST IS A POSITION TOO, and it is the top (bugbot, 2026-08-18).
+  // Typing in the search box until nothing matches unmounts the scroller, and the
+  // scroller is the only thing that reports scrolling — so the last offset from
+  // before the filter narrowed just sat in the store, describing a list that is
+  // no longer on screen. Clearing the search then restored it, and the reader who
+  // had scrolled to the top to start typing was thrown back down the list by a
+  // number they had stopped meaning several keystrokes ago. There is nothing
+  // below an empty state to be scrolled to, so the honest memory is zero, and
+  // nothing is owed either: whatever restore was pending has nowhere to land.
+  //
+  // ONLY FOR A LIST THAT EMPTIED, never for one that has not filled yet: this
+  // component mounts against an empty `tasks` while the fetch is out, and zeroing
+  // the memory there would erase the very offset this whole section exists to pay
+  // back, before the rows it belongs to have even arrived.
+  //
+  // AND ONLY FOR AN EMPTINESS THE SERVER MEANT (bugbot, 2026-08-18). A failed
+  // poll also sets `tasks` to `[]` — the page keeps its shape and says "Tasks
+  // could not be loaded" over an empty list (Scheduled `tasksFailed`) — so a
+  // single dropped request in the 20s poll used to be indistinguishable from a
+  // filter that matched nothing, and permanently forgot where the reader was.
+  // That is the worst possible moment to forget it: the rows are coming back in
+  // twenty seconds, and the reader is about to be dropped at the top of a list
+  // they were halfway down. `stale` is the poll saying "this empty is mine, not
+  // the data's", and an empty we cannot vouch for changes nothing at all — it
+  // re-arms the restore instead, up where `staleEmptied` is set.
+  useEffect(() => {
+    if (hasRows || stale || !hadRows.current) return;
+    owed.current = null;
+    settled.current = null;
+    remember({ ...memory.current, scroll: 0 });
+  }, [hasRows, stale]);
+
+  if (!hasRows) {
+    return <p className="schedule-tv-empty">{emptyLabel}</p>;
+  }
+
+  return (
+    <>
+      {/* `data-fit` is how many of the row's meta marks have had to go for the
+          rows to fit the width the list actually has — measured, never a
+          breakpoint (shell/row-fit.ts states the rule and the reason). The
+          stylesheet does the hiding; this only says how far down the ladder we
+          are. */}
+      <div
+        className="tasks-list"
+        ref={listRef}
+        {...(peekOn ? { "data-fit": fit.level } : {})}
+        // …AND WHAT THE ROWS WOULD NEED IF NOTHING FOLDED, which is what the
+        // content is held at once the pane is floored (styles/task-peek.css
+        // reads `--tasks-row-need` beside `--tasks-floor` and takes the larger).
+        // Written at every width, read only at the floor: a variable the
+        // stylesheet ignores costs nothing, and writing it only when floored
+        // would mean the first floored frame had no number yet.
+        style={peekOn ? ({ "--tasks-row-need": `${fit.need}px` } as React.CSSProperties) : undefined}
+        onScroll={onScroll}
+      >
+      {/* THE SCROLLER ABOVE IS THE BORDERED BOX, and this frame is the plain
+          wrapper inside it (styles/tasks.css): the bar runs down the inside of
+          the border, the way a scrolling table's does (Akshil, 2026-09-16).
+
+          The frame stays as an element because it is the one the rows are
+          addressed through — the end rows' corner radii, the hairlines between
+          nodes, the floored pane's horizontal-bar clearance — and because the
+          Explorer's Claude side panel renders it on its own, where it still
+          draws the border itself (apps/claude/ui/Lists.tsx). */}
+      <div className="tasks-list-frame">
+      {/* ORDERED BY STATUS, NOT GROUPED BY IT (tasks-lib.sortForList): Upcoming,
+          In Progress, Needs attention, Blocked, Done, Archive — the Board's own
+          lanes read left to right, and inside each the lane's own order (drafts
+          first, then newest run first; Upcoming soonest first), with no headers,
+          dividers or counts between them.
+
+          The grouping is a SORT and nothing more (Akshil, 2026-08-18). Headers
+          lived here for a round and were wrong on a list: the Board's lanes are
+          a fixed frame, so a lane header labels the frame and earns its ink,
+          where a list has no frame and five headers are five interruptions in
+          the one column a person is scanning. The order already says what they
+          said. */}
+      {rows.map((task, ix) => (
+        <TaskNode
+          key={rowKeys[ix]}
+          task={task}
+          home={home}
+          showProject={showProject}
+          folderMissing={missing?.has(taskFolder(task)) ?? false}
+          open={expanded.has(task.key)}
+          peekOn={peekOn}
+          peeked={peeked === task.key}
+          selected={selected === task.key}
+          onSelect={() => select(task.key)}
+          onToggle={() => toggle(task)}
+          onRetry={() => void showMore(task)}
+          loaded={loaded[task.key]}
+          loading={!!loading[task.key]}
+          error={errors[task.key]}
+          onEditEntry={onEditEntry}
+          onOpenDraft={onOpenDraft}
+          onOpenBoundDraft={onOpenBoundDraft}
+          onReload={onReload}
+          onQueued={onQueued}
+          onPickProject={onPickProject}
+          pinned={pinnedProjects.includes(task.project)}
+          onPickDraft={onPickDraft}
+          draftOn={draftOn}
+          read={read}
+          onRead={clear}
+          onReadAll={clearAll}
+          onUnreadAll={restoreAll}
+          onSettleAll={settleAll}
+        />
+      ))}
+      </div>
+      </div>
+    </>
+  );
+}
+
+/**
+ * THE LIST ROW, LENT OUT — the Tasks page's own row skin, drawn for a list that
+ * is not the Tasks page (`apps/claude`'s "Recent chats" panel on the chat
+ * landing, .claude-design/design.md §B).
+ *
+ * A WRAPPER RATHER THAN A SECOND ROW: the two lists have to look and read the
+ * same, and a copied row is a copy that drifts — the status ring, the file mark,
+ * the schedule mark and the message count are decided once here and must stay
+ * decided once. So this spends `TaskNode` in its `chat` variant and answers
+ * every prop the Tasks page's own machinery needs with the nothing that variant
+ * asks of it: no expanded set, no read set, no page note, no filter chips.
+ *
+ * What the variant takes OFF the row is listed on `variant` below; what it takes
+ * OVER is the press, because "open this chat" is the host's answer here and not
+ * a URL this file can build — the landing opens a conversation IN PLACE when the
+ * row is about the pane's own file, and that has no href at all.
+ */
+export function TaskRowItem({
+  task,
+  home = "",
+  href = null,
+  onPress,
+  onQueued,
+  onReload,
+}: {
+  task: Task;
+  /** For the marks that spell a path with `~` (the file mark's caption). */
+  home?: string;
+  /** Where a ⌘-click, a middle click or "Open in new tab" goes, or null when the
+   *  press has no URL because it stays on this page. */
+  href?: string | null;
+  /** The row's press. OMITTED is what makes the row inert — a row with nowhere
+   *  to go says so (`.tasks-row.is-inert`), exactly as on the Tasks page. */
+  onPress?: () => void;
+  /**
+   * THE TWO HANDLES A QUEUE VERB NEEDS, and the reason Run next did nothing
+   * here (Akshil QA, 2026-09-16).
+   *
+   * `TaskNode.skip` is one call and two answers: the CLAIM to paint until the
+   * server speaks (`onQueued`, tasks-lib.skippedOverride) and the re-read that
+   * fetches the truth (`onReload`). Both were unforwarded, so a borrowed row's
+   * skip put a request on the wire and then had no way to show that anything
+   * had happened — the row could only change on whatever full listing came
+   * next, up to a poll later, which reads as a dead button.
+   *
+   * OPTIONAL, like `onPress`: a host with no claim store of its own (a static
+   * render, a test) is still handed a working row — it just waits for the
+   * listing, which is what every borrowed row did before.
+   */
+  onQueued?: (override: QueueOverride) => void;
+  onReload?: () => void;
+}) {
+  return (
+    <TaskNode
+      task={task}
+      home={home}
+      showProject={false}
+      folderMissing={false}
+      open={false}
+      selected={false}
+      onSelect={NO_OP}
+      onToggle={NO_OP}
+      loading={false}
+      onRetry={NO_OP}
+      read={NO_READ}
+      onRead={NO_OP}
+      onReadAll={NO_OP}
+      onUnreadAll={NO_OP}
+      onSettleAll={NO_OP}
+      variant="chat"
+      chatHref={href}
+      {...(onPress ? { onChatPress: onPress } : {})}
+      {...(onQueued ? { onQueued } : {})}
+      {...(onReload ? { onReload } : {})}
+    />
+  );
+}
+
+/** The `chat` variant's answers to the state only the Tasks page keeps. One set
+ *  and one function at module scope, so a borrowed row is not handed a fresh
+ *  identity on every render of the list above it. */
+const NO_READ: Set<string> = new Set<string>();
+const NO_OP = () => {};
+
+function TaskNode({
+  task,
+  home,
+  showProject,
+  folderMissing,
+  open: requested,
+  variant = "task",
+  chatHref = null,
+  onChatPress,
+  peekOn = false,
+  peeked = false,
+  selected,
+  onSelect,
+  onToggle,
+  loaded,
+  loading,
+  onRetry,
+  error,
+  onEditEntry,
+  onOpenDraft,
+  onOpenBoundDraft,
+  onReload,
+  onQueued,
+  onPickProject,
+  pinned,
+  onPickDraft,
+  draftOn,
+  read,
+  onRead,
+  onReadAll,
+  onUnreadAll,
+  onSettleAll,
+}: {
+  task: Task;
+  home: string;
+  /** Whether the folder chip is worth drawing. The LIST's answer, not this row's:
+   * a chip that every visible row repeats distinguishes nothing (spansProjects). */
+  showProject: boolean;
+  /** The task's folder is gone from the disk (useMissingFolders). The row then
+   * has nowhere to go: its press raises a toast instead of leaving for an
+   * Explorer that can only answer with a stat error. */
+  folderMissing: boolean;
+  /** What the List's expanded set says about this row. Whether it is honoured is
+   * this component's decision — see `expandable` below. */
+  open: boolean;
+  /**
+   * WHOSE LIST THIS ROW IS IN, and the only thing it changes is what the row
+   * does NOT have (`TaskRowItem` above is the one caller that asks for anything
+   * but `"task"`, and the Tasks page never passes it at all).
+   *
+   * `"chat"` takes three things off the row, each because the surface borrowing
+   * it has no answer for them: the disclosure AND ITS GUTTER (a landing list is
+   * not an accordion — there is no thread fetch behind it, and with no chevron
+   * on any row of the list there is no rail for the empty slot to hold open),
+   * the folder chip and the draft chip's filter arm
+   * (`showProject`/`onPickProject`/`onPickDraft` are the List's own, and the
+   * borrowed list has no filters to set), and the side peek (`peekOn`, off by
+   * default).
+   *
+   * It takes NOTHING ELSE off: the id chip, the status ring, the outcome pill,
+   * the title line AND the Archive press in the mark slot (Akshil, 2026-09-21 —
+   * it was withheld for a round) are the same marks in the same seats, because
+   * the two lists are meant to be one row (Akshil, 2026-09-14).
+   *
+   * And it takes ONE thing over: the press. See `chatHref` / `onChatPress`.
+   */
+  variant?: "task" | "chat";
+  /** `chat` variant only: where the row's press goes as a URL, or null when it
+   * stays on the host's own page and there is nothing to link to. Same job as
+   * `href` below, which is the `task` variant's own answer. */
+  chatHref?: string | null;
+  /** `chat` variant only: the press itself. Absent = an inert row. */
+  onChatPress?: () => void;
+  /** The side peek exists on this page at all (`task_peek_enabled`). Off, this
+   *  row renders exactly as it did before the feature: no walk attribute, no
+   *  halo, no quick door. */
+  peekOn?: boolean;
+  /** This row's task is the one in the side peek: it wears the halo and its
+   * hover fill stands down (styles/task-peek.css). A stronger claim than
+   * `selected` below and deliberately a different one — `selected` is "where
+   * you last went", this is "what is open beside you right now". */
+  peeked?: boolean;
+  /** Is this the row the reader last opened a conversation from? The List owns
+   * the answer (one row at a time, remembered across the trip to the chat); the
+   * row only wears it. */
+  selected: boolean;
+  /** Say that this row is now that one. Spent by every gesture that LEAVES the
+   * page — the row's press and a message row's — and by nothing else: expanding
+   * a task is reading it in place, not going anywhere. */
+  onSelect: () => void;
+  onToggle: () => void;
+  loaded?: TaskMessage[];
+  loading: boolean;
+  /** Fetch this task's thread again after a failure. The SAME call the disclosure
+   * makes — not a second path to the same endpoint, because two ways in are two
+   * ways to disagree about the guards. */
+  onRetry: () => void;
+  error?: string;
+  onEditEntry?: (entryId: string) => void;
+  /** See TaskList's own prop: the draft row's press. */
+  onOpenDraft?: (task: Task) => void;
+  /** See TaskList's own prop: the thread's draft line, when the words are in the
+   *  form bound to this conversation rather than in its composer. */
+  onOpenBoundDraft?: (task: Task) => void;
+  onReload?: () => void;
+  /** See TaskList's own `onQueued`. */
+  onQueued?: (override: QueueOverride) => void;
+  /** Filter the page to this row's folder — the List's handler, passed through
+   * untouched. See TaskList's own `onPickProject`. */
+  onPickProject?: (project: string) => void;
+  /** Is the page filtered to THIS row's folder? The chip wears it, so the
+   * control that narrowed the list is visibly the one that is on. */
+  pinned?: boolean;
+  /** Filter the page to the rows carrying unsent words — see TaskList's own
+   *  `onPickDraft`. Passed through untouched, like the folder's. */
+  onPickDraft?: () => void;
+  /** Is that filter on? The chip wears it, for the folder chip's reason. */
+  draftOn?: boolean;
+  read: Set<string>;
+  onRead: (taskKey: string, m: TaskMessage) => void;
+  /** Clear this whole task's unread locally — the optimistic half of Mark read,
+   * paired with the one server call the button makes. `held` is everything this
+   * thread has in its hands (tasks-lib.heldMessages), which after Show more is
+   * all of it. */
+  onReadAll: (task: Task, held?: TaskMessage[]) => void;
+  /** Put it back: the write was refused, so the dots and the button return. */
+  onUnreadAll: (taskKey: string, held: TaskMessage[]) => void;
+  /** Reconcile the optimism against the server's own answer to the mark. */
+  onSettleAll: (
+    taskKey: string,
+    held: TaskMessage[],
+    answer: { unread: number },
+  ) => void;
+}) {
+  // Is this row an accordion at all? tasks-lib.isExpandable asks the server's
+  // message_count, because a thread of one message has nothing under it but a
+  // restatement of this row's own title.
+  //
+  // `open` is DERIVED from it rather than merely rendered around it: the guard
+  // belongs in the predicate, so a row that is in the List's expanded set and then
+  // stops being expandable closes itself instead of being stuck open with no
+  // control to close it. That cannot happen today (a thread never shrinks), but
+  // "cannot happen" is not a thing to leave a render depending on.
+  // A PROVISIONAL row is never an accordion: its `message_count` is a default
+  // (tasks-lib.provisionalTasks), not a count, so "does this thread have more
+  // than one message in it" is a question pulse cannot answer yet. The gutter
+  // still draws — only the chevron goes — which is the same placeholder a
+  // one-message row already gets, and the row becomes expandable on its own
+  // when the listing lands and replaces it.
+  // …AND NEITHER IS A BORROWED ROW (see `variant`): the surface drawing it has
+  // no thread fetch behind it — no `loaded`, no `onRetry`, no expanded set — so
+  // a chevron there would be a control whose only possible answer is an empty
+  // accordion.
+  const chatVariant = variant === "chat";
+  const expandable = isExpandable(task) && !task.provisional && !chatVariant;
+  const open = expandable && requested;
+  const view = threadView(task, loaded);
+  // Everything this thread holds, one list: the listing window before Show more,
+  // the whole fetched thread after it, and either way the listing's fresher copy
+  // of anything in both. The count, the button's intent, the mark and the mark's
+  // rollback are all asked of THIS — one set, so the number on the row and the
+  // dots under it cannot be answers about two different lists.
+  const held = heldMessages(task, loaded);
+  /**
+   * THE BORROWED ROW'S OWN OPTIMISM (see `variant`).
+   *
+   * The Tasks page clears a task's unread through the List's shared read set —
+   * `onReadAll` plants it, `onUnreadAll` takes it back, `onSettleAll`
+   * reconciles it — and a row lent to another surface has none of those: it is
+   * handed `NO_READ` and three no-ops, so without this its ring would stay
+   * filled from the press until the next listing landed, on a page whose whole
+   * point is that the press leaves it.
+   *
+   * So the row keeps the ONE fact it needs: the count it cleared. The ring reads
+   * hollow only while the live count is still exactly that, which is the same
+   * reconciliation `onSettleAll` does in one line —
+   *
+   *   * the server catches up and the live count is 0: hollow either way;
+   *   * something ARRIVES while the write is in flight (or after it): the live
+   *     count is no longer the one that was cleared, so the row goes back to
+   *     reporting it rather than swallowing it;
+   *   * the write is REFUSED: the press puts it back itself (`activate`).
+   *
+   * `null` is "nothing cleared here", which is every row on the Tasks page.
+   */
+  const [chatCleared, setChatCleared] = useState<number | null>(null);
+  const live = taskUnread(task, read, held);
+  const unread = chatCleared !== null && live === chatCleared ? 0 : live;
+  // AND IT LETS GO once the server has said the same thing. The stand-in above
+  // is "the listing still says N, and N is what I just cleared" — a value
+  // comparison, because this row has no read set to diff. Left standing after
+  // the listing settles to 0 it goes on matching, so a LATER burst of exactly N
+  // new messages would read as the same clear and the ring would stay hollow
+  // over unread work. Zero is the server agreeing, which is the moment the
+  // guess stops being needed.
+  useEffect(() => {
+    if (chatCleared !== null && live === 0) setChatCleared(null);
+  }, [chatCleared, live]);
+  // What the thread holds AFTER an await, which is not what `held` above closed
+  // over: markSeen is written against the render its button was pressed in, and a
+  // Show more that lands while the write is in flight adopts the mark onto the
+  // rest of the thread (useReadSet.carryAll). A rollback that could not see those
+  // ids would put the count back over dots it had no key to relight.
+  const heldNow = useRef(held);
+  // Every render, deliberately: `held` is a fresh list each time and this ref is
+  // only ever read from inside an in-flight write.
+  useEffect(() => {
+    heldNow.current = held;
+  });
+  // Open chat. Where it goes and whether going there also clears the thread —
+  // one answer, from the same function the Board card asks (openThreadIntent),
+  // because it is the same gesture to the same href and must come back with the
+  // same badge. Null means no session yet (§5): no button at all, so nothing is
+  // offered and nothing is marked. Asked with the count this row is DRAWING, so
+  // a second press on an already-cleared task posts nothing.
+  // No chat arm for a folder that is gone: the thread's URL is the Explorer at
+  // that folder with the Claude pane, and the Explorer would answer with a raw
+  // stat error and no pane. The row's press says so instead (see `activate`).
+  //
+  // …AND NONE FOR A DRAFT, WHATEVER IT NAMES (Akshil, 2026-09-12). A draft row
+  // opens the New task form and nothing else (`openDraft` below), and a draft
+  // bound to a conversation is the first one that could ALSO have answered
+  // `taskHref` — it carries the session it is a message to. That would have
+  // made the row draw a real `<a href>` at its chat: the plain click would still
+  // open the form (the arm order decides it), but ⌘-click, middle click and
+  // "Open in new tab" would go somewhere else entirely, which is the one mark
+  // promising two presses this page keeps refusing. Asked here rather than in
+  // `taskHref`, because it is this ROW's rule about its own press.
+  const chat = folderMissing || isDraftTask(task)
+    ? null
+    : openThreadIntent(task, unread);
+  // THE ONE LINE THIS ROW IS TITLED BY: the reader's newest message, or the
+  // task's name when nothing has been said. One function decides it for the
+  // List, the Board and the Cards wall (tasks-lib.cardTitleLine), so a
+  // fallback cannot drift between views.
+  const line = cardTitleLine(task);
+  const label = line.text || "(untitled)";
+  // Whether this row's work is still ahead of it, which is the one thing that
+  // greys its title. tasks-lib.isUpcomingTask owns both halves of the question
+  // (the lane, and whether its next run has already gone by).
+  // …AND A DRAFT ROW READS THE SAME (Akshil, 2026-09-15: "title of drafts
+  // should be the same color as title of upcoming"). A draft is words nobody
+  // has sent yet — work even further ahead than a scheduled run — and it sits
+  // in the Upcoming lane; a full-strength title there made it the loudest row
+  // in a section whose whole point is to recede.
+  const ahead = isUpcomingTask(task) || isDraftTask(task);
+  // The file this task is about, or "" for a task about its folder — the mark
+  // after the title. tasks-lib.taskFile owns the test.
+  const taskFile_ = taskFile(task);
+  // The scheduled run a ONE-MESSAGE UPCOMING row's press edits when it has no
+  // conversation to open instead, because the instruction that has not run yet is
+  // the only content such a row has. tasks-lib.upcomingEditEntry owns all three conditions — the
+  // lane, the one message, and which entry — and it is asked of `held`, the same
+  // list `sole` is. Gated on `onEditEntry` here because without it there is no form
+  // to open (a thread with no edit affordance is read-only), and then the press
+  // falls through to the arms below.
+  const edit = onEditEntry ? upcomingEditEntry(task, held) : null;
+  // A DRAFT ROW'S PRESS OPENS THE NEW TASK FORM — every draft row, both kinds
+  // (Akshil, 2026-09-12: "a row without a session is a draft and always opens
+  // the New Task modal; a row with a session always opens the chat"). It
+  // outranks every other arm below because a draft has nothing else — no
+  // session to open, no entry to edit — and the rule it states is the row's, so
+  // `isDraftTask` is the whole question here: WHICH kind it is decides only
+  // what the modal is seeded from, and that is Scheduled.openDraft's business,
+  // not this row's. A never-sent chat used to be routed past this arm into a
+  // navigation, which made one mark on the page promise two different presses.
+  const openDraft = onOpenDraft && isDraftTask(task) ? onOpenDraft : null;
+  // When this task runs next, or when it last ran — one time at the end of every
+  // row, beside the folder. Which of the two is tasks-lib.taskWhen's decision (it
+  // reads LANE_SORTS, the same map the Board's lanes are ordered by), and null when
+  // the task has neither, in which case nothing is drawn.
+  // ON THE SHARED MINUTE CLOCK (`useNow`), not on `Date.now()` read once at
+  // mount: this cell is the one thing in the row whose words go stale by
+  // themselves, and a chat left open for an hour still said "2m ago". Shared so
+  // every row in a list re-letters in ONE paint — two rows flipping "59m ago" to
+  // "1h ago" a second apart is two cells of one column disagreeing.
+  const now = useNow();
+  const when = taskWhen(task, now);
+  // A run still ahead — the mark after the title, clock or circle arrows
+  // (tasks-lib.scheduledMark). No chip beside the time any more (Akshil,
+  // 2026-09-11: "we don't need to show time 2 times on the right side").
+  const sched = scheduledMark(task);
+  /** …and the OTHER sentence a not-moving row can carry: the plan's window,
+   *  named and dated ("Usage limit · resumes 4:00 AM"). "" on every row the usage
+   *  limit did not stop. */
+  const limit = usageLimitCaption(task);
+  /** IS THE QUEUE ON. Only the thread's per-message word needs it — every other
+   *  `queued` on this row comes from the server's status, which is never written
+   *  while the flag is down, while `messageState` derives its own from "pending
+   *  and past due", which is true in either build (🔴 review 2026-09-12). */
+  const queueOn = useProjectQueueEnabled();
+  // The `Draft` chip — this task's unsent composer text, or the row's own
+  // unfinished form. tasks-lib.draftTag owns both cases and the tooltip.
+  // Hidden while the side peek holds this row's draft (tasks-lib.draftHeldByPeek).
+  const heldInPeek = draftHeldByPeek(task, peeked);
+  const draft = heldInPeek ? null : draftTag(task);
+  // Run now / Re-run. tasks-lib decides all of it — whether it is offered,
+  // which message it acts on, and WHICH CALL that is. The run-now half comes
+  // from the same function the drag asks (runNowIntent), so the button and the
+  // drop can never fire different messages; the re-send half is the case the
+  // drag deliberately does not have, because a gesture cannot consent to
+  // creating work that was never scheduled.
+  //
+  // NOT ON AN ARCHIVED ROW, and neither is anything else below (`showsRowActions`):
+  // a task somebody put away has one decision left against it, and that is
+  // whether it is still put away. Offering Re-run next to Unarchive would also
+  // invite the one misread this whole gesture is written against — that coming
+  // back out of Archive runs something.
+  const acts = showsRowActions(task);
+  const run = acts ? taskRunIntent(task) : null;
+  // FILING, either direction. The Board's drop onto — or out of — the Archive
+  // lane, reachable without switching view, expanding a collapsed lane and
+  // dragging, which is what those moves used to cost. tasks-lib decides
+  // everything, by asking dropAction the same questions the drag does, so a row
+  // draws the button exactly when the card would take the drop.
+  //
+  // ON A BORROWED ROW TOO (Akshil, 2026-09-21: "when I hover over the status
+  // allow me to archive, similar to the list item view in tasks page"). It was
+  // withheld from the chat variant for a round, on the argument that "put this
+  // away" sat one flick from "open the chat I was just in" — but Recent chats
+  // is the list a reader tidies from, and a row that cannot be filed there sends
+  // them to the Tasks page for a gesture this same row already knows. Same
+  // slot, same reveal, same verb: `.tasks-act` on hover over the status ring.
+  const file = filingIntent(task);
+  // Mark read — the whole task at once, so clearing 89 unread messages is not 89
+  // clicks through 89 transcripts. Asked of the count this row is DRAWING, so
+  // the button leaves on its own press rather than on the next poll.
+  const seen = acts ? markReadIntent(task, read, held) : null;
+
+  // The one cancel in flight, by message id, and whatever the server said about
+  // the last one that failed. Per MESSAGE rather than per thread: the sentence
+  // is about one row and belongs under it.
+  const [cancelling, setCancelling] = useState("");
+  const [cancelErrors, setCancelErrors] = useState<Record<string, string>>({});
+  // The task-level actions' own pair — run-now/re-send and archive share it.
+  // Per TASK, unlike cancel's: these buttons are on the task row and their
+  // refusals are about the task, not about one message inside it. ONE note
+  // line, because the two are one press apart and two stacked sentences under a
+  // row would leave the reader working out which press each answered.
+  const [acting, setActing] = useState(false);
+  const [note, setNote] = useState("");
+  // THE FILING PRESS'S RECEIPT (Akshil, 2026-08-19). Clicking Archive keeps the
+  // pointer on the row, and the hover swap above kept right on swapping: the slot
+  // instantly redrew the OPPOSITE verb (Unarchive), so the press's only visible
+  // outcome was an icon flip — no sign the action landed at all. CSS cannot say
+  // "hovered, but the hover already spent its press", so the row says it: this
+  // flag goes up on the press and comes down when the pointer LEAVES the row
+  // (`onMouseLeave` below), and while it is up `.is-refiled` (tasks.css) hands
+  // the mark slot back to the STATUS RING — now drawing the new state, which is
+  // the confirmation — instead of the reveal. Leave and return, and the hover
+  // offers the (now opposite) action again, exactly like any other row.
+  const [refiled, setRefiled] = useState(false);
+  // The delete target, or null. LOCAL to the row (design.md §2: "each surface
+  // owns its own dialog"): the modal is one task's question, the row already
+  // holds that task, and lifting the state to the List would hand every row a
+  // prop it spends once.
+  const [erasing, setErasing] = useState(false);
+  // The discard in flight. Only to disarm a second press — the row itself is
+  // already off the page by then (`dropListingKeys`), so there is nothing here
+  // to spin or grey out for longer than the press.
+  const [discarding, setDiscarding] = useState(false);
+  // WHETHER THE STRIP HIDES THE SUFFIX MARKS (Akshil, 2026-09-16: "show the
+  // icon only when the overlay hides it"). Measured, never guessed from a
+  // width (see responsive-collision rule): on pointer-enter, the inline
+  // marks' right edge against where the strip's fade begins — Open's left
+  // edge less the fade — so the answer does not depend on whether the copies
+  // themselves are drawn, and cannot oscillate.
+  const [marksUnderStrip, setMarksUnderStrip] = useState(false);
+  const measureStrip = (row: HTMLElement) => {
+    const marks = row.querySelectorAll<HTMLElement>(
+      ":scope > .tasks-row-file, :scope > .tasks-row-sched",
+    );
+    const door = row.querySelector<HTMLElement>(".tasks-acts .tasks-act--page");
+    if (!marks.length || !door) {
+      if (marksUnderStrip) setMarksUnderStrip(false);
+      return;
+    }
+    const fadeLeft = door.getBoundingClientRect().left - STRIP_FADE_PX;
+    let under = false;
+    marks.forEach((m) => {
+      if (m.getBoundingClientRect().right > fadeLeft) under = true;
+    });
+    if (under !== marksUnderStrip) setMarksUnderStrip(under);
+  };
+
+  const runNow = async (intent: TaskRunIntent) => {
+    setActing(true);
+    setNote("");
+    try {
+      // Which call is not decided here — `kind` came out of tasks-lib, and
+      // performRun above is the one place it is spent, shared with the Board's
+      // card so the two views cannot mean different things by "Re-run". Re-send
+      // answers 200 with a `note` when the new message is queued rather than away
+      // (its conversation is mid-turn), which is news of the same quiet kind as
+      // the refusal below.
+      const said = await performRun(intent);
+      if (said.note) setNote(said.note);
+      // The project queue held it instead of sending it (performRun): paint the
+      // row where it actually stands, and say so — a Run now that quietly left
+      // the row Upcoming would read as a press that did nothing.
+      if (said.queued) {
+        onQueued?.({ ...said.queued, key: task.key });
+        setNote(`Waiting — ${queueCaption({ ...task, ...said.queued })?.text ?? QUEUED_WORD}.`);
+      }
+    } catch (e) {
+      // The server's own sentence, verbatim. Its common refusal is a 409
+      // because this conversation already has a turn open — two `claude
+      // --resume` processes on one transcript is the thing that must never
+      // happen — and that reads as "wait", not as "broken", which is why it is
+      // said in the quiet note the board's drag already uses rather than in the
+      // red line a failed cancel gets.
+      setNote((e as Error).message);
+    } finally {
+      setActing(false);
+      onReload?.();
+    }
+  };
+
+  // FORCE START: this row's oldest waiting message, run now beside whatever
+  // holds its folder. It NEVER interrupts that run — the holder keeps the folder
+  // — and it does not reorder the line either; it leaves it.
+  //
+  // NO OPTIMISTIC PAINT (`performForceStart`): the row's status is what changes
+  // and the listing is what says so, so this asks for the re-read every other
+  // performer here ends with and lets one lap draw it.
+  const force = async () => {
+    setActing(true);
+    setNote("");
+    try {
+      await performForceStart(task);
+    } catch (e) {
+      // Usually a 409: the conversation already has a turn open, which reads as
+      // "wait", not as "broken" — the quiet note, like run-now's above.
+      setNote((e as Error).message);
+    } finally {
+      setActing(false);
+      onReload?.();
+    }
+  };
+
+  // Filing, either direction. One call each, and the same ones the board's drops
+  // make: the server cancels the work and files the session going in, and drops
+  // the filing coming out, so this side composes nothing but the sentence.
+  const refile = async (intent: FilingIntent) => {
+    setActing(true);
+    setNote("");
+    // On the PRESS, not on the answer: the ring under the suppressed button is
+    // this press's feedback either way — the new state when the call lands, the
+    // unchanged one (plus the note below) when the server refuses. Both
+    // directions, deliberately: Unarchive under a resting pointer flipped to
+    // Archive just as instantly.
+    setRefiled(true);
+    try {
+      if (intent.kind === "archive") {
+        await archiveTask(task.key);
+      } else {
+        // Silent on success (see performUnarchive): the ring is the receipt.
+        await performUnarchive(task.key);
+      }
+    } catch (e) {
+      // The server's own sentence, in the same quiet line run-now uses. A
+      // refusal here is news, not a fault: nothing was destroyed either way,
+      // which is the whole point of archiving rather than deleting.
+      setNote((e as Error).message);
+    } finally {
+      setActing(false);
+      // The row has to move lane (or come back), so re-read either way.
+      onReload?.();
+    }
+  };
+
+  // Mark the whole task read. The local set goes FIRST and unconditionally: the
+  // dots and the count are what the press is about, and the page polls on a 20s
+  // interval, so waiting for the round trip would leave a row that looks like it
+  // ignored the click. The server call is one request for the whole thread
+  // (api.markWholeTaskRead) rather than one per message.
+  //
+  // THE OPTIMISM IS THEN RECONCILED, which is the part that was missing. It used
+  // to be planted and never revisited, so a refused write left this row looking
+  // read with its own Mark read button gone — no dots, no count, no retry — and
+  // the comment here claimed the next poll would restore the truth. It could
+  // not: the local mark outranked every poll for as long as the List stayed
+  // mounted. So:
+  //
+  //   * a refusal takes the mark back (dots, count and button return) and says
+  //     what the server said;
+  //   * a 200 that still reports unread means something arrived while the
+  //     request was in flight, and that wins too — the row goes back to
+  //     reporting it rather than swallowing it;
+  //   * and everything the mark DID cover stays cleared, instantly, which is
+  //     the 20 seconds this whole mechanism exists to hide.
+  //
+  // Still no onReload: the count is already right locally, and a reload would
+  // repaint every row in the list to say the one thing this row has said.
+  const markSeen = async () => {
+    // Captured before the await: `held` and `task` can both be replaced by a
+    // poll while the request is in flight, and a rollback has to remove the ids
+    // the press actually wrote. Plus whatever the thread holds by the time the
+    // answer lands (heldNow) — a Show more that arrived meanwhile carried this
+    // very mark onto the rest of the thread, and those ids are the press's too.
+    const wrote = held;
+    const rollback = () => [...wrote, ...heldNow.current];
+    setActing(true);
+    setNote("");
+    onReadAll(task, held);
+    try {
+      const answer = await markWholeTaskRead(task.key);
+      if (answer.unread > 0) {
+        onSettleAll(task.key, rollback(), answer);
+        // News, not a fault — hence the quiet note the other row actions use.
+        setNote(
+          answer.unread === 1
+            ? "1 message arrived while this was marking, and is still unread."
+            : `${answer.unread} messages arrived while this was marking, and are still unread.`,
+        );
+      }
+    } catch (e) {
+      onUnreadAll(task.key, rollback());
+      setNote((e as Error).message);
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const openMessage = (m: TaskMessage) => {
+    // The same wall the task row's chat arm meets: a turn's URL is the Explorer
+    // at a folder that is gone (Bugbot, #1023 — the message rows still opened
+    // it). Say so, and mark nothing: nothing was shown.
+    if (folderMissing) {
+      toastMissingFolder();
+      return;
+    }
+    onRead(task.key, m);
+    const to = messageHref(task, m);
+    if (!to) return;
+    // THE PEEK TAKES IT, WITH THE TURN NAMED. A message row addresses something
+    // smaller than a task — one turn of the conversation — and the panel can
+    // show exactly that: the same `msg=` anchor the Explorer route carries,
+    // handed to the chat instead of to the router (design.md, Polish batch 3).
+    // The thread the reader has expanded stays on screen beside it, which is
+    // the whole point of a peek and was the one thing this press could not do.
+    //
+    // `openPeek` answers false anywhere the page is not hosting one (the app
+    // page's Tasks tab, the flag off), and then this is the navigation it has
+    // always been.
+    if (openPeek(task.key, { anchor: m.anchor || null })) {
+      onSelect();
+      return;
+    }
+    // Leaving the page, so this is the row to come back to — the thread row
+    // belongs to this task, and the task's row is what is still on screen when
+    // the reader returns.
+    onSelect();
+    navigateUrl(to);
+  };
+
+  /**
+   * A MESSAGE ROW's own gesture — one function, so its click and its Enter/Space
+   * cannot drift apart, exactly as `activate` is one function for the task row.
+   *
+   * Two meanings, and the split is the message's own state (tasks-lib.
+   * messageEditEntry, the same predicate Cancel asks):
+   *
+   *   * a message that HAS NOT GONE OUT opens the EDIT FORM on its own entry — it
+   *     is an instruction, not a transcript turn, and the form is the only place
+   *     that instruction can be read or changed. Its own entry id, never the
+   *     task's next run: a repeating task has several pending occurrences and the
+   *     row pressed is the one the reader means.
+   *   * anything that HAS run opens its turn in the transcript, through
+   *     openMessage above — unchanged, including the read mark it clears.
+   *
+   * NOTHING IS MARKED ON THE EDIT ARM, and there is nothing to mark: a message
+   * that has not happened is not unread in the first place (tasks-lib.isUnread),
+   * so the dot the reader would be owed does not exist. `openMessage` keeps the
+   * per-message mark it always had, on the only rows that can carry one.
+   */
+  const pressMessage = (m: TaskMessage) => {
+    const entry = onEditEntry ? messageEditEntry(m) : null;
+    if (entry) onEditEntry?.(entry);
+    else openMessage(m);
+  };
+
+  // Open chat: the thread, and the unread cleared on the way out — the same
+  // performer the Board card's click spends (performOpen), so the two gestures
+  // cannot disagree. Deliberately NOT markSeen above: that one is a press that
+  // STAYS on this page, so it awaits the write and has somewhere to say a
+  // refusal; this one is leaving, so it fires and forgets and never holds up the
+  // hop. `onReadAll` is the local half, the same one markSeen uses — and it is
+  // handed the same `held` list, so the two gestures on this row cannot clear
+  // different amounts of the same thread.
+  //
+  // Declared ABOVE `activate` because `activate` now calls it — a hoisted
+  // reference into a `const` below would work at runtime and read as a bug.
+  const openChat = (intent: OpenThreadIntent) => {
+    // This is the row LEAVING the page, so it is also the row to come back to.
+    // Marked here rather than in `activate` because `activate` has a second arm
+    // — the edit form, a modal over this very page — and lighting a row for a
+    // trip the reader never took would make the highlight mean nothing. Every
+    // way of opening this task's conversation goes through this one function
+    // (the row's press, the Open chat button), so every one of them marks.
+    onSelect();
+    performOpen(
+      task,
+      intent,
+      {
+        clearAll: onReadAll,
+        restoreAll: onUnreadAll,
+        settleAll: onSettleAll,
+      },
+      held,
+    );
+  };
+
+  /**
+   * THE BORROWED ROW'S OPEN (see `variant`) — the chat variant's own answer to
+   * what `openChat` above is for the Tasks page's two views, and deliberately a
+   * SEPARATE function rather than a third arm inside them.
+   *
+   * It does the two things opening a thread has always done, in the same order:
+   *
+   *   * IT CLEARS THE BADGE. Opening the thread is what clears it, and where the
+   *     thread opens is not the badge's business — so a row pressed on the chat
+   *     landing owes the same write (`markWholeTaskRead`, the whole task at
+   *     once) and the same hollow ring as a row pressed on the Tasks page.
+   *     `chat.markRead` is asked of the count this row is DRAWING, so a second
+   *     press on an already-cleared task posts nothing.
+   *   * AND IT LEAVES, through the host's own handler. The local clear is
+   *     planted FIRST and the write is never awaited, for the reason the shared
+   *     performer gives: this press is leaving the page and must not hold up the
+   *     hop. A REFUSAL puts the ring back (`chatCleared`, above) — the borrowed
+   *     row's one-line stand-in for the List's rollback, which it has no read set
+   *     to ask for.
+   *
+   * It cannot go through the shared performer itself: that one ends in
+   * `navigateUrl(intent.href)`, and this row's destination is often no URL at all
+   * — the landing adopts the conversation in place.
+   */
+  const openBorrowed = () => {
+    if (chat?.markRead) {
+      const wrote = unread;
+      setChatCleared(wrote);
+      void markWholeTaskRead(task.key).catch(() =>
+        setChatCleared((at) => (at === wrote ? null : at)),
+      );
+    }
+    onChatPress?.();
+  };
+
+  /**
+   * The task ROW's own gesture — one function, so the mouse and the keyboard
+   * cannot drift apart (Enter and Space, and the stretched link's plain click,
+   * all run exactly this).
+   *
+   * ONE MEANING NOW, AND IT IS "OPEN IT" (Akshil, 2026-08-18): a press anywhere
+   * on the row goes to the conversation, at the END of the chat. The accordion
+   * used to be this function's first arm, which made the commonest row on the
+   * page — a task with a thread — the one row whose click did NOT open the thing
+   * it names; expanding is the chevron's job now, and the chevron's gutter is
+   * wide enough to aim at (see the caret below, and tasks.css).
+   *
+   * Two arms are left, and the split is what the row HAS:
+   *
+   *   * a row with a SESSION opens its thread, through openChat above — the same
+   *     intent (openThreadIntent) and the same performer the Board card spends,
+   *     so there is exactly one way to address a thread and one answer about what
+   *     opening it marks. No `msg=` anchor, deliberately: the row is the whole
+   *     task, so the turn it means is the latest one, which is where a chat opens
+   *     by itself. A MESSAGE row is what addresses one turn, and it still does.
+   *   * a row with NO session opens THE EDIT FORM on its scheduled run, when it
+   *     has one (tasks-lib.upcomingEditEntry — the lane, exactly one message, and
+   *     which entry). Such a row has no conversation to open and its whole content
+   *     is an instruction that has not run yet, so the form is the only thing its
+   *     press could honestly mean (Akshil, 2026-08-17: "when i click on upcoming
+   *     tasks i think they should open up the edit modal... only for 1 message
+   *     tasks"). Reached through `onEditEntry`, the same callback the thread's own
+   *     Edit button and the calendar popover spend.
+   *
+   * There is no third arm for the LEAF-with-a-session that used to open its one
+   * message: `chat` covers it, and one message is the whole chat anyway.
+   *
+   * A task with no session AND no resolvable entry (a `pending:<entry>` an older
+   * server sent no next-run fields for) still does nothing, and does not
+   * ADVERTISE a press either — see `pressable` below.
+   *
+   * NOTHING IS MARKED READ ON THE EDIT ARM: the message it opens the form for has
+   * not gone out, so there is nothing there to have seen. The chat arm's mark is
+   * openThreadIntent's decision, not this function's.
+   */
+  const activate = () => {
+    // A BORROWED ROW HAS EXACTLY ONE ARM, and it is the host's (see `variant`).
+    // Every arm below is about state this row was not given — a draft form to
+    // re-open, a schedule entry to edit, a folder this page could toast about —
+    // so none of them can be the honest meaning of a press over there.
+    if (chatVariant) {
+      openBorrowed();
+      return;
+    }
+    if (openDraft) openDraft(task);
+    else if (chat) openChat(chat);
+    else if (edit) onEditEntry?.(edit);
+    // A folder that is gone: the chat arm is off (above), the EDIT arm is not —
+    // the schedule form needs no folder (Bugbot, #1023) — so this is the row
+    // with neither, and its press says why (a toast) rather than doing nothing.
+    else if (folderMissing) toastMissingFolder();
+  };
+
+  /**
+   * ARE THE THREAD'S UNSENT WORDS IN A FORM RATHER THAN IN THE COMPOSER?
+   *
+   * The server says so (`draft.kind`, routers/tasks.py `_row`), and absent — an
+   * older server — means `"chat"`, which is what every draft joined onto a
+   * session row was before a New task form could be bound to one.
+   */
+  const draftIsForm = task.draft?.kind === "form";
+  /**
+   * THE DRAFT LINE'S PRESS, which is not always the row's (Bugbot, PR #1126,
+   * 2026-09-12).
+   *
+   * That line quotes `task.draft.preview` — the reader's own unsent sentence —
+   * and pressing your own sentence has to land where it is. For a composer draft
+   * that is the chat, which is what `activate` already opens. For a form bound
+   * to this conversation it is the New task card: the chat holds nothing of it,
+   * so the old press showed the words on a row and then took the reader to an
+   * empty composer. `onOpenBoundDraft` is the hop door back into the form
+   * (shell/Scheduled `openBoundDraft`); without it — a caller that passes no
+   * handler — the line does what it always did.
+   */
+  const pressDraftLine = () => {
+    if (draftIsForm && onOpenBoundDraft) onOpenBoundDraft(task);
+    else activate();
+  };
+
+  /**
+   * WHERE the row's press goes, as a URL — or null when the press opens a modal
+   * (the edit arm) and there is nowhere to link to.
+   *
+   * This is what makes ⌘-click, middle click and "Open in new tab" work: the row
+   * draws a real `<a href>` stretched over itself (`.tasks-rowlink`) rather than
+   * hanging a click handler on a div, so every one of those gestures is the
+   * browser's own behaviour and none of them is reimplemented here. The plain
+   * click is the only one this page intercepts — see the handler, and
+   * tasks-lib.opensElsewhere for the rule it asks.
+   */
+  const href = chatVariant ? chatHref : (chat?.href ?? null);
+  /** WHERE "OPEN AS PAGE" GOES, and it is today's route exactly: the
+   *  conversation in the Explorer's Claude pane. Null on a row with nowhere to
+   *  go — no session and no folder, or a folder the disk has lost — which is
+   *  what keeps the quick door off the rows it could not honour. */
+  const page = folderMissing ? null : href;
+
+  /**
+   * Does this row's press DO anything — and therefore, may the row claim to be a
+   * control at all?
+   *
+   * The arms of `activate`, so the affordance cannot drift from the behaviour. A
+   * never-run `pending:<entry>` row with no resolvable entry carried
+   * `role="button"`, a tab stop, a hover tint and a pointer cursor while doing
+   * nothing on press; an inert row is inert in what it says too.
+   *
+   * `expandable` is deliberately NOT here any more. A row whose only affordance is
+   * its disclosure gets that affordance from the chevron, which is a real button
+   * with its own tab stop — the row itself stays inert, and pointing at it would
+   * be a promise the row's own press no longer keeps.
+   */
+  const pressable = chatVariant
+    ? onChatPress !== undefined
+    : href !== null || edit !== null || openDraft !== null || folderMissing;
+
+  const cancel = async (m: TaskMessage, entryId: string) => {
+    setCancelling(m.message_id);
+    setCancelErrors((cur) => {
+      const next = { ...cur };
+      delete next[m.message_id];
+      return next;
+    });
+    try {
+      await cancelScheduledMessage(entryId);
+    } catch (e) {
+      // A 404 here is a real race, not a bug: the scheduler's loop may have sent
+      // this message while the user was reaching for the button. Say what the
+      // server said — and reload either way, so the row corrects itself to
+      // whatever actually happened.
+      setCancelErrors((cur) => ({ ...cur, [m.message_id]: (e as Error).message }));
+    } finally {
+      setCancelling("");
+      onReload?.();
+    }
+  };
+
+  return (
+    <div className="tasks-node">
+      <div
+        className={"tasks-row" + (open ? " is-open" : "")
+          + (selected ? " is-selected" : "") + (pressable ? "" : " is-inert")
+          + (peeked ? ` ${PEEK_OPEN_CLASS}` : "")
+          + (refiled ? " is-refiled" : "")}
+        onPointerEnter={(e) => measureStrip(e.currentTarget)}
+        onFocus={(e) => measureStrip(e.currentTarget)}
+        // The side peek's two hooks: the halo's selector, and — in DOM order —
+        // the prev/next walk, which on the List is simply the list's order
+        // (shell/task-peek-store.ts). Absent entirely when the feature is off.
+        {...(peekOn ? peekItemProps(task.key, peekOpenable(task)) : {})}
+        // The row is a CONTAINER now, not a control: when it has somewhere to go
+        // the stretched `<a>` below is the button, the tab stop and the
+        // accessible name, and hanging a second role and a second tab stop on
+        // this div would give every row two of each. The EDIT arm has no href —
+        // it opens a modal — so that one row keeps the old role/tabIndex/keydown
+        // treatment, and `pressable` still decides whether anything at all is
+        // claimed (`is-inert` turns the cursor and the hover tint off).
+        role={pressable && !href ? "button" : undefined}
+        tabIndex={pressable && !href ? 0 : undefined}
+        /* NO CAPTION ON THE ROW ITSELF (Akshil, 2026-08-24: "the tooltip of
+           title should only show up if I am on title text"). It lived here
+           through three passes — as a native `title`, as the CSS panel, as the
+           instant one — and a caption on the row is a caption on ALL of it: the
+           id chip, the status ring, the empty space between the title and the
+           folder, and every band around a mark answered with the task's name
+           because `closest()` walks up to whatever the row is holding. The
+           TITLE is the thing whose text can be cut off and therefore the only
+           thing here worth captioning, so it carries its own (see
+           `.tasks-title` below). Every other mark on the row already carries the
+           one fact its own ink cannot show. */
+        onClick={href ? undefined : pressable ? activate : undefined}
+        onKeyDown={(e) => {
+          if (!pressable) return;
+          // `o` OPENS THE FOCUSED ROW (.claude-design/task-side-peek/design.md,
+          // Keyboard). Handled on the row rather than on the stretched link
+          // because the link is the tab stop but the row is what the key is
+          // about, and a keydown from the link bubbles here. Enter is already
+          // the link's own, natively, on every row that has one — which is why
+          // the branch below is still only for the rows that do not.
+          //
+          // A KEY ON A CONTROL INSIDE THE ROW IS THE CONTROL'S — for every
+          // branch: the hover-revealed Archive is a real tab stop, and Enter
+          // (and `o`) on it bubbled here and opened the chat instead (review,
+          // 2026-09-21). By WHAT the target is, not by identity with the row —
+          // on a row with an href the focused element is the stretched link,
+          // and `o` from it must still open. Fields for the same reason as
+          // ever: eating a letter someone is typing is the worst shortcut.
+          const el = e.target as HTMLElement | null;
+          if (el && el.closest?.("button, input, textarea, [contenteditable]")) return;
+          if (e.key === "o" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            e.preventDefault();
+            activate();
+            return;
+          }
+          if (href) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            activate();
+          }
+        }}
+        // The other half of the filing receipt (Akshil, 2026-08-19): leaving the
+        // row is what re-arms its hover reveal. Handled — not conditional — even
+        // while the flag is down, because a handler that appears and disappears
+        // with the state it clears is a re-render race waiting to be read about.
+        onMouseLeave={() => setRefiled(false)}
+      >
+        {/* The disclosure gutter is drawn WHETHER OR NOT there is a chevron in it.
+            `--tasks-caret-w` is the first term of `--tasks-rail-x`, which every
+            indent on this page is measured from (tasks.css), so dropping the
+            element on a one-message row would slide that row's status ring — and
+            the whole rail it stands in — a mark and a gap to the left of its
+            neighbours' and turn a column of rings into a zigzag. So the box stays
+            and only the glyph goes.
+
+            IT IS THE ONLY WAY TO EXPAND A ROW, since 2026-08-18 — the row's own
+            press opens the conversation now (see `activate`). So it is a real
+            button with a real label, and its HIT ZONE is far bigger than its ink:
+            tasks.css grows it to the row's full height and out to the row's
+            leading edge with padding, and takes the growth back out of the layout
+            with matching negative margins, so nothing moves by a pixel and there
+            is no thin 16px target to aim at. It also sits ABOVE the stretched row
+            link, which is what keeps the two zones apart: gutter expands,
+            everything else opens. `stopPropagation` is belt and braces — the link
+            is a sibling, not an ancestor — and costs nothing.
+
+            The rotation is on the inner glyph, not the button: see tasks.css.
+
+            …AND THE GUTTER ITSELF IS NOT DRAWN IN THE CHAT VARIANT (Akshil,
+            2026-09-14). The argument above is about a COLUMN of rows that must
+            share one rail — a row with a chevron beside rows without one. The
+            borrowed list has no chevron on any row, so the slot there is 16px
+            plus a gap of nothing at the head of every row, and the status ring
+            — the first ink the reader sees — stood a mark and a gap inside the
+            panel's own content edge. Nothing zigzags when the whole list drops
+            it together. */}
+        {chatVariant ? null : expandable ? (
+          <button
+            type="button"
+            className="tasks-caret"
+            aria-expanded={open}
+            aria-label={open ? "Collapse messages" : "Expand messages"}
+            title={open ? "Collapse messages" : "Expand messages"}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
+          >
+            <span className={"tasks-caret-glyph" + (open ? " is-open" : "")} aria-hidden>
+              {ICON_CHEVRON}
+            </span>
+          </button>
+        ) : (
+          <span className="tasks-caret" aria-hidden />
+        )}
+        {/* The row's navigation, as a real link stretched over the whole row
+            (tasks.css `.tasks-rowlink`). Empty on purpose: it carries the href,
+            the tab stop and the accessible name, and the row's own children carry
+            every pixel of ink.
+
+            A MODIFIED press is left entirely alone — no preventDefault, no SPA
+            navigation, and NO READ MARK: ⌘-click means "open that in a tab for
+            later", and clearing the badge for a conversation nobody has looked at
+            yet is exactly the thing a background open must not do. The plain click
+            is the only one intercepted, and it spends `activate` — the same
+            function Enter spends on the edit-arm row above, so no gesture on this
+            page has a private meaning. */}
+        {href && (
+          <a
+            className="tasks-rowlink"
+            href={href}
+            /* NO `title` OF ITS OWN (2026-08-24). This <a> is stretched over the
+               whole row and sits above it, so a title here is the one actually
+               shown — and the row div already carries the same words, one walk
+               up, which is where the browser lands when this link stays silent.
+               One copy of the caption, not two. `aria-label` stays: it is this
+               link's accessible NAME, not a tooltip. */
+            aria-label={label}
+            onClick={(e) => {
+              if (opensElsewhere(e)) return;
+              e.preventDefault();
+              activate();
+            }}
+          />
+        )}
+        {/* The ring opens the row, and it stands in the column every task row's
+            ring stands in (tasks.css `--tasks-rail-x`), which is also the column
+            the thread below is measured from — its own rings hang exactly one ring
+            slot to the right of this one, so the indent that says "these belong to
+            that" is a whole mark wide rather than an arbitrary gap. The caret stays
+            outside the column, in the gutter to its left, because it is the
+            accordion's control and not part of it.
+
+            IT IS ALSO THE ROW'S UNREAD MARK (2026-08-18). There was a separate
+            grey dot after the title for a day, and before that a numeric pill in
+            the same slot; the ring's centre now carries the fact instead, filled
+            while anything in this task's thread is unread and hollow once it is
+            all read. One mark, two facts — hue for the state, shape for whether
+            anybody has looked — rather than two marks at opposite ends of a title
+            that a reader has to pair up. `unread` is the merged count this row is
+            DRAWING, so the ring hollows on the row's own press rather than on the
+            next poll, and it is the count the tooltip names. */}
+        {/* THE MARK SLOT: the ring at rest, the Archive button under the pointer,
+            in the same box (`.tasks-rowmark`, tasks.css).
+
+            The two used to be at opposite ends of the row — the ring in the rail
+            and Archive out by the folder chip — which made "file this away" a
+            control the reader had to travel to, and put a hover-revealed button
+            in the one part of the row that is already the busiest (id, folder,
+            two times). The swap costs nothing to read: a row being pointed at is
+            a row whose status the reader has just read, and it is the same
+            gesture every list of this shape uses.
+
+            The button is ABSOLUTELY positioned inside a slot sized to the ring,
+            so it is out of flow and no pixel of the row can move when it appears
+            — the rail (`--tasks-rail-x`), the thread's indent under it and the
+            caret's hit zone to its left are all untouched. */}
+        <span className="tasks-rowmark">
+          <StatusIcon
+            status={taskColumn(task)}
+            failed={ringFailed(task)}
+            unread={unread > 0}
+            count={unread}
+            draftHeld={draftRing(task) && !heldInPeek}
+          />
+          {/* The Board's drag onto Archive — or out of it — as a press. ONE
+              button in this slot, never two: a task is either put away or it is
+              not, so tasks-lib.filingIntent answers with a direction and this
+              draws that direction's glyph and calls that direction's verb.
+
+              ON AN ARCHIVED ROW IT IS THE ONLY BUTTON (showsRowActions, above).
+              Unarchive beside a Re-run would suggest the two are related, and the
+              one thing this gesture must never be read as is starting work.
+
+              THE ONE ROW ACTION NOT BEHIND SHOW_ROW_ACTIONS (Akshil, 2026-08-18:
+              bring the archive button back, visible on hover). Filing a task away
+              had no press anywhere in the List while the strip was off — the only
+              route was switching to the Board, expanding the Archive lane and
+              dragging — which made the honest answer to "can a task be deleted?"
+              (no: it is archived) barely true on this view.
+
+              HOVER-REVEALED, not permanent: a list at rest must grow no chrome
+              (§2 — only critical actions get visible buttons), and this is one
+              button on every row that has ever run. `.tasks-act` in tasks.css
+              owns that, and it does it with `opacity` plus a `:focus-visible` arm
+              rather than `visibility`/`display`, so the button stays in the tab
+              order and lights up for a keyboard that lands on it. It is still not
+              rendered at all on a task with nothing to file, which is the
+              difference that matters: hidden-until-hover is for a live control,
+              not for a dead one. */}
+          {file && (
+            <button
+              type="button"
+              className={"tasks-act tasks-act--" + file.kind}
+              title={file.title}
+              aria-label={file.label}
+              disabled={acting}
+              onClick={(e) => {
+                e.stopPropagation();
+                void refile(file);
+              }}
+            >
+              {file.kind === "archive" ? ICON_ARCHIVE : ICON_UNARCHIVE}
+            </button>
+          )}
+        </span>
+        {/* IN EVERY LIST, INCLUDING THE CHAT PANE'S (Akshil, 2026-09-14). It
+            was taken off the borrowed row for a round, on the argument that a
+            312px row cannot spend 55px on a number — but TASK-nnn is the name
+            this app prints for a conversation everywhere else, and a Recent
+            list that alone withholds it is a list whose rows cannot be quoted
+            or carried to the Tasks page. The title is the element that gives
+            way, which is what it is for. */}
+        <IdChip id={task.task_id} kind="task" />
+        {/* THE FOLDER CHIP SITS HERE, between the id and the title (Akshil,
+            2026-09-15): the row's left end is where it says what it IS — the id,
+            then the folder it belongs to, then the words. It lived at the right
+            end among the tags until then; DraftChip stays there alone. Same
+            component, same press, same shield — only the slot moved. */}
+        {showProject && (
+          <IdentityChip
+            name={basename(task.project)}
+            title={tildePath(task.project, home)}
+            // A TAG, not a label (Akshil, 2026-08-23): pressing it narrows the
+            // page to this folder, and pressing it again lets it go. Only on
+            // the List — the Board card's foot keeps the plain chip, because a
+            // card is a drag target first and a button inside one competes with
+            // the gesture that moves it.
+            onPick={onPickProject && (() => onPickProject(task.project))}
+            // …and while the filter is on, the chip SAYS SO. Without this the
+            // one row-level trace of an active filter was the toolbar's little
+            // "1", four hundred pixels away from the rows it was acting on.
+            active={pinned}
+          />
+        )}
+        {/* Beside the id, the same component in the same place as on the card
+            (design-principles §1): a tag that moved between the two views would
+            be two different marks to learn. */}
+        {/* THE DRAFT CHIP IS NOT HERE ANY MORE (Akshil, 2026-09-11). It sat
+            beside the id for a round, on the outcome pill's own argument: the id
+            line is where marks ABOUT the task live. That was right while it was
+            only a mark. It is a filter TAG now, and this page keeps its tags at
+            the other end of the row — see the chip's new seat, immediately
+            before the folder, and DraftChip's note for the whole argument. */}
+        {/* Greyed while the work is still ahead of it (tasks-lib.isUpcomingTask):
+            a list is mostly history, and the rows that have not happened yet are
+            the ones a reader is not being asked to read. The TITLE only — the id,
+            the ring, the folder and the time all stay at full strength, because
+            fading the whole row would say "archived", which is a different fact
+            with a lane of its own. */}
+        {/* THE CAPTION LIVES HERE, not on the row (see the row's own note).
+            This element is the one on the row that ELLIPSISES — `overflow:
+            hidden` in tasks.css — so it is the one whose full text a reader can
+            actually be missing, which is the whole job of a tooltip. The panel
+            is `position: fixed` on <body>, so this element's own clipping has no
+            say in whether the caption is readable. */}
+        <span
+          className={"tasks-title" + (ahead ? " is-upcoming" : "")}
+          /* The caption is the WHOLE of whatever this line is one line of — the
+             untruncated message when the row is showing one, the title when it
+             is not — because what a caption is for is the text the clamp hides. */
+          data-hint={line.said ? task.last_message?.text : task.title}
+          /* Hovering either the title or the reply shows BOTH lines whole, in
+             the row's own styles (hints.ts `renderTaskHint`, Akshil,
+             2026-09-19): what the row clamps is what the reader is missing. */
+          data-hint-title={line.said ? task.last_message?.text : task.title}
+          data-hint-reply={task.last_reply || ""}
+        >
+          {label}
+        </span>
+        {task.last_reply ? (
+          <span
+            className="tasks-title-reply"
+            data-hint={task.last_reply}
+            data-hint-title={line.said ? task.last_message?.text : task.title}
+            data-hint-reply={task.last_reply}
+          >
+            {task.last_reply}
+          </span>
+        ) : null}
+        {/* The one thing that follows the title (Akshil, 2026-08-23): a file
+            mark, on the tasks whose target is a FILE rather than the folder.
+            The row already says which project the work happened in; what it
+            could not say is that this task is about one document inside it —
+            the difference between "something happened in this repo" and
+            "something happened to this file".
+
+            A GLYPH, not the name — the opposite call to the message count two
+            elements along, and for the opposite reason. A count is a number
+            that needs a unit to be read at all; a filename is prose, and a
+            column of prose at the busiest end of the row is the crowding this
+            row has twice been trimmed for. The name is one hover away, in the
+            same `title` the folder chip has always used for its path.
+
+            The live ping used to sit here (see LivePulse's headstone above): a
+            blue disc in the one position, and the one shape, that means unread
+            everywhere else. This is a hollow outline and never blue. */}
+        {/* FILE MARK ONLY (Akshil, 2026-08-25: "drop the folder icon, keep the
+            file icon as is"). The folder arm briefly lived here as the fallback
+            (2026-08-24's one-mark-either-way rule), but a folder-scoped task is
+            the common case and the mark restated what the folder chip at the
+            row's far end already says — so the glyph is back to marking the one
+            genuinely extra fact: this task is about a single document.
+
+            A NATIVE `title`, like every caption on this row (2026-08-24, third
+            pass): the custom panel drew displaced from what it captioned, and
+            its own `title` is also what stops the browser walking up to the
+            row's — the walk is the bug that showed the task's name over every
+            mark that carried no title of its own. */}
+        {taskFile_ ? (
+          <span
+            className="tasks-row-file"
+            data-hint={tildePath(taskFile_, home)}
+            aria-label={`This task is about ${basename(taskFile_)}`}
+            // A PRESS HERE IS A PRESS ON THE ROW (Akshil, 2026-08-27: "when I
+            // click on the whole task list item anywhere ... it opens the task
+            // for me, but when I click on the file icon, it does not"). The
+            // mark sits above the stretched link (`z-index: 2`, for its
+            // tooltip), which is exactly what made it the one dead pixel-run
+            // on the row. So it spends the same gesture the link spends — a
+            // modified press goes to a new tab, a plain one to `activate` —
+            // and nothing on the row has a private meaning.
+            onClick={(e) => {
+              if (!href) return;
+              if (opensElsewhere(e)) {
+                window.open(href, "_blank", "noopener");
+                return;
+              }
+              activate();
+            }}
+            // Middle-click never reaches onClick (it is `auxclick`), and on the
+            // <a> it is the browser's own new-tab; the mark owes the same
+            // (Bugbot, 2026-08-27).
+            onAuxClick={(e) => {
+              if (e.button !== 1 || !href) return;
+              e.preventDefault();
+              window.open(href, "_blank", "noopener");
+            }}
+            // …and the default a middle press STARTS is autoscroll, which the
+            // <a> never triggers and this span otherwise would (Bugbot).
+            onMouseDown={(e) => {
+              if (e.button === 1 && href) e.preventDefault();
+            }}
+          >
+            {ICON_FILE}
+          </span>
+        ) : null}
+
+        {/* THE SCHEDULE MARK, after the file mark and for the reason that one is
+            there: both caption the title — what the task is about, and that it
+            runs by itself (Akshil, 2026-09-11). Circle arrows for a repeat, a
+            clock for a one-off, never both; the instant is in the tooltip. Same
+            three press handlers as the file mark: the mark sits over the
+            stretched link and would otherwise be a dead run of pixels (Akshil,
+            2026-08-27). */}
+        {sched ? (
+          <span
+            className="tasks-row-sched"
+            data-hint={sched.title}
+            aria-label={sched.label}
+            onClick={(e) => {
+              if (!href) return;
+              if (opensElsewhere(e)) {
+                window.open(href, "_blank", "noopener");
+                return;
+              }
+              activate();
+            }}
+            onAuxClick={(e) => {
+              if (e.button !== 1 || !href) return;
+              e.preventDefault();
+              window.open(href, "_blank", "noopener");
+            }}
+            onMouseDown={(e) => {
+              if (e.button === 1 && href) e.preventDefault();
+            }}
+          >
+            {sched.repeats ? ICON_REPEAT : ICON_CLOCK}
+          </span>
+        ) : null}
+
+        {/* WHERE THIS ROW STANDS IN ITS FOLDER'S LINE, on a queued row and no
+            other. It trails the title's marks, in the flow, and not as a second
+            LINE under the row — which is what the board's card does and what a
+            list must not: every row here is one line tall, and one row growing
+            to two would break the even rhythm the whole column is scanned down.
+            The board has a card to grow; a list has a rhythm to keep.
+
+            NO WIDTH AND NO BREAKPOINT (tasks.css): it shrinks before the title
+            does and ellipsises inside itself, so a narrow pane loses the end of
+            "behind TASK-041" rather than pushing the time and the folder off the
+            row. Measured by the browser, not by a media query — the row has no
+            idea how wide the pane is and must not pretend to.
+
+            THE WORDS GET THEIR OWN SPAN, and it is not decoration: this element
+            is an `inline-flex` box, and `text-overflow` never reaches a flex
+            item — so the caption clipped mid-glyph instead of trailing off, and
+            at a 400px pane it and the title BOTH shrank to nothing (browser QA
+            round 2). The span is the block-with-inline-content an ellipsis
+            needs; the shrink order is the stylesheet's.
+
+            NO ⤒ AND NO SECOND COLOUR ANY MORE (Akshil, 2026-09-19). A skipped
+            row used to lead with the glyph and repaint the whole sentence in the
+            queued hue, which made one row in the column look like a different
+            KIND of thing — where all a skip does is change the ORDER, and the
+            new order is what the caption already prints. The glyph is the Run
+            next BUTTON's face (its seat is in the hover strip below) and
+            nothing is decorated with it.
+
+            AND A PRESS HERE IS A PRESS ON THE ROW (Akshil, 2026-09-19: clicking
+            the caption of a queued row did not open its chat). This span is
+            `z-index: 2` over the stretched `.tasks-rowlink` — it has to be, for
+            its own tooltip — which made the whole caption a dead run of pixels,
+            the identical fault the file mark above was fixed for. So it spends
+            the same three gestures the mark does. The `TASK-x` link inside it
+            stops propagation and keeps its own destination: the caption opens
+            THIS row, the id opens the holder's. */}
+        {/* NO PLACE CAPTION ON A ROW (Akshil, 2026-09-21). "after TASK-046 |
+            3rd" used to sit here, and it was the third thing on a row already
+            saying the same state twice — the dashed ring and the `queued` word
+            carry "this is waiting", which is what a reader scanning a list
+            wants; WHERE in the line it stands is a detail of one row, not a
+            column. The sentence survives where it is actually read: the chat's
+            own waiting card over the composer, and the chat header. The Force
+            start press below stays, on its own rule (`canForceStart`). */}
+        {/* …AND THE PLAN'S PAUSE, in the same seat, on a blocked row the usage
+            limit stopped (`usageLimitCaption`). The lane, the ring and the header
+            are Blocked's — nothing is moving and nothing will move by itself —
+            and this is the one thing that separates it from the runs beside it
+            that actually BROKE: it did not break, it is waiting for a clock, and
+            the clock is known. The queue's own element, because these are the two
+            states a row can be WAITING in and a reader should find both in one
+            place; never both at once, since a row has one status. */}
+        {limit && (
+          <span className="tasks-row-queue" data-hint={limit}>
+            <span className="tasks-queue-text">{limit}</span>
+          </span>
+        )}
+
+        {/* Exactly ONE auto margin in this row: flex distributes free space
+            equally across every auto margin, so a second one would park the
+            right-hand group in the middle of the row instead of at its end. */}
+        <span className="tasks-grow" />
+        {/* THE HOVER STRIP FLOATS OVER THE TITLE'S TAIL (Akshil, 2026-09-16):
+            a zero-width seat in the flex row, with the buttons positioned off
+            its right edge, so the title takes every px the row has and the
+            actions fade in over it (tasks.css `.tasks-acts`). */}
+        <span className="tasks-acts">
+        <span className="tasks-acts-inner">
+          {/* THE MARKS AGAIN, inside the strip (Akshil, 2026-09-16): a long
+              title puts its file/clock mark under the fade the strip draws,
+              so the strip repeats the mark — same glyph, same tooltip —
+              right before Open. Captions only, no press: the inline mark
+              already carries the row's press, and a second target for it
+              here would sit where the reader is aiming at Open. */}
+          {marksUnderStrip && taskFile_ ? (
+            <span
+              className="tasks-row-file"
+              data-hint={tildePath(taskFile_, home)}
+              aria-hidden
+            >
+              {ICON_FILE}
+            </span>
+          ) : null}
+          {marksUnderStrip && sched ? (
+            <span className="tasks-row-sched" data-hint={sched.title} aria-hidden>
+              {sched.repeats ? ICON_REPEAT : ICON_CLOCK}
+            </span>
+          ) : null}
+
+        {/* THE STRIP IS BEHIND SHOW_ROW_ACTIONS, all of it. Archive is the one
+            row action that is live, and it is no longer part of this strip at all
+            — it moved into the mark slot at the row's leading edge on 2026-08-18
+            (see `.tasks-rowmark` above). Each button still carries its own guard
+            rather than the group carrying one, so the three keep their hard-won
+            ORDER whichever of them are rendered: "clear it, run it, open it". */}
+        {/* The drag from Upcoming into In Progress, without the drag — and on
+            a task that broke, the word for doing it again over whichever call
+            can actually do it: run-now while a message is still pending,
+            re-send once the run that failed has spent it. ONE button and one
+            label either way; tasks-lib.taskRunIntent is the only thing that
+            knows which. In the SAME hover-revealed group as Edit and Cancel on
+            a message row, so a list at rest grows no chrome: this applies to a
+            minority of tasks and every other row would carry a button that
+            does nothing. */}
+        {/* "so you don't have to open everything individually" — the whole
+            task's unread, cleared from the row that carries the mark, in the
+            SAME hover-revealed group as Run now and Archive. Only on a task that
+            has unread (tasks-lib.markReadIntent): every other row would carry a
+            button whose press does nothing, which is what makes the rows where
+            it matters hard to pick out. */}
+        {/* FORCE START — the one row action this page grows for the project
+            queue, and only on a row standing in the line — queued, or parked with a held answer (hidden, not
+            disabled, everywhere else: a control that is present-but-dead on
+            every row is what makes the rows it works on hard to find).
+
+            ON EVERY WAITING ROW, INCLUDING THE FIRST (`canForceStart`, whose
+            note carries the why). Run next sat here until 2026-09-21 and was
+            drawn only with another WAITING task ahead, because it could not get
+            in front of the run holding the folder. This press does not try to:
+            it takes the message out of the line and starts it BESIDE that run.
+
+            NOT BEHIND SHOW_ROW_ACTIONS, for the reason Archive is not: with
+            that flag down this would otherwise be the List's only missing
+            CAPABILITY rather than a missing shortcut. Hover-revealed all the
+            same (`.tasks-act`), so a list at rest grows no chrome — and by
+            opacity rather than display, so a keyboard still reaches it. */}
+        {canForceStart(task) && (
+          <button
+            type="button"
+            className="tasks-act tasks-act--skip"
+            title={FORCE_START_HINT}
+            aria-label={`${FORCE_START_LABEL} for ${task.task_id}`}
+            disabled={acting}
+            onClick={(e) => {
+              e.stopPropagation();
+              void force();
+            }}
+          >
+            {FORCE_START_LABEL}
+          </button>
+        )}
+        {SHOW_ROW_ACTIONS && seen && (
+          <button
+            type="button"
+            className="tasks-act tasks-act--seen"
+            title={seen.title}
+            aria-label={seen.label}
+            disabled={acting}
+            onClick={(e) => {
+              e.stopPropagation();
+              void markSeen();
+            }}
+          >
+            {ICON_MARK_READ}
+          </button>
+        )}
+        {SHOW_ROW_ACTIONS && run && (
+          <button
+            type="button"
+            className="tasks-act tasks-act--run"
+            title={run.title}
+            aria-label={run.label}
+            disabled={acting}
+            onClick={(e) => {
+              e.stopPropagation();
+              void runNow(run);
+            }}
+          >
+            {run.rerun ? ICON_RERUN : ICON_PLAY}
+          </button>
+        )}
+        {/* ARCHIVE IS NOT HERE ANY MORE (2026-08-18). It sat between Run now and
+            Open chat, out by the folder chip; it is in the row's MARK SLOT now,
+            swapping with the status ring on hover (see `.tasks-rowmark` above).
+            The strip's remaining order still reads left-to-right as "clear it,
+            run it, open it", and the day SHOW_ROW_ACTIONS flips there is no
+            fourth button to find a place for. */}
+        {/* The one gesture in this row that OPENS a MULTI-message conversation
+            — so it is the one that also clears the thread, exactly as the Board
+            card's click does: it lands the reader in the very thread this row's
+            ring is filled for, and a mark still sitting there afterwards would
+            be pointing at what the press just showed them. Both sides ask
+            tasks-lib.openThreadIntent and both spend it through performOpen. The
+            row's OWN click is still not this (see `activate`): on an accordion it
+            toggles and opens nothing, and on a leaf it opens that leaf's single
+            message through the message path, marking that one message. */}
+        {/* THE QUICK DOOR OUT (.claude-design/task-side-peek/design.md, Round 3):
+            the row's own press opens the peek beside the list, and this is the
+            way to the WHOLE page when that is what the reader wants — today's
+            Explorer route, unchanged, which is exactly where the row used to
+            go. Hover-revealed like every other row action (`.tasks-act`, above
+            the stretched link at `z-index: 2`, so its press is its own), and a
+            real link with a real href so ⌘-click and middle-click open a tab.
+
+            NOT ON A DRAFT: an unfinished New task form has no page to open —
+            its press re-opens the card — so a door there would be a promise
+            nothing can keep. `page` is null on a row whose folder is gone for
+            the same reason (the toast already says so). */}
+        {SHOW_PAGE_DOOR && peekOn && page && !openDraft && (
+          <a
+            className="tasks-act tasks-act--page"
+            href={page}
+            aria-label={`Open ${shortTaskId(task.task_id)} in Explorer`}
+            data-hint="Open in Explorer"
+            onClick={(e) => {
+              // A modified press is the browser's (the row's own link rule).
+              if (opensElsewhere(e)) return;
+              e.preventDefault();
+              e.stopPropagation();
+              navigateUrl(page);
+            }}
+          >
+            {OPEN_DOOR_LABEL}
+          </a>
+        )}
+        {/* ON THE PEEKED ROW IT IS THE OTHER HALF OF THE SAME GESTURE
+            (.claude-design/task-side-peek/design.md): the conversation this
+            button opens is already open beside the row, so pressing it again
+            has to CLOSE it rather than re-open what is in front of you. One
+            control, two states, the way a disclosure works. */}
+        {SHOW_ROW_ACTIONS && chat && (
+          <button
+            type="button"
+            className="tasks-act"
+            title={peeked ? "Close" : "Open chat"}
+            aria-label={peeked ? "Close side peek" : "Open chat"}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (peeked) closePeek();
+              else openChat(chat);
+            }}
+          >
+            {peeked ? ICON_CLOSE : ICON_OPEN}
+          </button>
+        )}
+        </span>
+        </span>
+        {/* When this task runs next, or when it last ran — on EVERY row, because
+            until now a time only appeared inside an expanded thread and a
+            one-message task has no thread to expand (Akshil, 2026-08-17).
+
+            ONE RELATIVE UNIT ("30m ago", "in 2h"), the same vocabulary the message
+            rows below now speak (tasks-lib.relativeWhen). It printed a clock AND a
+            date for an hour and that was the crowding this row was trimmed for:
+            "both the folder and the time with the date, they are like too much for
+            me to handle". The absolute instant, and WHICH run it is, are in the
+            tooltip — the ink cannot say that in one unit and does not try.
+
+            After the spacer, both it and the folder `flex: 0 0 auto`: the row has
+            exactly ONE auto margin (`.tasks-grow` above) and the title is the
+            element that shrinks, so a long title ellipsises rather than squeezing
+            the time. Nothing is drawn when the task has neither run. */}
+        {/* The folder, only when the list SPANS folders (tasks-lib.spansProjects,
+            asked of the rows on screen rather than of the filter). Filtered to one
+            project, every row was repeating the same word at the busiest end of the
+            row — a chip that distinguishes nothing. The full path is still the
+            row's own tooltip either way.
+
+            Folder FIRST, time last (Akshil, 2026-08-18). The two were the other way
+            round when the time arrived; at the end of a row the last thing before
+            the edge is the one a reader lands on, and the time is what changes. */}
+        {/* THE FOLDER IS GONE, said up front (Akshil, 2026-09-06: "we have
+            entries for them, but we don't have content … show clear error
+            message"). In the error colour, because it is the one row-level fact
+            here that means "this cannot be opened"; the path rides the hint and
+            the row's press (activate) raises a toast. */}
+        {/* DELETE FOR GOOD, and only here (design.md §2). A row whose folder is
+            gone is the one row on this page with nothing left to do: it cannot
+            be opened, its Explorer door is dead and the toast its press raises
+            only says so again. So the trash sits as the PREFIX of the sentence
+            that says why — inside the same red family, immediately before the
+            words — rather than in the hover-revealed action group at the row's
+            other end, where it would be one flick from Run now.
+
+            `.tasks-act` all the same, so it is silent until the row is pointed
+            at and reachable by keyboard (tasks.css), and `--delete` is the only
+            thing that reddens it. The press stops here: the row's own activate
+            would raise the missing-folder toast over the dialog. */}
+        {/* DISCARD — the one action a draft row has (design.md, PR C).
+            Until now an Upcoming draft could only be got rid of by opening the
+            form it stands for and pressing Discard inside it, which is a modal
+            round trip to throw away a sentence; and a never-sent chat could not
+            be got rid of at all, because its row opens a composer rather than a
+            form. So the row grows the gesture it was missing.
+
+            THE SAME BUTTON AS THE MISSING-FOLDER TRASH BELOW, deliberately and
+            to the class: same glyph, same size, same silence until the row is
+            pointed at, same red family (`.tasks-act--delete`, tasks.css). Two
+            trashes on one page that looked even slightly different would be two
+            things to learn; they are one thing — "this row goes" — under two
+            conditions that cannot both be true at once, which is why this one
+            stands down when the folder is gone (that row's trash is the
+            stronger claim, and it opens a dialog).
+
+            NO CONFIRM. A draft is unsent text and the modal's own Discard has
+            never asked either; see `discardDraft`. */}
+        {hasDraft(task) && !folderMissing && !heldInPeek && (
+          <button
+            type="button"
+            className="tasks-act tasks-act--delete"
+            aria-label={`Discard draft ${task.task_id}`}
+            title="Discard draft"
+            data-hint="Discard draft"
+            disabled={discarding}
+            onClick={(e) => {
+              e.stopPropagation();
+              setDiscarding(true);
+              void discardDraft(task).finally(() => setDiscarding(false));
+            }}
+          >
+            {ICON_TRASH}
+          </button>
+        )}
+        {folderMissing && (
+          <button
+            type="button"
+            className="tasks-act tasks-act--delete"
+            aria-label={`Delete ${shortTaskId(task.task_id)} forever`}
+            // The same guard the card door wears: a live run cannot be erased
+            // (409), so the trash greys out and says why (review, PR #1049).
+            disabled={eraseBlocked(task)}
+            data-hint={eraseBlocked(task) ? ERASE_BLOCKED_HINT : "Delete task forever"}
+            onClick={(e) => {
+              e.stopPropagation();
+              setErasing(true);
+            }}
+          >
+            {ICON_TRASH}
+          </button>
+        )}
+        {folderMissing && (
+          <span
+            className="tasks-row-missing"
+            data-hint={missingFolderHint(tildePath(taskFolder(task), home))}
+          >
+            Folder missing
+          </span>
+        )}
+        {/* UNSENT WORDS, immediately before the folder (design.md, Round 2).
+            The row's right end is its tag strip — this chip and the folder
+            beside it are both filters, both pressed the same way, both wearing
+            the same ON pill when they are on. The draft comes first because it
+            is the rarer fact: a reader sweeping this column for the folder they
+            know finds it in the same place on every row, and the chip that is
+            usually absent sits outside that column rather than shunting it.
+            DraftChip owns the glyph, the press and the shield. */}
+        {draft && (
+          <DraftChip
+            draft={draft}
+            // A TAG on the List, a label everywhere the view has no filter —
+            // the same split `IdentityChip` draws one line below.
+            onPick={onPickDraft}
+            active={draftOn}
+          />
+        )}
+        {/* HOW MANY MESSAGES this task holds, between the folder and the time
+            (Akshil, 2026-08-23). The row already says where the work happened
+            and when it last moved; the one thing it could not say is how much
+            of it there is — a task with one prompt and a task with forty read
+            identically until you opened them, which is the wrong thing to have
+            to do to choose which to open.
+
+            THE WORD, NOT A GLYPH (Akshil, 2026-08-23, second pass). It began as
+            a speech bubble and a number, on the argument that the row's busiest
+            end could not afford three more characters.
+
+            **Reversed by request (D448): the bubble is back, after the number.**
+            The argument against it was that a reader has to LEARN what the glyph
+            means before the row reads — true exactly once, and paid back on
+            every row after it, on a page whose rows are read by sweeping a
+            column. What made the old "4" ambiguous was that it stood alone
+            between a folder and a time; a number with a bubble welded to its
+            right is not that number. The noun survives for anything that cannot
+            see the glyph, as this element's `aria-label`.
+
+            ALWAYS DRAWN, AND NEVER BELOW ONE (Akshil, 2026-08-24). It used to be
+            gated on `> 0`, on the reasoning that zero is a thread that has not
+            started and "0 messages" is worse than the space it fills. The gate
+            was right about the words and wrong about the rows: the tasks that
+            count zero are the EMPTY SESSIONS — a session holding only a `/clear`,
+            a 97-byte file holding only a title record — and they are scattered
+            through the list, so the column of counts had holes in it exactly
+            where the odd rows were. A hole in a column reads as a broken row (the
+            same argument the time beside it settled on 2026-08-18), and it drew
+            attention to the rows that least deserved it.
+            So the floor is one. A session that exists is a conversation somebody
+            opened; a count of zero is an artefact of what this app declines to
+            COUNT — slash commands, skill injections, tool results are all real
+            entries that are not prose — rather than a fact about the row. Showing
+            "1" for them is the honest reading of "there is something in here",
+            and it is what the ask asked for.
+            (The deeper bug is real and is NOT fixed here, by decision: one
+            session on this machine holds 25 assistant turns and counts zero
+            because none of its user entries is typed prose. This default is the
+            preventive fix; the counter is a separate job.) */}
+        {(() => {
+          // A PROVISIONAL row has no count to show — /api/tasks/pulse does not
+          // carry `message_count`, so the floor of one below would be a number
+          // this client invented. The cell is still DRAWN, with its ink hidden
+          // rather than its box removed: an absent chip would widen the title
+          // beside it and snap it back the moment the listing lands, and the
+          // whole point of painting early is that nothing jumps when it does.
+          if (task.provisional) {
+            return (
+              <span className="tasks-row-msgs tasks-row-msgs--blank" aria-hidden>
+                1<span className="tasks-row-msgs-icon">{ICON_MSG}</span>
+              </span>
+            );
+          }
+          const shown = Math.max(1, task.message_count);
+          return (
+            <span
+              className="tasks-row-msgs"
+              /* The noun the glyph replaces, for anything that cannot see it. A
+                 bare "5" to a screen reader is the same unlabelled number the
+                 comment above objected to on screen. */
+              aria-label={`${shown} message${shown === 1 ? "" : "s"}`}
+              /* A `title` OF ITS OWN is the fix for the screenshot bug ("if i
+                 hover over button/tag of folder it shows me task title instead
+                 of path"): an element with none lets the browser walk up to the
+                 row's, whose title is the task's name — and it was never about
+                 the folder chip alone, every mark here without its own title
+                 was borrowing the row's. Native, like everything on this row
+                 (third pass — the custom panel drew displaced and was pulled). */
+              data-hint={`${shown} message${shown === 1 ? "" : "s"} in this task`}
+            >
+              {shown}
+              <span className="tasks-row-msgs-icon" aria-hidden>{ICON_MSG}</span>
+            </span>
+          );
+        })()}
+        {/* ALWAYS drawn (2026-08-18). It used to be `{when && …}` and taskWhen
+            returned null on a task whose three-message window is empty — a session
+            holding only a `/clear` — which left the last cell of that row blank
+            while every row around it read "4d ago". A hole in a column reads as a
+            broken row, not as an absent fact. taskWhen now falls back to the
+            session's own `last_active` and, failing even that, hands back an em
+            dash with `kind: "none"`, so this element is unconditional and the
+            column always holds.
+
+            No class of its own for the dash, and no CSS change at all here: the em
+            dash belongs in exactly the register the times beside it are in — it IS
+            one of the column's values, not a different kind of thing — and
+            `.tasks-row-time` already sizes, colours and aligns it. */}
+        {/* A PROVISIONAL row's time is not this row's time. taskWhen reads the
+            run off the three-message window, and pulse carries no window, so it
+            falls through to `last_active` — the session's clock, which on a live
+            session says "just now" while the listing a beat later says "56m
+            ago" for the last run (cmux-ux-tester, 2026-09-09). Two different
+            answers to one cell reads as a bug. Same treatment as the count cell
+            above: drawn, ink hidden, width held. */}
+        {task.provisional ? (
+          <span className="tasks-row-time tasks-row-time--blank" aria-hidden>
+            {when.text}
+          </span>
+        ) : (
+          <span className="tasks-row-time" data-hint={when.title}>
+            {when.text}
+          </span>
+        )}
+      </div>
+
+      {/* Why the refusal is quiet: see runNow. The class is the board's own
+          drag-error line, because these are the board's own calls. */}
+      {note && <p className="schedule-tv-note tasks-row-note">{note}</p>}
+
+      {open && (
+        <div className="tasks-thread">
+          {/* THE UNSENT LINE, AT THE HEAD OF THE THREAD (Akshil, 2026-09-12).
+              The row already wears the red `Draft` chip, which says THAT there
+              are words here; expanding it used to show the thread without them,
+              so the one place a reader goes to read this conversation was the
+              one place the newest thing in it was missing.
+
+              It is drawn as a MESSAGE ROW because that is what it is about to
+              be: same class, same seats, same quoted body, same relative time,
+              so the thread reads as one column with a line at the top that has
+              not gone yet. Three things differ, and each is the fact itself:
+
+                * THE SEAT WHERE THE RING GOES holds the pencil instead, in the
+                  error colour — the chip's own mark and the chip's own red, so
+                  the mark on the row and the line under it are visibly the same
+                  news. A status ring would be the wrong glyph outright: the
+                  statuses are about runs, and nothing has run.
+                * THE ID IS THE NEXT ONE (tasks-lib.nextMessageId, the client
+                  half of tasks_store.format_message_id). These words have no
+                  message and so no id, but they stand in the id column, and what
+                  they can honestly say is which message they would be.
+                * IT IS NOT A LINK. Every other row here addresses a turn in the
+                  transcript (`msg=`); this one addresses nothing — there is no
+                  turn — so there is no anchor to ⌘-click into a tab. Its press
+                  is the TASK's (`activate`), which is the same thing the row
+                  above it does and the only honest destination: the composer
+                  holding these words is at the end of that chat.
+
+              OUTSIDE `view.messages`, deliberately: the cap, the `hidden` count
+              and the "Loading N more…" line are all arithmetic about what the
+              SERVER holds, and a row the client drew from a joined draft is not
+              one of those. Adding it there would have made a thread of three
+              report four and then fetch the missing one for ever.
+
+              A DRAFT ROW never reaches this: both kinds carry `message_count: 0`
+              (routers/tasks.py `_draft_row`, `_new_chat_draft_row`), so
+              `isExpandable` is false and there is no thread to head — including
+              the session-bound task draft, which has a session but still no
+              messages of its own. The one row that draws this is an ordinary
+              conversation whose composer is holding something — or a New task
+              form bound to it, which is the same question to the reader and a
+              different place to send them (`pressDraftLine`). */}
+          {task.draft && !heldInPeek && (
+            <div
+              className="tasks-msg"
+              role="button"
+              tabIndex={0}
+              aria-label={
+                (draftIsForm ? "Draft task — " : "Draft — ")
+                + (firstLine(task.draft.preview) || "(empty)")
+              }
+              onClick={pressDraftLine}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  pressDraftLine();
+                }
+              }}
+            >
+              <span className="tasks-msg-pencil" aria-hidden>{ICON_PENCIL_LINE}</span>
+              <IdChip id={nextMessageId(task.message_count)} kind="message" />
+              {/* The words as they arrived: `draft.preview` is already the first
+                  line, cut at 120 characters, by the server that joined it
+                  (fused_render/drafts.py `preview`) — the same string the chip
+                  captions with. No fetch: an expanded row must not go and get
+                  what the listing already handed it. */}
+              <span
+                className="tasks-msg-body"
+                data-hint={
+                  draftIsForm ? "Draft task — open to continue" : task.draft.preview
+                }
+              >
+                {firstLine(task.draft.preview) || "(empty)"}
+              </span>
+              <span className="tasks-grow" />
+              {/* The message rows' own cell, in the message rows' own
+                  vocabulary (relativeWhen), off the draft's clock. The word for
+                  WHICH kind of time this is lives in the tooltip, exactly where
+                  `messageWhenTitle` and `taskWhen` keep theirs.
+
+                  Guarded for `updated_at` being 0: `messageStamp`/`relativeWhen`
+                  both answer "" for a falsy stamp (an older store, or a record
+                  that predates the field), and an ungated template would have
+                  printed a bare "Drafted" tooltip with a trailing space and a
+                  blank time cell — a row with nothing where its clock should
+                  be. "Draft" is not a lie the way "" would be silence. */}
+              <span
+                className="tasks-msg-time"
+                data-hint={
+                  task.draft.updated_at
+                    ? `Drafted ${messageStamp(task.draft.updated_at)}`
+                    : "Drafted"
+                }
+              >
+                {task.draft.updated_at ? relativeWhen(task.draft.updated_at) : "Draft"}
+              </span>
+            </div>
+          )}
+          {view.messages.map((m) => {
+            // THE MESSAGE'S OWN STATE, in a word and a ring — `running`,
+            // `queued`, `scheduled`, `done`, `failed` (tasks-lib.messageState).
+            // It wraps `threadTone` rather than replacing it (a thread under an
+            // archived task is archived with it, except for a turn still
+            // running) and adds the one distinction the tone cannot make: a
+            // `pending` message whose folder is BUSY is queued, and a `pending`
+            // message whose time has not come is merely scheduled. Two rows of
+            // one thread now routinely hold exactly those two states, one above
+            // the other, so the difference had to become ink.
+            const tone = messageState(task, m, queueOn);
+            const mark = unreadMarker(task.key, m, read);
+            const isNew = mark.unread;
+            const stop = cancelIntent(m);
+            // The one entry this message can be edited as, or null when its press
+            // means the transcript instead — ONE reading, spent by both the row's
+            // press (pressMessage) and the pencil below, so the quiet action and
+            // the whole-row gesture cannot disagree about which rows are editable.
+            const fix = onEditEntry ? messageEditEntry(m) : null;
+            // Where this row's press GOES, or null when it opens the edit form
+            // instead (the `fix` arm) or has nowhere to go at all — a projected
+            // occurrence is cron arithmetic and addresses no turn
+            // (tasks-lib.openMessageHref). Non-null is what turns the row into a
+            // real link, and therefore what makes ⌘-click open it in a tab.
+            const to = fix || folderMissing ? null : openMessageHref(task, m);
+            const busy = cancelling === m.message_id;
+            const why = cancelErrors[m.message_id];
+            return (
+              <Fragment key={m.message_id}>
+                <div
+                  className={"tasks-msg" + (isNew ? " is-unread" : "")}
+                  // Same division as the task row above: a row that LINKS puts its
+                  // role, tab stop and name on the stretched `<a>`, and only a row
+                  // that opens a modal keeps them here.
+                  role={to ? undefined : "button"}
+                  tabIndex={to ? undefined : 0}
+                  // One handler for both ways in, the same rule the task row obeys:
+                  // `pressMessage` opens the form on a message that has not gone out
+                  // and the transcript turn on one that has.
+                  onClick={to ? undefined : () => pressMessage(m)}
+                  onKeyDown={
+                    to
+                      ? undefined
+                      : (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            pressMessage(m);
+                          }
+                        }
+                  }
+                >
+                  {/* The message row's own stretched link — its turn in the
+                      transcript, `msg=` anchor and all, so ⌘-click stacks a turn
+                      up in a tab and a plain click scrolls this one open exactly
+                      as it always did. The modified press marks nothing, for the
+                      reason written on the task row's link. */}
+                  {to && (
+                    <a
+                      className="tasks-rowlink"
+                      href={to}
+                      aria-label={firstLine(m.body) || "(empty)"}
+                      onClick={(e) => {
+                        if (opensElsewhere(e)) return;
+                        e.preventDefault();
+                        pressMessage(m);
+                      }}
+                    />
+                  )}
+                  {/* The leaf's ring, and its unread mark: filled centre while
+                      this one message is unread, hollow once it has been opened
+                      — the same glyph the task row above it wears over the whole
+                      thread. NO `count` is passed, so the tooltip stays the status
+                      word: one unread message's dot means "unread" outright, and
+                      "1 unread" on hover would be a caption for a symbol that
+                      needs none (Akshil, 2026-08-18). */}
+                  <StatusIcon
+                    status={tone.column}
+                    failed={tone.failed}
+                    label={tone.label}
+                    unread={isNew}
+                  />
+                  {/* No kind glyph before the id (2026-08-18). A clock on a
+                      scheduled message and a speech bubble on a chat one stood
+                      between the ring and MSG-003 on every row of every thread —
+                      two more marks in a lane that already opens with one, for a
+                      distinction the row's own words and time make anyway. The
+                      id and the body lead now. */}
+                  <IdChip id={m.message_id} kind="message" />
+                  {/* THE STATE WORD, between the id and the body. It used to
+                      live only in the ring's tooltip, which is to say nowhere a
+                      person reading down a thread would find it — and with the
+                      queue on, `running` and `queued` sit one row apart in two
+                      shades of the same family. Lower case and in the row's own
+                      muted register: it is a fact about the line, not a badge on
+                      it. */}
+                  {queueOn ? (
+                    <span className={"tasks-msg-state tasks-msg-state--" + tone.column}>
+                      {tone.word}
+                    </span>
+                  ) : null}
+                  {/* The message's own caption, on the text and not on the row —
+                      the same rule the task row above follows, and for the same
+                      reason: this is the element that ellipsises. The hint is the
+                      WHOLE body where the ink is only its first line. */}
+                  <span className="tasks-msg-body" data-hint={m.body}>
+                    {firstLine(m.body) || "(empty)"}
+                  </span>
+                  {/* No dot after the body any more (2026-08-18). It trailed the
+                      title here, and led the row in a reserved rail slot before
+                      that, and both arrangements were arguing about WHERE to put a
+                      second mark on a row that already opens with a status ring.
+                      The ring absorbed it: see the StatusIcon above, and
+                      tasks-lib.taskUnreadLabel for the whole of the reasoning. The
+                      row's bold body (`.tasks-msg.is-unread`) is untouched and is
+                      still the fact stated twice — once in the mark, once in the
+                      weight — which is what makes an unread line findable in a
+                      thread of twenty. */}
+                  <span className="tasks-grow" />
+                  {/* A MESSAGE row's actions are behind the same flag as the task
+                      row's strip (SHOW_ROW_ACTIONS, off). Akshil, 2026-08-17:
+                      "hide the hover actions for now, that's what I said" — said
+                      of this pencil, so the flag covers every hover-revealed
+                      action in the List rather than the task row's only. ONE flag
+                      for both, so a flip cannot bring half of them back. */}
+                  {SHOW_ROW_ACTIONS && (
+                    <>
+                      {/* The one thing about a message a person can still CHANGE:
+                          its time or its wording, before it goes out. Quiet and on
+                          hover, because it applies to a minority of rows. */}
+                      {fix && (
+                        <button
+                          type="button"
+                          className="tasks-act"
+                          title="Edit"
+                          aria-label="Edit"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onEditEntry?.(fix);
+                          }}
+                        >
+                          {ICON_PENCIL}
+                        </button>
+                      )}
+                      {/* Beside Edit and inside the same hover-revealed group, so a
+                          thread of already-sent messages — which is most threads —
+                          grows no chrome at rest. The label is the honest one for
+                          what the call does to a repeat: see cancelIntent. */}
+                      {stop && (
+                        <button
+                          type="button"
+                          className="tasks-act tasks-act--cancel"
+                          title={stop.title}
+                          aria-label={stop.label}
+                          disabled={busy}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void cancel(m, stop.id);
+                          }}
+                        >
+                          {stop.scope === "occurrence" ? ICON_SKIP : ICON_BAN}
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {/* ONE time per row, relative and one unit wide (relativeWhen),
+                      with the absolute instant in the tooltip. It reads `at` — what
+                      the message was DUE at, the instant that never moves — and the
+                      tooltip is where a run that fired late or early is spelled out
+                      (messageWhenTitle). The "ran 07:12 today" label that used to
+                      sit beside this is gone: 2026-08-17, "I don't think I need this
+                      as well, the RAND Today stuff". */}
+                  <span className="tasks-msg-time" data-hint={messageWhenTitle(m)}>
+                    {relativeWhen(m.at)}
+                  </span>
+                </div>
+                {why && <p className="tasks-msg-error">{why}</p>}
+              </Fragment>
+            );
+          })}
+
+          {/* A FAILED FETCH HAS TO BE RECOVERABLE WHERE IT HAPPENED (bugbot, PR
+              #596). While the thread was capped, the "Show N more" button was
+              also the retry: a failed press left the button sitting there to be
+              pressed again. Removing the cap removed that by accident — the fetch
+              moved onto the disclosure, so the only way to ask again was to
+              collapse the row and re-expand it, which is a gesture nobody would
+              guess from an error line that does not mention it.
+
+              So the recovery sits next to the failure it is about (§4: help users
+              with errors, with the recovery action beside them). Same call the
+              disclosure makes, and `showMore` clears this error on its way back
+              in, so a retry that succeeds leaves nothing stale behind.
+
+              `role="alert"` on the line, because it appears without a press and a
+              reader who expanded the row is owed the news. The button is a real,
+              always-visible control rather than one of the page's hover-revealed
+              actions: those are conveniences on a working row, and this is the
+              only way out of a broken one. */}
+          {error && (
+            <p className="tasks-thread-error" role="alert">
+              {error}{" "}
+              <button
+                type="button"
+                className="tasks-retry"
+                disabled={loading}
+                onClick={onRetry}
+              >
+                Retry
+              </button>
+            </p>
+          )}
+
+          {/* No "Show N more" button here any more (2026-08-18). Expanding a task
+              now fetches the whole thread by itself (TasksList.toggle), so what
+              stands in the button's place is a line saying the trip is happening —
+              not a control, because there is nothing left to decide.
+
+              It names the NUMBER still coming (`view.hidden`, the server's count
+              less what we hold) rather than saying a bare "Loading…": the three
+              rows above it are already drawn, so without the count a long thread
+              looks like a short thread that has finished. It disappears when the
+              rest arrives, which is the only signal a person needed from it.
+
+              `aria-live="polite"` because this is the one thing on the row that
+              changes without a press — a reader who expanded the task should hear
+              that more is coming, and then be left alone. */}
+          {loading && (
+            <p className="tasks-thread-loading" aria-live="polite">
+              {view.hidden > 0 ? `Loading ${view.hidden} more…` : "Loading…"}
+            </p>
+          )}
+        </div>
+      )}
+      {erasing && (
+        <EraseTaskModal
+          task={task}
+          onClose={() => setErasing(false)}
+          onDone={() => {
+            setErasing(false);
+            // The page, not the row: the row this was pressed on is the thing
+            // that just went, so the receipt cannot live on it (the same reason
+            // Unarchive's sentence goes to the page). A clean delete now only
+            // pops (tone: "info" default) rather than staying in the panel —
+            // see DECISIONS-toasts-become-notifications.md's retention-
+            // narrowing reversal.
+            notify({ title: `Deleted ${shortTaskId(task.task_id)}`, tone: "info" });
+            onReload?.();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---- Board view: columns of tasks --------------------------------------------
+
+// A lane opens on twenty cards and reveals twenty at a time. Ten was two presses
+// to read a busy column (Akshil, 2026-08-18) and the lane scrolls anyway, so the
+// window is about how much is rendered, not about how much fits.
+const LANE_INITIAL_VISIBLE = 20;
+const LANE_REVEAL = 20;
+
+/**
+ * WHETHER A CARD LIFTS, whole — the two halves of the question in the one place
+ * that asks it.
+ *
+ * `isDraggable` is "has this card anywhere to go" (tasks-lib.dropLanes: a run to
+ * fire, a filing to undo). A DRAFT's exit is offered on the strength of it being
+ * a draft, and whether THIS draft is finished enough to send is the New task
+ * form's own Save gate — `canRunDraft`, which reaches into NewJobModal to apply
+ * it. tasks-lib cannot ask that (it would point the page's most-imported module
+ * at its largest one), so the Board does, here, and the answer feeds both the
+ * `draggable` attribute and the card's caption.
+ *
+ * A DONE CARD WEARING THE CHIP IS NOT ASKED THE SAME QUESTION, and it cannot be
+ * (Akshil, 2026-09-14). Its exit is offered on the strength of there being
+ * something unsent on the row (tasks-lib.rowExits), and the unsent thing is not
+ * ON the row: the listing carries a one-line preview, and the form or the words
+ * behind it come back from `GET /api/drafts` only once the drop has happened.
+ * So a bound form that is not finished enough to send lifts, and its refusal is
+ * Save's own sentence in the board's note line (draft-run) rather than a card
+ * that will not move — which is the right side to fail on: the reader can then
+ * see WHY, where a dead card says nothing at all.
+ */
+function cardLifts(task: Task): boolean {
+  return isDraggable(task) && (!isDraftTask(task) || canRunDraft(task));
+}
+
+/**
+ * WHAT THE ONE IRREVERSIBLE DROP IS ABOUT TO DO, in the reader's words, while
+ * the card is still in the air. The dashed legal-drop outline says a lane will
+ * accept the card; it cannot say that this particular lane SENDS something, and
+ * "run this now" is not undoable.
+ *
+ * Keyed by `DropAction.kind` and holding only the kinds that fire work, so the
+ * memo below can ask `kind in RUN_DROP_WORDS` instead of listing them twice. A
+ * filing drop (archive, unarchive) is absent on purpose: it is reversible, and a
+ * warning on it would teach the reader to ignore the one that matters.
+ */
+const RUN_DROP_WORDS = {
+  run: {
+    title: "Run the next scheduled message now",
+    hint: "Run now — the time stays put",
+  },
+  // Both re-runs say the same thing, because from the reader's side they ARE the
+  // same thing: the last message goes out again. Which call sends it — a copy of
+  // the schedule entry, or the words themselves — is tasks-lib.rerunAction's
+  // business (`resend` / `resay`).
+  resend: {
+    title: "Send the last message again",
+    hint: "Re-run — the last message goes again",
+  },
+  resay: {
+    title: "Send the last message again",
+    hint: "Re-run — the last message goes again",
+  },
+  // The draft's drop, and the only one that makes a task that did not exist
+  // (design.md §4). Worded as what it produces rather than as what it sends: the
+  // reader wrote the words themselves and does not need them quoted back.
+  "run-draft": {
+    title: "Send this draft now, as a task",
+    hint: "Run now — the draft becomes a task",
+  },
+  // A SETTLED ROW WEARING THE CHIP — Done or Archived alike (Akshil,
+  // 2026-09-14). Nothing about the task is re-run — the drop sends the sentence
+  // sitting unsent on it — so the words say the draft and never the task, which
+  // is also what keeps this apart from the re-run wording two lines up. They
+  // hold for the archived case unchanged: coming out of the filing cabinet is a
+  // consequence of the message, not a thing the reader is being warned about.
+  "send-draft": {
+    title: "Send the draft in this conversation now",
+    hint: "Send the draft now — the task is not re-run",
+  },
+  // SKIP IS IN THIS LIST AND IS NOT A RUN (the project queue, 2026-09-12). A
+  // queued card dropped on In Progress lands on the same lane the Upcoming drag
+  // lands on, so without a wording of its own the card would promise "Run now"
+  // for a gesture that starts nothing — and the one thing a queued card must
+  // never claim is that it can interrupt the run holding its folder. Its own
+  // sentence since 2026-09-21: the Run next button that used to share the
+  // wording is out of the UI, and the DRAG is now the only thing that says it.
+  skip: {
+    title: FORCE_START_LABEL,
+    hint: FORCE_START_HINT,
+  },
+} as const;
+
+// Which lanes are rolled up into the 52px rail. The RULE lives in tasks-lib —
+// `laneCollapsed` for what the store says and `laneRolledUp` for what is drawn —
+// and THIS is only half of the state: a lane with cards remembers the reader's
+// toggle here, and a lane with none remembers nothing at all (the peek, in
+// TaskBoard). So a lane nobody has touched keeps following the rule as it fills
+// and empties, and so does one they touched while it was empty.
+function readLaneChoices(): LaneChoices {
+  try {
+    return parseLaneChoices(localStorage.getItem(LANE_CHOICE_KEY));
+  } catch {
+    // A blocked/private store costs the memory, never the board.
+    return {};
+  }
+}
+
+export function TaskBoard({
+  tasks,
+  home = "",
+  onReload,
+  onQueued,
+  onOpenDraft,
+  onPickDraft,
+  draftOn = false,
+  missing,
+  emptyLabel = "Nothing to show here.",
+}: {
+  /** The page's sentence for an empty set (Scheduled `emptyLabel`). Five bare
+   * rails said nothing about WHY the board was empty; the List's sentence does,
+   * and the four views now share it. */
+  emptyLabel?: string;
+  /** Already filtered, in the SERVER's order — the LANES re-order it
+   * (tasks-lib.groupByColumn), which is the one thing this view does to the
+   * order it is handed and the one place it is decided. */
+  tasks: Task[];
+  home?: string;
+  /** Re-read the list after a drop lands (or fails). */
+  onReload: () => void;
+  /** A queue verb landed and the server's own answer has not arrived yet: paint
+   * this claim over the row until it does (tasks-lib.QueueOverride). The PAGE
+   * holds the claims, not this view — a board remounts on every navigation, and
+   * a claim that died with the component would be undone by the very next poll
+   * it was written to outrun. */
+  onQueued?: (override: QueueOverride) => void;
+  /** Re-open an unfinished New task form — the press on a `state: "draft"` card
+   *  (design.md, "Reopen path"). Same callback and same gesture as the List's. */
+  onOpenDraft?: (task: Task) => void;
+  /** Filter the board to the cards carrying unsent words — the Draft chip's
+   *  press (design.md, Round 2: the filter is List + Board). One boolean on the
+   *  same shared `TaskFilters` the List's chip writes, so switching view keeps
+   *  the filter and the chip that shows it. */
+  onPickDraft?: () => void;
+  /** Is that filter on? The chip's pressed state. */
+  draftOn?: boolean;
+  /** Folders the disk no longer has (Scheduled → useMissingFolders): a card in
+   * one says so, and its click raises a toast instead of leaving for an
+   * Explorer error. */
+  missing?: ReadonlySet<string>;
+}) {
+  const [choices, setChoices] = useState<LaneChoices>(readLaneChoices);
+  // Lanes the reader has opened WHILE EMPTY. Deliberately component state and
+  // deliberately not persisted: opening a column with nothing in it is a peek,
+  // and a peek is answered and over (tasks-lib, above `laneCollapsed`). A remount
+  // — every navigation back to this page — starts the board with none.
+  const [peeked, setPeeked] = useState<Set<BoardLane>>(() => new Set());
+  const [visible, setVisible] = useState<Record<string, number>>({});
+  // The card in flight and the lane under it. Native HTML5 drag — a column
+  // move needs nothing fancier than the platform's own.
+  const [dragging, setDragging] = useState<Task | null>(null);
+  const [overLane, setOverLane] = useState<BoardLane | null>(null);
+  // What the server said about the last move the board asked for — a drop, or a
+  // card's own Archive button. One line above the lanes, because both are the
+  // same kind of news about the same board.
+  const [note, setNote] = useState<string | null>(null);
+  // The same read bookkeeping the List uses, for the same reason: a card's
+  // pill has to go on the click that opens the thread, not 20 seconds later on
+  // the next poll. Only the whole-task half is wanted here — a card links the
+  // conversation, never one turn of it, so there is no per-message click to
+  // make on this view.
+  const { read, clearAll, restoreAll, settleAll } = useReadSet();
+
+  // The same question the List asks of its rows, asked of the same set here: a
+  // folder chip on every card of a board filtered to one project distinguishes
+  // nothing (tasks-lib.spansProjects). Asked of the BOARD's whole shown set rather
+  // than per lane, because a lane that happens to hold one project is not a page
+  // that holds one — the reader is looking at all five columns at once.
+  const showProject = useMemo(() => spansProjects(tasks), [tasks]);
+  /** Is the project queue on — read here only so the lanes below can key their
+   *  cards on the task's identity rather than on a name that moves at dispatch
+   *  (`taskListKeys`). Off, every card is keyed on `task.key` as before. */
+  const queueOn = useProjectQueueEnabled();
+
+
+  const allowed = useMemo(
+    () => new Set(dragging ? dropLanes(dragging) : []),
+    [dragging],
+  );
+
+  // The one lane whose drop is not a filing decision. It is named while the
+  // card is still in the air because "run this now" is not undoable and the
+  // dashed legal-drop outline says nothing about which of the two it is. A
+  // Blocked card's re-run (`resend`/`resay`, tasks-lib.rerunAction) is the same
+  // kind of drop — a NEW message goes out — so it carries the same warning,
+  // worded for what it does: the last message again, not the next one early.
+  const runDrop = useMemo(() => {
+    if (!dragging) return null;
+    for (const col of BOARD_LANES) {
+      const kind = dropAction(dragging, col.key)?.kind;
+      if (kind && kind in RUN_DROP_WORDS) {
+        return { lane: col.key, kind: kind as keyof typeof RUN_DROP_WORDS };
+      }
+    }
+    return null;
+  }, [dragging]);
+  const runLane = runDrop?.lane ?? null;
+  const runTitle = RUN_DROP_WORDS[runDrop?.kind ?? "run"].title;
+  const runHint = RUN_DROP_WORDS[runDrop?.kind ?? "run"].hint;
+
+  // DROPS ALREADY IN THE AIR, by task key.
+  //
+  // A drag is a quarter of a second and a POST is not, so the same card can be
+  // picked up and dropped again before the first request answers — and two of
+  // these arms CREATE work rather than move it. A `run-draft` posted twice is
+  // one `draft_id` turned into two tasks; a `send-draft` posted twice is the
+  // reader's own sentence said twice into one conversation. Neither is undoable
+  // and neither is visible until the reload, which is what makes the second drop
+  // so easy to make.
+  //
+  // THE REF IS THE GUARD and the state is only its shadow: the check and the
+  // claim have to happen in the same tick as the drop event, and `setState` is
+  // not that. The state exists so the cards can re-render — all it does there is
+  // stop the card lifting again, which is the cheap half of saying the same
+  // thing where the pointer is.
+  //
+  // AND IT IS HELD UNTIL THE BOARD HAS RE-READ (Bugbot, PR #1140): `onReload`
+  // only STARTS the listing fetch, so a lock dropped in the `finally` opened
+  // the exact window it exists to close — the sent card was still standing in
+  // its old lane, draggable, until the new rows arrived. A drop that SUCCEEDED
+  // therefore keeps its key until the next `tasks` the board is handed, which
+  // is the read that moves (or removes) the card; a drop that was REFUSED frees
+  // at once, because a refusal is exactly when the reader wants to retry.
+  const inFlightRef = useRef<Set<string>>(new Set());
+  const [inFlight, setInFlight] = useState<ReadonlySet<string>>(() => new Set());
+  const settledRef = useRef<Set<string>>(new Set());
+  const holdDrop = (key: string): boolean => {
+    if (inFlightRef.current.has(key)) return false;
+    inFlightRef.current.add(key);
+    setInFlight(new Set(inFlightRef.current));
+    return true;
+  };
+  const freeDrop = (key: string) => {
+    inFlightRef.current.delete(key);
+    settledRef.current.delete(key);
+    setInFlight(new Set(inFlightRef.current));
+  };
+  /** The drop landed: keep the lock, and let the next listing release it. */
+  const settleDrop = (key: string) => {
+    settledRef.current.add(key);
+  };
+  useEffect(() => {
+    // Refs and one stable setter only, so `tasks` can be the sole dependency:
+    // this is "the listing changed", nothing else.
+    if (!settledRef.current.size) return;
+    for (const key of settledRef.current) inFlightRef.current.delete(key);
+    settledRef.current.clear();
+    setInFlight(new Set(inFlightRef.current));
+  }, [tasks]);
+
+  const drop = async (lane: BoardLane) => {
+    const task = dragging;
+    setDragging(null);
+    setOverLane(null);
+    if (!task || !allowed.has(lane)) return;
+    // Which of the three things this drop means — file the task, un-file it, or
+    // run its next message early — is tasks-lib's decision, not this handler's.
+    const action = dropAction(task, lane);
+    if (!action) return;
+    // The SECOND drop on a card whose first is still running is ignored
+    // outright — see `inFlightRef`. Silently: the reader made one gesture twice
+    // and the first one is already doing what they asked for, so there is no
+    // news here and a note line saying "wait" would be the only thing that
+    // changed on the board.
+    if (!holdDrop(task.key)) return;
+    setNote(null);
+    try {
+      if (action.kind === "skip") {
+        // Queued → In Progress IS A FORCE START (Akshil, 2026-09-21): the card
+        // runs now, beside whatever holds the folder, and its task leaves the
+        // queue for good — the same verb the row's button presses. Skip the
+        // line is gone from every surface; the drop kind keeps its old name
+        // only because the lane detector files queued cards under it.
+        await performForceStart(task);
+      } else if (action.kind === "run") {
+        // Upcoming → In Progress. The message goes out NOW and its `due` is
+        // left alone, so the thread reads as a run that happened early rather
+        // than a schedule that was quietly rewritten.
+        await runScheduledNow(action.entryId);
+      } else if (action.kind === "run-draft") {
+        // Draft → In Progress, the one drop that creates work (design.md §4).
+        // The stored form is submitted as a real task due immediately and the
+        // draft goes with it; `runDraftNow` owns that call, because the form's
+        // shape is the New task modal's fact and not this board's. A refusal
+        // lands in the same note line as every other drop's, below.
+        //
+        // CREATED, THEN FIRED, the same two steps the `resay` arm below takes
+        // and for the same reason (Akshil, 2026-09-11: "it shouldn't schedule
+        // it, it should rerun instantly"). The POST alone leaves a task due
+        // "now" waiting for the scheduler's next tick — which is a card the
+        // reader just dragged into In Progress sitting in Upcoming until it
+        // catches up. run-now spawns before it answers, so the reload below
+        // already finds the run live.
+        await performRun({ kind: "run-now", entryId: await runDraftNow(task) });
+      } else if (action.kind === "send-draft") {
+        // Done → In Progress, and the ONLY way a Done card leaves that lane by
+        // drag (Akshil, 2026-09-14: "if I have a done task that has draft and I
+        // move it to In Progress it should run, why not?"). The task is not
+        // re-run: what goes out is the unsent thing the row is wearing the chip
+        // for, into the conversation it belongs to. Which draft that is, and
+        // where, is `action`'s answer (tasks-lib.sendDraftAction); reading its
+        // body back and putting it on the wire is draft-run's, because the
+        // stored shapes are the New task modal's fact and not this board's.
+        //
+        // And FIRED, exactly as the draft row's drop above is: the words were
+        // dragged onto In Progress, so they go now rather than at whatever
+        // moment the scheduler next looks.
+        await performRun({
+          kind: "run-now",
+          entryId: await runRowDraftNow(task, action),
+        });
+      } else if (action.kind === "resend") {
+        // Blocked → In Progress, nothing pending: the scheduled message whose
+        // run broke goes again as a NEW message in the same thread
+        // (tasks-lib.rerunAction). The server's note rides along when the
+        // conversation was mid-turn and the message queued instead.
+        const said = await performRun({ kind: "resend", entryId: action.entryId });
+        if (said.note) setNote(said.note);
+      } else if (action.kind === "resay") {
+        // Same drop, typed message: no entry to copy, so the words travel as a
+        // message into the session — created, then FIRED (Akshil, 2026-09-11:
+        // "it shouldn't schedule it, it should rerun instantly"). run-now
+        // spawns before it answers, the same road `resend` takes, so the
+        // reload below already finds the task In progress. `delay_seconds: 1`
+        // only because the endpoint wants exactly one of due/delay; `immediate`
+        // keeps it off the calendar (schedule-lib.taskChips) — nobody planned
+        // this for a time.
+        const made = await scheduleMessage({
+          target: action.target,
+          message: action.body,
+          session_id: action.sessionId,
+          delay_seconds: 1,
+          immediate: true,
+        });
+        await performRun({ kind: "run-now", entryId: made.entry.id });
+      } else if (action.kind === "unarchive") {
+        // Archive → anywhere else. ONE meaning whatever `lane` is: the filing is
+        // dropped and the task lands in whatever lane it DERIVES to, which is
+        // frequently not the lane under the cursor. Nothing runs — including a
+        // drop onto In Progress, which is this same call: that lane is Claude's
+        // output, not a state a reader can assert, so the card goes there only
+        // if a turn genuinely is live.
+        //
+        // The card redrawing in the lane it derives to is the whole receipt
+        // (Akshil, 2026-09-21 — the destination sentence is gone from every
+        // surface); only a refusal gets a note.
+        await performUnarchive(task.key);
+      } else {
+        // → Archive. ONE call for both halves — the pending work is cancelled
+        // and the session is filed — because a card dropped here that still
+        // fires tomorrow un-archives itself.
+        await archiveTask(task.key);
+      }
+      // LANDED: the lock outlives this handler — see `settleDrop`.
+      settleDrop(task.key);
+    } catch (e) {
+      // A refusal here is a real answer, not a bug — the scheduler's loop may
+      // have sent the message, or claimed it, while the card was in the air —
+      // so the server's own sentence is what gets shown, and the board re-reads
+      // either way. And the card is FREED, because a card that stayed locked
+      // after a refusal would be a card the reader cannot retry — and a refusal
+      // is exactly when they want to.
+      setNote((e as Error).message);
+      freeDrop(task.key);
+    }
+    onReload();
+  };
+
+  // The same two calls the drop above makes, asked for by a card's own button
+  // instead of a gesture. It lives up here rather than in TaskCard so the refusal
+  // lands in the board's ONE note line, beside the drag's: a sentence tucked
+  // inside a 260px lane under one card is a sentence nobody reads. Unarchive
+  // itself says nothing on success (performUnarchive), here as everywhere.
+  // FORCE START from a card's own button — run this card's oldest waiting
+  // message now, beside whatever holds its folder. Up here for `refile`'s
+  // reason: the refusal (a 409 while the conversation has a turn open) belongs
+  // in the board's ONE note line rather than inside a 260px lane.
+  //
+  // The drag onto In Progress presses the same verb (`performForceStart`) and
+  // shares this note line, so a refusal reads the same either way.
+  const force = async (task: Task) => {
+    setNote(null);
+    try {
+      await performForceStart(task);
+    } catch (e) {
+      setNote((e as Error).message);
+    }
+    onReload();
+  };
+
+  const refile = async (task: Task, intent: FilingIntent) => {
+    setNote(null);
+    try {
+      if (intent.kind === "archive") {
+        await archiveTask(task.key);
+      } else {
+        await performUnarchive(task.key);
+      }
+    } catch (e) {
+      setNote((e as Error).message);
+    }
+    onReload();
+  };
+
+  // Run now / Re-run from a card, which the Board simply did not have (Akshil,
+  // 2026-08-17: "I have a rerun option in list, I have a rerun option in
+  // calendar, but I don't have a rerun option in Kanban"). The drag covers half
+  // of it — Upcoming → In Progress runs the pending message early — and cannot
+  // cover the other half, because re-sending a message that already went is work
+  // a gesture must not be able to consent to. So the card gets the button both
+  // other views have.
+  //
+  // Up here rather than in TaskCard, exactly like `triage` above: this is the
+  // board's own call and its refusal belongs in the board's ONE note line. The
+  // common one is a 409 because that conversation has a turn open right now, which
+  // reads as "wait", not "broken" — the same quiet line the drag's refusals use.
+  const runNow = async (task: Task, intent: TaskRunIntent) => {
+    setNote(null);
+    try {
+      // performRun is shared with the List's row, so "Re-run" cannot mean two
+      // different calls on two views.
+      const said = await performRun(intent);
+      if (said.note) setNote(said.note);
+      if (said.queued) {
+        onQueued?.({ ...said.queued, key: task.key });
+        setNote(`Waiting — ${queueCaption({ ...task, ...said.queued })?.text ?? QUEUED_WORD}.`);
+      }
+    } catch (e) {
+      setNote((e as Error).message);
+    }
+    onReload();
+  };
+
+  // Opening a card: the conversation, and the unread cleared on the way out.
+  //
+  // Up here with triage and runNow because the read set lives here — performOpen
+  // needs the local half, and this is where it is. Everything else about what
+  // opening a thread means (mark local-first, ONE whole-task request, fire and
+  // forget, navigate regardless) lives in performOpen, shared with the List row's
+  // Open chat button so the same gesture cannot mean two things on two views.
+  // What a card HOLDS is its listing window and nothing else — the Board has no
+  // Show more, so heldMessages(task) is the whole of it. Passed explicitly all the
+  // same: the shared performer used to read this off `task.messages` itself, which
+  // is exactly why the List's expanded thread got marked three messages deep.
+  const openCard = (task: Task, intent: OpenThreadIntent) => {
+    performOpen(task, intent, { clearAll, restoreAll, settleAll }, heldMessages(task));
+  };
+  // Which card's conversation is open in the side peek right now — the halo,
+  // the List row's own mark drawn on a card (styles/task-peek.css).
+  const peekOn = usePeekHost();
+  // Unconditional — see the List's own note above.
+  const openKey = usePeekedKey();
+  const peekedKey = peekOn ? openKey : null;
+
+  // Shared by expanded lane bodies AND collapsed rails, so a rolled-up lane —
+  // an empty one, or one the reader closed — still catches the drop most cards
+  // are allowed.
+  const dropProps = (lane: BoardLane) => ({
+    onDragOver: (ev: ReactDragEvent) => {
+      if (!dragging || !allowed.has(lane)) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "move";
+      if (overLane !== lane) setOverLane(lane);
+    },
+    onDragLeave: () => {
+      if (overLane === lane) setOverLane(null);
+    },
+    onDrop: (ev: ReactDragEvent) => {
+      ev.preventDefault();
+      void drop(lane);
+    },
+  });
+
+  // `nowCollapsed` is what the reader is looking at — the rule's answer or their
+  // own earlier one — so the press always means "the other one of these two".
+  // Recording the RESULT rather than a flip is what makes the store a record of
+  // choices instead of a snapshot of the board.
+  //
+  // WHICH of the two stores it lands in is decided by the lane's contents, and
+  // by nothing else. A press on a lane with cards is a preference and is written
+  // down; a press on an empty one is a peek and stays in memory, so nothing a
+  // reader does to an empty column can outlive the sitting. The peek is a
+  // straight toggle because it is the only thing the empty case has: closing a
+  // peeked lane is removing the peek, not recording "collapsed".
+  const toggleLane = (key: BoardLane, nowCollapsed: boolean) => {
+    if ((byLane.get(key)?.length ?? 0) === 0) {
+      setPeeked((cur) => {
+        const next = new Set(cur);
+        if (nowCollapsed) next.add(key);
+        else next.delete(key);
+        return next;
+      });
+      return;
+    }
+    setChoices((cur) => {
+      const next = { ...cur, [key]: !nowCollapsed };
+      try {
+        localStorage.setItem(LANE_CHOICE_KEY, JSON.stringify(next));
+      } catch {
+        // best-effort; a full or blocked store never breaks the board
+      }
+      return next;
+    });
+  };
+
+  const byLane = useMemo(() => groupByColumn(tasks), [tasks]);
+
+  // A peek dies the moment the lane it was about stops being empty, so a column
+  // that fills up and drains again comes back rolled up rather than wearing an
+  // answer to a question the reader asked about a different, older emptiness.
+  // `laneRolledUp` already ignores the peek while there are cards, so this only
+  // has to clear it inside that window — which is exactly where it is safe to.
+  useEffect(() => {
+    setPeeked((cur) => {
+      if (cur.size === 0) return cur;
+      const next = new Set([...cur].filter((key) => (byLane.get(key)?.length ?? 0) === 0));
+      return next.size === cur.size ? cur : next;
+    });
+  }, [byLane]);
+
+  // After every hook above, so a set that empties and refills does not change
+  // the hook order. The List's element and class, for the List's reason: one
+  // page, one way of saying there is nothing here.
+  if (tasks.length === 0) {
+    return (
+      <>
+        {/* The note rides along: an unarchive or a refused drop that removed
+            the LAST matching card is exactly when "where did it go" needs
+            answering, and the empty sentence alone read as a disappearance
+            (Bugbot, #1079). */}
+        {note && <p className="schedule-tv-note">{note}</p>}
+        <p className="schedule-tv-empty">{emptyLabel}</p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {note && <p className="schedule-tv-note">{note}</p>}
+      {/* The LANES, not every status: `needs_attention` draws inside Blocked
+          (schedule-lib.BOARD_LANES / laneOf, and groupByColumn puts those cards
+          at the top of it). A board is read by sweeping across it, and a sixth
+          column that is empty except during the minutes somebody is being
+          waited on is a column that teaches the reader to skip it. */}
+      <div className="schedule-tv-board">
+        {BOARD_LANES.map((col) => {
+          const lane = byLane.get(col.key) ?? [];
+          // How many CARDS in this column still hold something nobody has read —
+          // the same fact the List's task rows carry, one level up. It matters
+          // most on a COLLAPSED lane, which is a rail 52px wide showing nothing
+          // but a ring, a word and a total: without this, a lane folded away
+          // could fill with news and say nothing about it. Counted in tasks
+          // rather than messages (tasks-lib.laneUnread) because the header stands
+          // over cards.
+          const news = laneUnread(lane, read);
+          const rolled = laneRolledUp(col.key, lane.length, choices, peeked);
+          if (rolled) {
+            // An empty rail is STILL A BUTTON. It briefly was not — empty
+            // outranked the reader's choice, so the press did nothing and the
+            // control said so with `aria-disabled` — and that was the wrong
+            // half of the complaint to fix (Akshil, 2026-08-18). Rolling up by
+            // default is what keeps four empty columns off the board; refusing
+            // to open is a lane telling the reader they may not look inside it.
+            // An expanded empty lane shows an empty panel, which is a fine
+            // answer to "is there anything in here", and it is a drop target
+            // either way.
+            //
+            // `empty` survives for the one thing that WAS the complaint: the
+            // count below.
+            const empty = lane.length === 0;
+            return (
+              <button
+                type="button"
+                key={col.key}
+                className={
+                  "schedule-tv-rail" +
+                  (dragging && allowed.has(col.key) ? " is-drop-legal" : "") +
+                  (runLane === col.key ? " is-drop-run" : "") +
+                  (overLane === col.key ? " is-drop-over" : "")
+                }
+                title={
+                  runLane === col.key
+                    ? runTitle
+                    : empty
+                      ? `${col.label}: nothing yet`
+                      : `${col.label}: ${lane.length}`
+                }
+                onClick={() => toggleLane(col.key, true)}
+                {...dropProps(col.key)}
+              >
+                <StatusIcon status={col.key} unread={news > 0} count={news} />
+                <span className="schedule-tv-rail-label">{col.label}</span>
+                {/* No `0`. A count answers "how many are hidden in here", and on
+                    an empty rail the honest answer is already the whole rail —
+                    the chip only added a number to read before you could see it
+                    said nothing (Akshil, screenshot, 2026-08-18). */}
+                {!empty && (
+                  <span className="schedule-tv-rail-count">{lane.length}</span>
+                )}
+              </button>
+            );
+          }
+          const shown = visible[col.key] ?? LANE_INITIAL_VISIBLE;
+          const cards = lane.slice(0, shown);
+          /** Where the "waiting" rule goes, or -1 — read off the same array the
+           *  lane draws, so it cannot land anywhere but on `groupByColumn`'s own
+           *  seam, and never below the fold's last visible card. */
+          const splitAt = laneSplitAt(col.key, cards);
+          const hidden = Math.max(lane.length - cards.length, 0);
+          /** The List's rule, on the Board's cards — a dispatched message is one
+           *  task under two names here too (`taskListKeys`). Per LANE, which is
+           *  all React asks: a card that crosses lanes is remounted by the move
+           *  itself and there is nothing to preserve. */
+          const cardKeys = taskListKeys(cards, queueOn);
+          return (
+            <div className="schedule-tv-lane" key={col.key}>
+              <button
+                type="button"
+                className="schedule-tv-lane-head"
+                title={`Collapse ${col.label}`}
+                onClick={() => toggleLane(col.key, false)}
+              >
+                {/* The group header's own unread mark, the same ring the cards
+                    under it wear — filled while any of them holds something
+                    unread, and naming the number on hover. */}
+                <StatusIcon status={col.key} unread={news > 0} count={news} />
+                <span className="schedule-tv-lane-label">{col.label}</span>
+                {/* "7", or "1 running · 2 queued" on the one lane that now holds
+                    two statuses (tasks-lib.laneCountLabel). A bare total over a
+                    column of three running tasks and four waiting ones answers a
+                    question nobody asked. */}
+                <span className="schedule-tv-lane-count">
+                  {laneCountLabel(col.key, lane)}
+                </span>
+              </button>
+              <div
+                className={
+                  "schedule-tv-lane-body" +
+                  (dragging && allowed.has(col.key) ? " is-drop-legal" : "") +
+                  (runLane === col.key ? " is-drop-run" : "") +
+                  (overLane === col.key ? " is-drop-over" : "")
+                }
+                {...dropProps(col.key)}
+              >
+                {runLane === col.key && (
+                  <p className="tasks-run-hint">{runHint}</p>
+                )}
+                {cards.map((task, ix) => (
+                  <Fragment key={cardKeys[ix]}>
+                    {/* THE SEAM, drawn only where there is one: a thin dashed
+                        rule between the cards that are RUNNING and the ones
+                        waiting on a busy folder, with the reader's own word on
+                        it. It is what lets `queued` give up its column without
+                        the two halves of this lane reading as one undifferentiated
+                        pile (schedule-lib.laneOf, tasks-lib.laneSplitAt). Dashed
+                        rather than solid because it is a grouping, not a
+                        boundary — the cards under it are in the same lane and one
+                        press away from crossing it. */}
+                    {ix === splitAt && (
+                      <p className="schedule-tv-lane-split" aria-hidden="true">
+                        <span>{LANE_SPLIT_LABEL}</span>
+                      </p>
+                    )}
+                  <TaskCard
+                    task={task}
+                    home={home}
+                    showProject={showProject}
+                    onPickDraft={onPickDraft}
+                    draftOn={draftOn}
+                    folderMissing={missing?.has(taskFolder(task)) ?? false}
+                    onMissing={toastMissingFolder}
+                    // The DISPLAYED count, so a card cleared by its own click
+                    // stays cleared until the poll agrees — the same merge the
+                    // List's rows make over the same set.
+                    unread={taskUnread(task, read)}
+                    peekOn={peekOn}
+                    peeked={peekedKey === task.key}
+                    isDragging={dragging?.key === task.key}
+                    dropping={inFlight.has(task.key)}
+                    onDragStart={() => setDragging(task)}
+                    onDragEnd={() => {
+                      setDragging(null);
+                      setOverLane(null);
+                    }}
+                    onFile={(intent) => refile(task, intent)}
+                    onRun={(intent) => runNow(task, intent)}
+                    onForceStart={() => force(task)}
+                    onErased={onReload}
+                    onOpen={(intent) => openCard(task, intent)}
+                    {...(onOpenDraft ? { onOpenDraft } : {})}
+                  />
+                  </Fragment>
+                ))}
+                {hidden > 0 && (
+                  <button
+                    type="button"
+                    className="schedule-tv-more"
+                    onClick={() =>
+                      setVisible((cur) => ({
+                        ...cur,
+                        [col.key]: (cur[col.key] ?? LANE_INITIAL_VISIBLE) + LANE_REVEAL,
+                      }))
+                    }
+                  >
+                    Show {Math.min(LANE_REVEAL, hidden)} more
+                  </button>
+                )}
+                {lane.length > 0 && (hidden > 0 || lane.length >= shown) && (
+                  <p className="schedule-tv-showing">
+                    Showing {cards.length} of {lane.length}
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function TaskCard({
+  task,
+  home,
+  showProject,
+  onPickDraft,
+  draftOn,
+  folderMissing,
+  onMissing,
+  unread,
+  peekOn = false,
+  peeked = false,
+  isDragging,
+  dropping = false,
+  onDragStart,
+  onDragEnd,
+  onFile,
+  onRun,
+  onForceStart,
+  onOpen,
+  onOpenDraft,
+  onErased,
+}: {
+  task: Task;
+  home: string;
+  /** The card's task was erased (the foot's trash → EraseTaskModal): the
+   *  Board re-reads, since the card that was pressed is the one that left. */
+  onErased: () => void;
+  /** Whether the folder chip is worth drawing — the BOARD's answer, for the same
+   * reason the List row takes it as a prop (spansProjects). */
+  showProject: boolean;
+  /** The Draft chip's press and its pressed state, passed through untouched —
+   *  see TaskBoard's own props. */
+  onPickDraft?: () => void;
+  draftOn?: boolean;
+  /** The task's folder is gone (useMissingFolders): the card says so, and its
+   * click goes to `onMissing` — a toast — rather than `onOpen`. */
+  folderMissing: boolean;
+  onMissing: () => void;
+  /** What the mark stands for: the server's count less anything cleared here since,
+   * which the board merges (taskUnread) rather than the card re-deriving. */
+  unread: number;
+  /** The side peek exists on this page at all (`task_peek_enabled`). */
+  peekOn?: boolean;
+  /** This card's task is the one in the side peek — halo on, hover fill off
+   * (styles/task-peek.css). */
+  peeked?: boolean;
+  isDragging: boolean;
+  /** This card's own drop is still in flight (TaskBoard's `inFlight`), so it
+   *  must not lift into a second one. */
+  dropping?: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  /** File this card away, or bring it back out — the direction comes from the
+   * card's own filingIntent, and the board owns the call so its refusal (and, for
+   * an unarchive, the lane it landed in) lands in the board's own note line. */
+  onFile: (intent: FilingIntent) => Promise<void>;
+  /** Run the task's next message now, or re-send the one that failed. Same
+   * arrangement and same reason as onTriage: the board makes the call. */
+  onRun: (intent: TaskRunIntent) => Promise<void>;
+  /** Run this queued card's oldest waiting message NOW, beside whatever owns
+   * its folder — Force start. A button and not only a drop for the reason
+   * Archive is: the Queued lane is rolled up whenever it is empty, and a gesture
+   * that begins with "expand the lane first" is not the only way a capability
+   * may be reachable. The drag onto In Progress presses the same verb. The
+   * board owns the call, so its refusal lands in the one note. */
+  onForceStart: () => Promise<void>;
+  /** Open the conversation, marking the thread read on the way. The board owns
+   * it because the board owns the read set — and it is only ever called with a
+   * non-null intent, so this card cannot navigate to nowhere. */
+  onOpen: (intent: OpenThreadIntent) => void;
+  /** …and the ONE card whose press is not that: an unfinished New task form,
+   *  which re-opens the modal rather than navigating anywhere (design.md). */
+  onOpenDraft?: (task: Task) => void;
+}) {
+  // Whether this card lifts at all, and it is not one question: a task with no
+  // session (§5 — Claude Code mints the id on the first run) has nothing to
+  // TRIAGE, while a task with no pending message has nothing to RUN. A card
+  // that can do neither must not lift, rather than lift into a call that can
+  // only fail. tasks-lib.dropLanes holds both halves — and `cardLifts` adds the
+  // third, which is not tasks-lib's to hold: a DRAFT lifts when the New task
+  // form would let it be saved, because its drop submits that form (design.md
+  // §4).
+  const lifts = cardLifts(task);
+  /** …and the one card whose refusal to lift a reader can DO something about: a
+   *  draft with nothing written in it yet. Every other locked card is locked by
+   *  a fact about the work (a run in flight, a task with no session), which is
+   *  not a sentence worth saying; this one is one instruction long.
+   *
+   *  Asked of `lifts` and not of `draggable` below, deliberately: a card pinned
+   *  down because its own drop is still running is not an unfinished draft, and
+   *  telling the reader to go and finish it would be answering a question they
+   *  did not ask. */
+  const lockedDraft = !lifts && isDraftTask(task);
+  /** THE ATTRIBUTE, which is `lifts` less the seconds this card's own drop is in
+   *  the air (TaskBoard's `inFlight`). The board already ignores a second drop
+   *  on a key it is still working on; this is the same refusal said where the
+   *  pointer is, so the card does not lift into a gesture that will do nothing.
+   *  Momentary and unannounced — there is nothing wrong here, and a card that
+   *  explained itself for 300 ms would be noise. */
+  const draggable = lifts && !dropping;
+  // THE ONE LINE THIS CARD IS TITLED BY — the List row's and the Cards wall's
+  // own rule, from the one function that holds it (tasks-lib.cardTitleLine).
+  const line = cardTitleLine(task);
+  // Where the click goes and whether it also clears the thread's unread — one
+  // answer, from tasks-lib, and the SAME answer the List row's Open chat button
+  // gets. Null means the card has nowhere to go (no session yet), and then the
+  // click does nothing at all: no navigation, and no mark either, since nothing
+  // was shown to the reader.
+  const open = openThreadIntent(task, unread);
+  /** The List row's quick door, on the card (design.md, Round 3): today's
+   *  Explorer route — `open.href`, the SAME address the card's own press has
+   *  always used, so the door and the card cannot disagree about where this
+   *  task lives. Null on a card with nowhere to go, and on one whose folder the
+   *  disk has lost (its press already says so). */
+  const page = folderMissing ? null : (open?.href ?? null);
+  // Filing without dragging, in whichever direction this card has. The drag stays
+  // as the accelerator, but it cannot be the ONLY way: the Archive lane is
+  // collapsed by default, so BOTH gestures otherwise start with "expand Archive
+  // first" — and for a card already in there, a collapsed lane draws no card to
+  // drag at all. Same predicate as the drops, by construction: filingIntent asks
+  // dropAction.
+  //
+  // Both views draw the same button from the same intent, which is the thing this
+  // page's vocabulary is most careful about: a Board that offered a return the
+  // List did not draw is exactly the divergence the old SHOW_UNARCHIVE was.
+  const file = filingIntent(task);
+  // Run now / Re-run, which the List row and the calendar popover both already
+  // offer and this card did not. The SAME function decides it here as there
+  // (tasks-lib.taskRunIntent, which asks runNowIntent — the very function
+  // dropAction asks), so the card's button, the List's button and the drag onto
+  // In Progress can never fire different messages. Nothing about which message
+  // or which call is re-derived on this side.
+  //
+  // NOT ON AN ARCHIVED CARD (showsRowActions) — same rule, same reason, as the
+  // List row: the only decision left against a card in Archive is whether it is
+  // still in Archive, so Unarchive is the only button it grows.
+  const run = showsRowActions(task) ? taskRunIntent(task) : null;
+  // The run still to come, when this card's lane does not already order by it.
+  // The mark after the title — clock or circle arrows (tasks-lib.scheduledMark),
+  // the List row's own, so the two views say "this runs by itself" alike.
+  const sched = scheduledMark(task);
+  // …and the `Draft` chip: a chat draft joined onto this task's session, or
+  // — on a draft row — the unfinished form itself (tasks-lib.draftTag).
+  // Hidden while the side peek holds this row's draft (tasks-lib.draftHeldByPeek).
+  const heldInPeek = draftHeldByPeek(task, peeked);
+  const draft = heldInPeek ? null : draftTag(task);
+  // The lane this card is IN — the COLUMN it is drawn under, which is why it is
+  // `laneOf` and not the status alone: a waiting card sits in Blocked, and the
+  // header above it says Blocked. Not passed down either way: `groupByColumn`
+  // files every card by exactly this, so asking it here is asking the function
+  // that decided which header the card is sitting under, where a prop would be a
+  // second opinion about a fact the board has already settled.
+  const status = taskColumn(task);
+  const lane = laneOf(status);
+  // Whether the ring would SAY anything on this card. See the head below: the
+  // ring is drawn only when it disagrees with the lane, and `isFailedTask` is the
+  // one place that knows what "reads as failed" means (the blocked lane, or the
+  // flag that repaints a Done ring red). The lane check is what turns that into
+  // "disagrees": in the blocked lane the two agree and the header has said it.
+  //
+  // A WAITING CARD ALWAYS DRAWS ONE, because its status and its lane are
+  // genuinely different facts — "Blocked" is the column it is filed under and
+  // "Needs attention" is what is true of it — and that is the one card whose
+  // ring is the difference between "somebody has to look at this eventually" and
+  // "somebody has to answer this now".
+  const failedOffLane = isFailedTask(task) && lane !== "blocked";
+  const waiting = needsAttention(task);
+  /** …and the OTHER sentence a not-moving row can carry: the plan's window,
+   *  named and dated ("Usage limit · resumes 4:00 AM"). "" on every row the usage
+   *  limit did not stop. */
+  const limit = usageLimitCaption(task);
+  const [busy, setBusy] = useState(false);
+  // The Board's own copy of the List row's erase confirm; see the foot.
+  const [erasing, setErasing] = useState(false);
+  // …and of its discard, for the same reason: one press, not two.
+  const [discarding, setDiscarding] = useState(false);
+  const refile = async (intent: FilingIntent) => {
+    setBusy(true);
+    try {
+      await onFile(intent);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const runNow = async (intent: TaskRunIntent) => {
+    setBusy(true);
+    try {
+      await onRun(intent);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    // A wrapper, only because the card IS a button and a button cannot hold
+    // one. The action is a SIBLING pinned over the card's head — where the head
+    // has spare room to its right on every card — rather than a nested control
+    // the browser would refuse to parse.
+    <div className={"tasks-card-wrap" + (isDragging ? " is-dragging" : "")}>
+      <button
+        type="button"
+        className={
+          "schedule-tv-card" +
+          (draggable ? " is-draggable" : "") +
+          (peeked ? ` ${PEEK_OPEN_CLASS}` : "") +
+          (isDragging ? " is-dragging" : "")
+        }
+        // The side peek's halo selector and the prev/next walk's place. The
+        // Board's DOM order IS "column by column" — the lanes are rendered in
+        // BOARD_COLUMNS order, each with its cards — which is exactly the walk
+        // design.md asks for here (shell/task-peek-store.ts). Absent entirely
+        // when the feature is off.
+        {...(peekOn ? peekItemProps(task.key, peekOpenable(task)) : {})}
+        /* The Board card's own caption, on the same instant panel as the List's
+           (hints.ts). It is the same page and the same fact; a card that waited
+           four seconds while the rows beside it answered at once would read as a
+           different kind of thing. */
+        /* …and on a draft that cannot run, the hint is that sentence instead of
+           the title. Nothing is lost: a draft card's title is drawn on its own
+           face, and the reader hovering a card that just refused to lift is
+           asking why, not what it is called. */
+        /* THE NEWEST REPLY, AND ONLY THAT (Akshil, 2026-09-20: "in kanban board
+           when we hover over task title, let's also show last response first
+           line" — then "let's not show the title, only the last reply"): the
+           List row's own reply line, in the row's own styles, without the
+           title line above it — hints.ts `renderTaskHint` with an empty
+           `data-hint-title`. A card whose conversation has no reply yet has no
+           caption at all (`data-hint=""` is the opt-out): the title is drawn
+           on the card's face, and the reader was not asking for it. The one
+           exception is a draft that cannot run, whose caption is the sentence
+           saying why. */
+        data-hint={lockedDraft ? "Finish the draft to run it." : task.last_reply || ""}
+        data-hint-title=""
+        data-hint-reply={lockedDraft ? "" : task.last_reply || ""}
+        draggable={draggable}
+        onDragStart={(ev) => {
+          // Some data is required for Firefox to start a drag at all; the task
+          // itself travels through React state, not dataTransfer.
+          ev.dataTransfer.setData("text/plain", task.key);
+          ev.dataTransfer.effectAllowed = "move";
+          onDragStart();
+        }}
+        onDragEnd={onDragEnd}
+        onClick={() => {
+          // The draft arm first, for the List row's reason: a draft has no
+          // session and no folder to be missing from — the form IS its content.
+          // Both kinds of draft come through here, the never-sent chat included
+          // (Akshil, 2026-09-12).
+          if (onOpenDraft && isDraftTask(task)) onOpenDraft(task);
+          else if (folderMissing) onMissing();
+          else if (open) onOpen(open);
+        }}
+      >
+        {/* The head is the card's marks — the id, the live ping, and a status ring
+            only when that ring has something to say.
+
+            The ring earns its place on a card by DISAGREEING with the lane, and is
+            silent when it would only repeat it. A card is never read outside the
+            lane it was filed into, and that lane's header already carries the ring
+            and the word ("◯ UPCOMING 9"), so on the common card — status and lane
+            being the same fact — the ring next to the id was the column saying its
+            own name a second time (Akshil, 2026-08-17: "that is just repetitive
+            here").
+
+            Which leaves the one card where they are NOT the same fact. `failed` is
+            a flag beside `status`, not a value of it, and the two disagree in
+            exactly one direction (server routers/tasks.py `_failed`): a broken run
+            triaged to Done or Archive, or one whose session is live again, keeps
+            the flag while the lane says something else. Those cards sit under a
+            header that does not mention the failure, and the red ring is the only
+            thing on them at rest that does — the hover-revealed Re-send is not a
+            signal, it is a control. So the ring is conditional, not absent, and
+            `failedOffLane` above is the whole rule.
+
+            Nothing about the ring itself changes: same component, same
+            `--status-failed` token, same 16px. And the head holds
+            `--tasks-card-head-h` whether or not the ring is in it (tasks.css), so a
+            card does not change height when it gains or loses one — a lane of cards
+            that jittered by the width of a glyph would be a worse tell than the
+            repetition this removed.
+
+            List and Calendar keep their ring unconditionally: a row in a flat list
+            and a chip in a day cell have no lane above them, so there the ring is
+            the only thing that files them at all.
+
+            AND UNREAD IS NOT IN THIS HEAD AT ALL. It took three tries to get there
+            (all 2026-08-18): the ring's filled centre, which meant widening the
+            condition above and putting the repetition straight back; then a small
+            filled dot in the status hue leading the head, which stopped repeating
+            the lane but spent a whole glyph — and a card is three short lines, so a
+            fourth mark on it is the crowding again in a new place. It is the
+            TITLE'S WEIGHT now: unread cards read bold, read cards read normal. See
+            the title below.
+
+            THE SECOND SUCH CARD is a waiting one (2026-09-03). Its status is
+            `needs_attention` and its lane is Blocked — genuinely two different
+            facts about it, which is the exact condition above — so it wears its
+            own amber ring for the same reason and by the same rule. It is also
+            the difference between "somebody has to look at this eventually" and
+            "somebody has to answer this now", which is worth a glyph.
+
+            So the head is the id, and a ring on the one card whose status its lane
+            does not mention. */}
+        <span className="schedule-tv-card-head">
+          {waiting
+            ? <StatusIcon status="needs_attention" />
+            : failedOffLane && <StatusIcon status={lane} failed />}
+          <IdChip id={task.task_id} kind="task" />
+          {/* The draft chip left this head with the List row's (Akshil,
+              2026-09-11) and for the same reason — it is a tag now, and the
+              tags sit together at the card's other end. It is in the foot,
+              before the folder, which is the card's own reading of "immediately
+              before the project tag": the foot IS this card's right-hand end. */}
+        </span>
+        {/* Nothing trails the title any more (2026-08-18). Three arrangements of
+            an unread mark lived in this slot and each one was a fix for the last:
+            a numeric pill inside the title's two-line `-webkit-box` clamp, which
+            clipped it away on exactly the busiest cards; the same pill lifted into
+            a `flex-wrap` wrapper beside the title, where any two-line title
+            orphaned it onto a line of its own (the screenshot Akshil sent on
+            2026-08-17); and then a dot back inside the flow once schedule.css
+            dropped the clamp for good.
+
+            The clamp's removal STAYS — the title wraps freely, `overflow-wrap:
+            anywhere` is the only guard it needs, and long titles make taller cards,
+            which is accepted. What went is the ATOM: no pill, no dot, nothing in
+            the flow after the last word.
+
+            UNREAD IS THE TITLE'S WEIGHT (Akshil, 2026-08-18, after three marks in
+            this slot and one in the head). Bold when there is something unread,
+            normal when there is not — no glyph, so the card gains no fourth thing
+            to read, and the signal is on the very words a lane is scanned for. It
+            is also the mark this page already uses one level down: an unread MESSAGE
+            row bolds its body (`.tasks-msg.is-unread`), and a card is the same claim
+            about a whole thread.
+
+            IT STAYS OFF THE LIST ROW, deliberately. A row already carries the
+            ring-dot and that is its primary signal; bolding the title as well would
+            state one fact twice on one line, which is exactly the double-signalling
+            the ring was introduced to end. The Board has no ring to spare on a
+            quiet card — that is why it needs a different mark at all — so the two
+            views differ HERE precisely so they agree about everything else.
+
+            AND WEIGHT IS NOT A FACT A SCREEN READER HAS (bugbot, PR #596). Bold is
+            the whole visual signal here, and `font-weight` reaches the
+            accessibility tree not at all — so an unread card and a read one were
+            the same card to anybody not looking at it. The words are added instead,
+            in a span that is hidden from the eye and not from the tree
+            (`.tasks-said`): the card is a `<button>` whose accessible name is
+            computed from its contents, so ", 3 unread" after the title lands in
+            that name in the right order, with no `aria-label` overriding the id and
+            title a reader actually wants to hear first.
+
+            Deliberately NOT `aria-label` on the button: that REPLACES the computed
+            name, so the card would announce its unread count and lose "TASK-044,
+            Pull today's news" — trading one missing fact for two. And deliberately
+            not an `aria-label` on this span either: a role-less span's label is not
+            reliably announced (the same reason ScheduleCalendar gives its own dot a
+            `role="img"`), where real text always is. */}
+        <span className={"schedule-tv-card-title" + (unread > 0 ? " is-unread" : "")}>
+          {line.text || "(untitled)"}
+          {unread > 0 && (
+            <span className="tasks-said">{`, ${taskUnreadLabel(unread)}`}</span>
+          )}
+          {/* INSIDE the title, not beside it: the card is a column flex box, so a
+              sibling is a row of its own and a lone glyph grew every scheduled
+              card by one line (Bugbot, PR #1105). Inline here it follows the
+              last word, which is where a caption on the title belongs. */}
+          {sched && (
+            <span className="tasks-card-sched" title={sched.title} aria-label={sched.label}>
+              {sched.repeats ? ICON_REPEAT : ICON_CLOCK}
+            </span>
+          )}
+        </span>
+        {/* WHERE IT STANDS IN THE LINE, on a queued card and on no other. Its
+            own line under the title rather than a chip inside the foot: the foot
+            is identity (which folder, is it still there) and this is state, and
+            a queued lane's whole reason to exist is that this sentence is the
+            one thing the reader came to the card for.
+
+            NO WIDTH ANYWHERE ON IT, and that is deliberate rather than
+            incidental. A lane is 260px, the sentence is "after TASK-1041 | 12th",
+            and a folder name or an id can be any length — so it
+            WRAPS (tasks.css) and the card gets taller, exactly as a long title
+            already makes it taller. A fixed width here would clip the id, which
+            is the only part of the sentence a reader can act on.
+
+            NO ⤒ AND NO SECOND COLOUR (Akshil, 2026-09-19). The card that had
+            been skipped used to lead with the glyph and turn the whole sentence
+            yellow — a highlight on a state that is not a state: a skip moves
+            this card's PLACE, and the place is the sentence. One register for
+            every waiting card in the lane, and the order is what tells them
+            apart. */}
+        {/* …AND NONE ON A CARD EITHER (Akshil, 2026-09-21) — the row's rule,
+            for the row's reason. See the List row. */}
+        {/* The plan's pause, on its own line — the List row's rule and the List
+            row's words (`usageLimitCaption`). */}
+        {limit && <span className="tasks-card-queue">{limit}</span>}
+        {/* The foot is the folder and the run ahead, so when neither says
+            anything (spansProjects — every card in a board filtered to one
+            project repeats it — and a card with no run coming) the whole line
+            goes rather than leaving an empty row of padding. */}
+        {(showProject || folderMissing || draft) && (
+          <span className="schedule-tv-card-foot">
+            {/* The List row's own mark, same words, same colour (see the row). */}
+            {folderMissing && (
+              <span
+                className="tasks-row-missing"
+                data-hint={missingFolderHint(tildePath(taskFolder(task), home))}
+              >
+                Folder missing
+              </span>
+            )}
+            {/* Unsent words, immediately before the folder — the List row's
+                order exactly (see DraftChip).
+
+                A TAG HERE TOO, unlike the folder chip beside it, and the
+                difference is deliberate (design.md, Round 2: the filter is
+                "List + Board"). The folder stays a label on a card because a
+                card is a drag target first; this chip is the only control the
+                draft filter has, so leaving it inert on the Board would mean
+                the Board could show the filter's ON state and never turn it
+                off. The cost is bounded in a way the folder's was not: the
+                cards that carry it are mostly drafts, and a draft card does not
+                lift at all (tasks-lib.LANE_EXITS.draft is empty). */}
+            {draft && (
+              <DraftChip draft={draft} onPick={onPickDraft} active={draftOn} />
+            )}
+            {showProject && (
+              <IdentityChip name={basename(task.project)} title={tildePath(task.project, home)} />
+            )}
+          </span>
+        )}
+      </button>
+      {erasing && (
+        <EraseTaskModal
+          task={task}
+          onClose={() => setErasing(false)}
+          onDone={() => {
+            setErasing(false);
+            // A clean delete now only pops (tone: "info" default) rather
+            // than staying in the panel — see DECISIONS-toasts-become-
+            // notifications.md's retention-narrowing reversal.
+            notify({ title: `Deleted ${shortTaskId(task.task_id)}`, tone: "info" });
+            onErased();
+          }}
+        />
+      )}
+      {/* Quiet until the card is pointed at or focused, exactly like the List's
+          row actions: a lane is a column of cards, and a permanent glyph on
+          every one of them would compete with the titles the lane exists to
+          show.
+
+          ONE row holding both, rather than two independently pinned buttons:
+          a card can offer Run now AND Archive (a failed task with a spent
+          message offers exactly that pair), and two absolutely-positioned
+          siblings both anchored to `right` would sit on top of each other. The
+          strip is laid out by flex and pinned once, so each button is placed by
+          the row instead of by its own coordinates.
+
+          They are SIBLINGS of the card, not children of it, which is also what
+          keeps them out of the card's own click: pressing Archive or Run now
+          cannot bubble into a button it is not inside, so neither one navigates
+          to the conversation or marks the thread read. That was already true of
+          the markup and it is now load-bearing, so a test reads it.
+
+          RUN NOW IS BEHIND SHOW_ROW_ACTIONS, off since 2026-08-17. ARCHIVE IS
+          NOT, since 2026-08-18: Akshil asked for the archive button back on hover,
+          and it is the same button on the other view, so keeping it flagged here
+          while the List shows it is exactly the divergence the shared flag exists
+          to prevent (§1 — same element, same behaviour in every view). The strip
+          itself is drawn whenever either survives its guard. */}
+      {((peekOn && page) || file || folderMissing || (hasDraft(task) && !heldInPeek)
+        || canForceStart(task) || (SHOW_ROW_ACTIONS && run)) && (
+        <span className="tasks-card-acts">
+          {/* DISCARD, the List row's own act in the card's hover strip — same
+              glyph, same class, same caption, same silence at rest (design.md,
+              PR C; §1 — one element, one behaviour in every view). Stands down
+              on a card whose folder is gone, where the trash beside it is the
+              stronger claim. */}
+          {hasDraft(task) && !folderMissing && !heldInPeek && (
+            <button
+              type="button"
+              className="tasks-act tasks-card-act tasks-act--delete"
+              aria-label={`Discard draft ${task.task_id}`}
+              title="Discard draft"
+              data-hint="Discard draft"
+              disabled={busy || discarding}
+              onClick={() => {
+                setDiscarding(true);
+                void discardDraft(task).finally(() => setDiscarding(false));
+              }}
+            >
+              {ICON_TRASH}
+            </button>
+          )}
+          {/* DELETE FOR GOOD, only on a card whose folder is gone, and LEFT of
+              Archive (Akshil, 2026-09-07: a trash in the foot "looks odd here …
+              move the delete icon to the top right, leftside of archive"). Same
+              hover strip, same size, same silence at rest as its neighbours. */}
+          {folderMissing && (
+            <button
+              type="button"
+              className="tasks-act tasks-card-act tasks-act--delete"
+              aria-label={`Delete ${shortTaskId(task.task_id)} forever`}
+              data-hint={eraseBlocked(task) ? ERASE_BLOCKED_HINT : "Delete task forever"}
+              disabled={busy || eraseBlocked(task)}
+              onClick={() => setErasing(true)}
+            >
+              {ICON_TRASH}
+            </button>
+          )}
+          {/* FORCE START, on a queued card and nowhere else — and NOT behind
+              SHOW_ROW_ACTIONS, for the reason Archive is not: while that flag is
+              down this would be the only way to reach the verb from the Board
+              other than a lane that is rolled up whenever it is empty, and a
+              capability with no press is a capability the page does not really
+              have.
+
+              ON EVERY WAITING CARD, INCLUDING THE FIRST (`canForceStart`) — the
+              same rule the List row and the chat's own card read, so one verb is
+              not offered on three surfaces under three conditions. The DRAG is
+              still the promotion and is untouched; these are two verbs, and the
+              named one is the one that starts something.
+
+              FIRST IN THE STRIP, AHEAD OF OPEN (Akshil, 2026-09-21): it is the
+              only press here that is about the state the card is IN — a message
+              that is waiting — and it is offered on so few cards that it must
+              not sit behind a door every card carries. */}
+          {canForceStart(task) && (
+            <button
+              type="button"
+              className="tasks-act tasks-card-act tasks-act--skip"
+              title={FORCE_START_HINT}
+              aria-label={`${FORCE_START_LABEL} ${shortTaskId(task.task_id)}`}
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void onForceStart().finally(() => setBusy(false));
+              }}
+            >
+              {FORCE_START_LABEL}
+            </button>
+          )}
+          {/* The List row's quick door, in the card's own hover strip — same
+              act, same glyph, same caption (design.md, Round 3). A SIBLING of
+              the card rather than a child, because the card IS a button; that
+              is what this wrapper has always been for. */}
+          {SHOW_PAGE_DOOR && peekOn && page && !isDraftTask(task) && (
+            <a
+              className="tasks-act tasks-card-act tasks-act--page"
+              href={page}
+              aria-label={`Open ${shortTaskId(task.task_id)} in Explorer`}
+              data-hint="Open in Explorer"
+              onClick={(e) => {
+                if (opensElsewhere(e)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                navigateUrl(page);
+              }}
+            >
+              {OPEN_DOOR_LABEL}
+            </a>
+          )}
+          {SHOW_ROW_ACTIONS && run && (
+            <button
+              type="button"
+              className="tasks-act tasks-card-act tasks-act--run"
+              title={run.title}
+              aria-label={`${run.label} ${shortTaskId(task.task_id)}`}
+              disabled={busy}
+              onClick={() => void runNow(run)}
+            >
+              {run.rerun ? ICON_RERUN : ICON_PLAY}
+            </button>
+          )}
+          {file && (
+            <button
+              type="button"
+              className={"tasks-act tasks-card-act tasks-act--" + file.kind}
+              title={file.title}
+              aria-label={`${file.label} ${shortTaskId(task.task_id)}`}
+              disabled={busy}
+              onClick={() => void refile(file)}
+            >
+              {file.kind === "archive" ? ICON_ARCHIVE : ICON_UNARCHIVE}
+            </button>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}

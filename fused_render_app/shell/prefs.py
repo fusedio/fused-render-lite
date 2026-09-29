@@ -27,3 +27,15 @@ def engine_for_capability(capability: str) -> str:
 def effective_ai_idle_unload_minutes() -> int:
     """Idle minutes before a resident model is evicted (fused-render's default)."""
     return 15
+
+
+def project_queue_enabled() -> bool:
+    """One folder runs one task at a time, everything else queues — fused-render's
+    opt-in beta flag. Off: every send spawns, as in fused-render's default."""
+    return False
+
+
+def native_chat_enabled() -> bool:
+    """fused-render's React chat vs the legacy `templates/claude` page. Render
+    App serves the legacy page, so this is off."""
+    return False

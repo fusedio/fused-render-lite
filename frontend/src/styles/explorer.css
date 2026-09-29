@@ -1,0 +1,3266 @@
+/* Main column */
+#main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* THE top-bar height, shared by every strip that can be the first row of a
+   column: the crumb bar, the listing's search row, and the preview pane's
+   header. Over a folder the crumb bar and the pane header are side by side
+   with only the divider between them, so a difference of even a pixel puts a
+   visible step in the line under them. One number, in one place, is the only
+   way that stays true — and the pane header keeps matching the search row in
+   the app-builder variant, which has no crumb bar and starts its columns with
+   those two instead.
+
+   An EXACT height, not a floor. A `min-height` still lets the taller content
+   win — the pane header holds a 28px mode chip and, with 10px of padding and
+   the 1px border under border-box, came out one pixel taller than the crumb
+   bar beside it, which holds only text. One pixel is exactly the step the eye
+   catches on a line that runs the width of the window.
+
+   The budget: 48px, minus the 1px bottom border, minus 8px of padding at each
+   end, leaves 31px of content box — enough for the tallest thing any of the
+   three holds (the search row's 30px input; the bars' 28px controls). Anything
+   taller than 31px needs this number raised, not a local override. */
+:root {
+  --topbar-h: 48px;
+  --topbar-pad-y: 8px;
+}
+
+#breadcrumb {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: var(--topbar-pad-y) 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  /* Exact, so the bar neither grows when the portaled mode control lands after
+     stat resolves nor drifts off the pane header beside it. */
+  height: var(--topbar-h);
+  box-sizing: border-box;
+}
+
+/* ‹ › history arrows, first in the bar — the slot browsers and file managers
+   reserve for them, which the ★ used to occupy (Breadcrumb.tsx says why they
+   traded places). Nothing of their own beyond the grouping: both buttons ride
+   the shared `.bar-ctl-icon` recipe further down, and the 2px gap is the same
+   one `.bar-zone` uses to make a run of glyph buttons read as one control. */
+.crumb-nav {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ★ bookmark button, at the tail of the path. A quiet control — the app's
+   token pair for a button that rests visible and steps up on hover
+   (`--ctl-quiet-bg`/`--ctl-quiet-bg-hover`, tokens.css) — so the resting pill
+   is what tells a viewer this is pressable before the pointer ever arrives;
+   it shares the search field with the mode chip at the field's leading edge
+   (`.listing-search-mode`), a readout that carries no such pill — the star
+   needs to read as a different kind of thing from it, not just on hover.
+   (The trailing edge's own button, `.listing-search-shortcut-hint`, is
+   pressable too now — SPEC-omnibox-search-affordance.md scope item 3 — and
+   rides the app's `bar-ctl`/`bar-ctl-icon` chassis instead of this pill.)
+   Muted glyph until hovered; a FILLED FOREGROUND star when the view is
+   bookmarked or an armed bookmark is live. Deliberately not accent-yellow:
+   the accent means exactly one thing in this chrome, the active view mode.
+   Bookmarking is state, not "the thing you are looking at". */
+.bookmark-star-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 5px around a 14px glyph = the same 24px box (and hover pill) the 16px
+     glyph used to make, so shrinking the star cost no hit area. */
+  padding: 5px;
+  border: none;
+  border-radius: 6px;
+  /* No resting plate, the same contract `.bar-ctl` and the `⋮` trigger keep:
+     fill on hover, and otherwise nothing. A plate at rest is a filled pill in
+     a row where nothing else is filled, so the star reads as already pressed
+     — and `.active` (below) fills with a neighbouring step of the same ramp,
+     which leaves "bookmarked" and "not bookmarked" separated by a shade. */
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+/* Optical, not geometric: the star box centres on the crumb row's centre
+   line, but a five-pointed star carries its visual mass below its own box
+   centre, so it read as sitting low beside the crumb text. Half a pixel up
+   lands its perceived centre on the text's. Applies at both scales the star
+   renders at (this bar and the 24px panel pane bars). */
+.bookmark-star-btn svg {
+  position: relative;
+  top: -0.5px;
+}
+
+/* The star belongs TO the path, so it should sit in the path's own rhythm, not
+   at the bar's zone spacing. Between the two the bar contributes its 10px flex
+   gap plus the star's 5px padding plus the crumb's 4px — 19px of air, more than
+   twice the 8px the crumbs keep between themselves, which made the star read as
+   an island. A negative margin is the only way to retune ONE pair inside a `gap`
+   container; the bar-wide 10px between the other zones stands.
+
+   `margin-left` now, where it was `margin-right`: the star moved from the head
+   of the path to its tail (Breadcrumb.tsx), so the pair being tightened is
+   last-crumb/★ rather than ★/first-crumb.
+
+   -6px, not the head position's -11px: at the tail the star follows the
+   filename — the strip's one emphasized segment — and the full crumb rhythm
+   read as the star touching it (Akshil: "a little more padding"). 13px of
+   air: looser than the 8px crumb gap, still inside the path's zone. */
+#breadcrumb .bookmark-star-btn {
+  margin-left: -6px;
+}
+
+.bookmark-star-btn:hover {
+  color: var(--fg);
+  background: var(--ctl-quiet-bg-hover);
+}
+
+/* The bookmarked state keeps the accent-tinted pill the quiet-hover step no
+   longer carries (that step moved to the neutral `--ctl-quiet-bg-hover`
+   above), so "bookmarked" stays visually distinct from "merely hovered" by
+   colour, not just by the filled-vs-outline glyph `StarIcon` already draws
+   for it. */
+.bookmark-star-btn.active,
+.bookmark-star-btn.active:hover {
+  color: var(--fg);
+  background: rgba(var(--tint), 0.08);
+}
+
+/* Shared with the panel path bar (.panel-crumbs/.panel-crumb*, Panel.tsx):
+   same monospace, tight slash-separated segment styling, muted with the last
+   segment emphasized. Only the hover affordance differs per surface — this
+   bar avoids the accent-yellow the panel pane hover uses (see
+   #breadcrumb .path-crumb:hover below); the panel's own hover rule further
+   down is untouched. */
+#breadcrumb .crumbs,
+.panel-crumbs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* GNOME-path-bar behaviour, main bar only (the panel pane does the same at
+   .panel-crumbs below). The scrollbar is hidden (scrollbar-width +
+   ::-webkit-scrollbar) so the wheel-scrollable strip carries no chrome; the tail
+   is pinned into view from JS on every path change. */
+/* Shrink-to-fit, not grow-to-fill: the strip stops at the width of the path it
+   holds, so the folder's search row can pin itself to the bar's right end. The
+   leftover room becomes bar background — which is click-to-edit exactly like the
+   strip itself (Breadcrumb's document-level click handler covers the whole bar),
+   so owning those pixels no longer buys the strip anything.
+
+   FULL BAR HEIGHT, and that is what makes the crumb hitboxes below possible:
+   this is a scroll container, and a scroll container clips its children in BOTH
+   axes — a crumb taller than the text would be cut straight back to the text.
+   Stretched to the bar's content box and then bled out over the bar's own
+   padding by the margin/padding pair, the strip spans the whole 48px and the
+   crumbs inside it can too.
+
+   overflow-y is pinned to `hidden` rather than left to compute off overflow-x:
+   `visible` computes to `auto` beside a non-visible axis, which would make the
+   strip USER-scrollable vertically — and the wheel handler maps deltaY onto
+   scrollLeft WITHOUT preventing the default, so a wheel over the path would
+   also scroll it out of its own bar. */
+#breadcrumb .crumbs {
+  flex: 0 1 auto;
+  scrollbar-width: none;
+  align-self: stretch;
+  margin-block: calc(-1 * var(--topbar-pad-y));
+  padding-block: var(--topbar-pad-y);
+  overflow-y: hidden;
+}
+
+/* The free-width-eating auto margin the path `⋮` used to carry (it sat right
+   after this strip; its items are the bar's right-click menu now — see
+   Breadcrumb.tsx). The bar is `justify-content: space-between`, so unless ONE
+   item takes the slack in one place it is spread evenly between every item in the
+   row: ★, path and the right-hand zones drifting apart by a
+   window-width-dependent amount, which is what a bar with no claimant looked
+   like the moment the `⋮` came out.
+
+   `:has(.path-crumb)` covers the PATH strip and `:has(.current)` the layout
+   modes' static label bar (StaticBreadcrumb) — same shape, same claimant: the
+   static bar renders arrows, label and star as the same opening trio, and
+   without its own claim the `space-between` slack opened up INSIDE that trio
+   (label floating mid-bar, star flung to the far right). What both exclude is
+   edit mode, whose field is neither a crumb nor a label and eats the width
+   itself. Over a claimed FOLDER there is no `.crumbs` strip at all — the
+   merged search field (.crumb-search-slot below) grows to fill the row on its
+   own, which already eats the slack, so this rule's `:has()` guards correctly
+   find nothing to match there and stand down on their own.
+
+   IT RIDES ON THE ★, NOT ON THE STRIP, since the star moved to the path's tail
+   (Breadcrumb.tsx). Left where it was, the slack would open up BETWEEN the path
+   and its own star and fling the star to the far end of the bar — the auto
+   margin has to sit on whatever is genuinely last in the path zone, and that is
+   now the star. The sibling combinator rather than `:last-child` because the
+   zone's tail is only the star when the path is a real crumb strip; in edit mode
+   the field's own `flex: 1 1 auto` eats the width and no claimant is wanted. */
+#breadcrumb .crumbs:has(.path-crumb) ~ .bookmark-star-btn,
+#breadcrumb .crumbs:has(.current) ~ .bookmark-star-btn {
+  margin-right: auto;
+}
+
+#breadcrumb:has(.crumb-search-slot) .bookmark-star-btn {
+  margin-right: 0;
+}
+
+#breadcrumb .crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+/* Click-to-edit / Ctrl+L path field: swaps in for the crumb row. Same
+   monospace as the crumbs, fills the strip, and takes the bar's own
+   background so it reads as the bar turning editable rather than a popped-in
+   widget; the border brightens to --fg-muted on focus (not the accent — that
+   is reserved for the active view mode). */
+#breadcrumb .crumb-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-alt);
+  color: var(--fg);
+}
+
+#breadcrumb .crumb-edit:focus {
+  outline: none;
+  border-color: var(--fg-muted);
+}
+
+/* Ancestor crumbs sit one step BRIGHTER than plain muted: at --fg-muted the
+   path read as disabled text, which is the opposite of what a click target
+   should say. color-mix over the two tokens keeps it theme-following (no new
+   literal — tests/test_theme.py).
+
+   4px of horizontal padding, not 1px: it gives the hover pill something to
+   hug (at 1px it clamped the glyphs), and it is half of the crumb rhythm —
+   see the separator rule below. */
+.path-crumb,
+.panel-crumb {
+  color: color-mix(in srgb, var(--fg) 60%, var(--fg-muted));
+  text-decoration: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+
+/* GNOME-style compress-then-scroll truncation, main bar only (the panel pane
+   keeps its crumbs untruncated). Crumbs never shrink by default; ones marked
+   .shrink (names longer than 1.5x their floor, Breadcrumb.tsx) may compress
+   under space pressure down to a min-width floor, ellipsizing as they go.
+   The floors are load-bearing twice over: overflow:hidden zeroes a flex
+   item's automatic minimum size (without a floor everything squeezes to
+   slivers), and flex can't shrink below min-width, so once every .shrink
+   crumb hits its floor the strip genuinely overflows and scrolling takes
+   over. The current dir's 4x floor makes the tail compress last; full names
+   stay reachable via the title tooltip. */
+#breadcrumb .path-crumb {
+  flex: 0 0 auto;
+  /* FULL-BAR-HEIGHT HITBOX. A path segment is a 15px line of 12px monospace in a
+     48px bar: aiming at it meant aiming at a third of the bar's height, and a
+     click a few pixels high or low — on the same visual column, over what is
+     plainly "that folder" — did nothing. Fitts' law is the whole argument; the
+     top bar's crumbs are the most-clicked navigation in the explorer.
+
+     Vertical padding buys the height and a negative margin of the same order
+     hands it straight back to the layout, so the strip measures the text band it
+     always did and the path's spacing, wrapping and scroll geometry are
+     untouched. `--crumb-hit` is deliberately MORE than the 14px it takes to
+     reach the bar's edge (6px of slack around the band, plus the bar's 8px
+     padding): the box is clipped by the strip, which is exactly bar-height (see
+     .crumbs above), so overshooting costs nothing and the arithmetic does not
+     have to track the font's line box.
+
+     The one thing the box must NOT do is grow the crumb's visible decorations —
+     a 48px accent block during a drag instead of a pill around a name — so
+     .spring-armed and the drop states paint on ::before, inset back to the text
+     band. Everything below is scoped through that pseudo-element for that
+     reason, and only for that reason. */
+  --crumb-hit: 20px;
+  position: relative;
+  padding-block: calc(2px + var(--crumb-hit));
+  margin-block: calc(-1 * var(--crumb-hit));
+}
+
+/* The band the crumb LOOKS like: the 2px/4px box it had before the hitbox grew
+   around it. Painted over the text rather than behind it (a negative z-index
+   would drop it behind the bar's own background), which the drag states are fine
+   with — a 10-16% tint over a name reads as the name, tinted. */
+#breadcrumb .path-crumb::before {
+  content: "";
+  position: absolute;
+  inset: var(--crumb-hit) 0;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+#breadcrumb .path-crumb.shrink {
+  flex-shrink: 1;
+  min-width: 7ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#breadcrumb .path-crumb.last.shrink {
+  min-width: 28ch;
+}
+
+/* A crumb a file drag is dwelling on: the listing is about to follow it
+   (Breadcrumb's spring loading). The pulse is the whole affordance — a dwell
+   with no feedback is indistinguishable from a stuck drag — and it runs
+   ALONGSIDE the drop ring below, because a crumb means both things at once now:
+   hold and it opens, release and the files land there.
+   Motion is dropped for reduced-motion; the accent tint still marks the crumb. */
+.path-crumb.spring-armed {
+  color: var(--fg);
+}
+
+/* On the band, not on the box: the box is bar-height now (see the hitbox rule
+   above), and an accent rectangle the height of the whole bar is not a crumb
+   highlight, it is a fill. */
+.path-crumb.spring-armed::before {
+  background: rgba(var(--accent-rgb), 0.16);
+  animation: crumb-spring 0.7s linear;
+}
+
+@keyframes crumb-spring {
+  from {
+    box-shadow: inset 0 0 0 0 rgba(var(--accent-rgb), 0.5);
+  }
+  to {
+    box-shadow: inset 0 -2px 0 0 var(--accent);
+  }
+}
+
+/* The crumb under a file drag, as a DROP target — the same ring and the same
+   quiet refusal the listing's rows and the sidebar's bookmarks wear, painted by
+   the same code from the same verdict (listing/row-drag.ts). Per-crumb, which is
+   what makes an ancestor strip of small adjacent targets legible: exactly one of
+   them is lit, and it is the one that would receive the drop.
+   Both states can be on one crumb at once, since holding it also arms the
+   spring-load, and the pulse's keyframes own `box-shadow` for their 0.7s — so on
+   an armed crumb the ring below is suppressed until the pulse ends. The per-crumb
+   "which ancestor gets this" signal survives it, because .spring-armed carries an
+   accent BACKGROUND that no other crumb has: during the pulse the armed crumb is
+   the only tinted one in the strip, and the ring takes over the instant the
+   animation finishes. A refused crumb still reads as refused either way — the
+   error tint below is declared after .spring-armed's, so at equal specificity it
+   wins (and an armed refusal is barely reachable anyway: only ancestors spring,
+   and an ancestor drop is never "already-there").
+   These classes are added IMPERATIVELY by row-drag, which is why arming the
+   spring has to re-apply them: the armed state is React state, and its re-render
+   writes `className` from scratch. Breadcrumb's refreshDropTarget effect is what
+   repaints them — an earlier version of this comment claimed the ring "resumes"
+   on its own, and it did not; there was no ring for the rest of the dwell.
+   Both paint on ::before for the same reason .spring-armed does: the crumb's own
+   box is the (bar-height) hitbox, so a ring drawn on it would frame the bar
+   rather than the name. */
+.path-crumb.drop-into::before {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.path-crumb.drop-reject::before {
+  background: rgba(var(--error-rgb), 0.1);
+}
+
+.path-crumb.last,
+.panel-crumb.last,
+#breadcrumb .current {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* Separators at full muted strength with room to breathe. At --border they
+   were near-invisible, so the path read as one run-on string.
+
+   4px + the crumbs' own 4px padding = 8px of air on each side of every "/",
+   and that pairing is what makes the leading segment come out even for free.
+   An absolute path's ROOT crumb is itself a "/" with no separator element
+   after it (Breadcrumb.tsx: "root already carries the leading slash"), so the
+   gap it opens is root-padding + next-crumb-padding = the same 8px. Splitting
+   the rhythm between the two elements is deliberate; putting it all on the
+   separator's margin is what made "/home / iamsdas" read as jammed-then-airy. */
+.path-crumb-sep,
+.panel-crumb-sep {
+  color: var(--fg-muted);
+  margin: 0 4px;
+}
+
+/* Crumb hover, both bars — fg brighten + underline, no accent yellow. The
+   panel pane used to hover accent-yellow; unified here so a path behaves the
+   same wherever it appears. */
+#breadcrumb .path-crumb:hover,
+.panel-crumb:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.crumb-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The portal target collapses entirely when no view has filled it (loading,
+   fallback card, static pages) — no stray gap at the bar's right edge. */
+#topbar-mode-slot:empty {
+  display: none;
+}
+
+/* A filled slot in the FOLDER bar (search row present) belongs to the right
+   cluster: the slot eats the free width, so its content ("Add as app") sits
+   against the search box at the bar's own fixed gap — never mid-bar, never a
+   screen-width-dependent distance from the box it acts beside. This rule and the
+   next hand the free-width-eating job to the slot for exactly that state: with
+   two auto margins in one row the slack splits between them and the button
+   strands in the middle, which is the layout this pair exists to prevent. (The
+   third claimant, the crumbs' own `margin-right: auto`, already stands down
+   whenever a search slot is present — see .crumbs above.) */
+#breadcrumb:has(.crumb-search-slot) #topbar-mode-slot:not(:empty) {
+  margin-left: auto;
+}
+
+#breadcrumb:has(#topbar-mode-slot:not(:empty)) .crumb-search-slot > .listing-search {
+  margin-left: 0;
+}
+
+/* It used to have to take a zone divider with it, so a static page (or a view
+   still resolving its stat) showed no stray hairline floating in the bar. The
+   crumb bar has no layout zone left to divide from — the splits are items in the
+   path `⋮` now (Breadcrumb.tsx) — so that pair, and the `.bar-rule` margin reset
+   that went with it, are gone. The panel bar below still needs both. */
+
+/* Same pair for the panel pane bar, whose mode menu (PaneModeMenu) renders
+   nothing on a single-mode path and while the pane is still statting — the
+   hairline used to stay behind either way, dividing the crumbs from nothing.
+   `display: contents` so the wrapper is invisible to the bar's flex layout. */
+.panel-mode-slot {
+  display: contents;
+}
+
+.panel-mode-slot:empty + .bar-rule {
+  display: none;
+}
+
+
+/* ---- One control recipe for the explorer's bars --------------------------
+   The title bar, the listing search row, the preview-pane header and the
+   panel pane bars used to be four dialects of the same idea: three button
+   shapes, radii of 3/4/5/6/8/999px, and 14-18px icons mixed inside a single
+   row. Everything in those bars is now built from these classes instead —
+   28px tall, 6px radius, 16px icons, ghost by default, bordered only for the
+   mode control. `.panel-bar` re-scales the
+   whole set to 24px/14px in preview.css; nothing else overrides it.
+
+   Ghost is deliberately a background wash rather than a border-on-hover: a
+   border appearing under the cursor moves the glyph, and these rows are dense
+   enough that the shift is visible. */
+.bar-ctl {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bar-ctl svg {
+  display: block;
+}
+
+.bar-ctl:hover:not(:disabled) {
+  background: rgba(var(--tint), 0.08);
+  color: var(--fg);
+}
+
+.bar-ctl:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Square, glyph-only variant — same height, no label. */
+.bar-ctl-icon {
+  width: 28px;
+  padding: 0;
+}
+
+/* The one thing in these bars that gets chrome: the mode control. There used
+   to be a second recipe beside it, .bar-ctl-primary, for "the row's single
+   primary action" — a bordered, semibold label. Its last consumer was the
+   preview pane's "Open", now a muted glyph like everything else it sits
+   beside, and a bar with no primary in it turns out to be the point: these
+   rows are chrome, and the subject is what the view is showing. */
+.bar-ctl-bordered {
+  border: 1px solid var(--border);
+  /* The app's hairline for the ring, and a THEME-CHOSEN fill (tokens.css):
+     `--bg` under a `--bg-alt` bar is a white plate in light mode, which is the
+     look, and a darker well in dark mode — which, ringed by a lighter border,
+     turned the quietest control in the app into a chip. Dark resolves this to
+     transparent, so the hairline alone says "this one is a menu". */
+  background: var(--ctl-plate-bg);
+  color: var(--fg);
+}
+
+.bar-ctl-bordered:hover:not(:disabled) {
+  background: var(--ctl-plate-bg);
+  /* Not `--fg-muted` directly: that is the light INK in dark mode, so hovering
+     lit the ring to near-white. The token is --fg-muted in light and a step up
+     from the resting border in dark. */
+  border-color: var(--ctl-quiet-border-hover);
+  color: var(--fg);
+}
+
+/* Hairline between the mode control and the layout group. A zone divider, not
+   decoration: it is what makes "mode" and "layout" read as two things. */
+.bar-rule {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 18px;
+  margin: 0 10px;
+  background: var(--border);
+}
+
+.bar-zone {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ---- a side column's HEADER STRIP, and there are two of them --------------
+   The file preview's sidebar (.preview-side-header, preview.css) and the folder
+   listing's preview pane (.pane-header, below) are the SAME bar: the way OUT of
+   the column at its left end, the mode pill at its right, over a full-height
+   frame. The two components already share their buttons (SideChrome.tsx); this is
+   the layout half of that sharing.
+
+   NO RULE FOR THE BUTTONS THEMSELVES (.side-close, .side-toggle): both ride the
+   plain .bar-ctl-icon recipe above, and both wear the same 16px right-hand
+   panel icon (platform/ui/PanelIcon), in currentColor like everything else in
+   these rows.
+   A `.side-toggle.active` pressed look lived here for one round, while the opener
+   stayed on screen with the panel open and the column carried a close button of
+   its own. Exactly one of the two buttons is ever rendered now (SideChrome
+   documents the split), so there is no "on" state left for either to wear.
+
+   The far end is packed by an auto margin on a TAIL WRAPPER rather than on the
+   leading items, which is load-bearing and not a style preference: the left end
+   holds a VARIABLE number of things (the pane's also carries the open folder's
+   primary action, portaled in and usually absent), and an auto margin on whichever
+   of those renders last distributes the free space differently every time — with
+   two present, the middle one drifts to the centre. One auto margin, always on the
+   same element, packs the right end and leaves the left alone whatever is in it. */
+.side-header-tail {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Nothing to pack — and an empty wrapper would still spend one of the strip's
+   8px gaps. (Reached by the pane's non-Preview states, whose strip has no
+   expand button to put here.) */
+.side-header-tail:empty {
+  display: none;
+}
+
+/* ---- The side column's tab strip (SideChrome's SideTabs) ------------------
+   shadcn Tabs, line variant — the app page's tab bar (.app-page-tabs) in the
+   column header. The utilities own the look (muted text, active in full ink,
+   the 2px after-bar); the two things this file adds are GEOMETRY the utilities
+   cannot know: the strip stretches to the header's height (the tail wrapper
+   stretches too — its own align-items still centres the rest of what it
+   holds), and the active bar is moved down by the header's vertical padding
+   plus its 1px border so it sits ON the header's bottom rule rather than
+   floating 5px under the label. Unlayered, so these beat the layered
+   utilities without !important. */
+.side-header-tail:has(.side-tabs) {
+  align-self: stretch;
+}
+
+.side-tabs {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: flex;
+}
+
+.side-tabs [data-slot="tabs-list"] {
+  height: 100%;
+}
+
+.side-tabs [data-slot="tabs-trigger"]::after {
+  bottom: calc(-1 * var(--topbar-pad-y) - 1px);
+}
+
+/* The kebab trigger's corner badge — the App Doctor's status dot, visible
+   with the menu shut (BarMenu's OverflowMenu `badge`). Positioned off the
+   28px square; the dot's own size and hue are app-doctor.css's. */
+.bar-overflow .bar-ctl {
+  position: relative;
+}
+
+.bar-overflow-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: inline-flex;
+  pointer-events: none;
+}
+
+.bar-menu-item-trailing {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* The MCP dialog's document (McpDialog.tsx): fills the dialog's second grid
+   row, which the dialog sizes explicitly — a replaced element has no height
+   of its own to give. */
+.mcp-dialog-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+/* ---- The mode control ---------------------------------------------------
+   One self-describing button in every bar: the active mode's icon, its name,
+   a caret. The icon is plain currentColor at the bars' standard 16px — it
+   spent one iteration inside a filled accent chip, which turned the quietest
+   row in the app into a badge competing for attention. The accent's only
+   remaining job here is the wash on the dropdown's active row. */
+.mode-menu {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+/* No metrics of its own: the mode trigger sits on the plain .bar-ctl recipe
+   (28px tall, 0 8px padding, 6px gap, 6px radius) like every other control in
+   these bars. It used to override with `padding: 0 10px; gap: 7px`, which —
+   with the 1px border only this control carries — put 11px of inset either
+   side and read as the one over-padded thing in the bar. */
+
+.mode-menu-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.mode-menu-icon svg,
+.mode-menu-icon .mode-icon-mask,
+.mode-menu-icon .mode-icon-placeholder {
+  width: 16px;
+  height: 16px;
+}
+
+.mode-menu-icon .mode-icon-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+/* One grid cell, every mode name stacked in it: the hidden ghosts set the
+   slot's width to the WIDEST name, so the trigger (and the popup floored to
+   it) keeps one width no matter which mode is active. */
+.mode-menu-label {
+  font-weight: 500;
+  display: inline-grid;
+  text-align: left;
+}
+
+.mode-menu-label > span {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+
+.mode-menu-label-ghost {
+  visibility: hidden;
+}
+
+.bar-caret {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+
+.bar-overflow {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+/* ---- Bar dropdowns ------------------------------------------------------
+   position:fixed off the trigger's rect (inline top/left): .panel-pane and
+   the tab bar clip their overflow, so an absolutely positioned popup would
+   work in the title bar and be invisible in the pane bars. */
+.bar-menu-popup {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: max-content;
+  padding: 4px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow-md);
+}
+
+/* No fixed floor: the popup hugs its content, and the mode menu floors itself
+   to its trigger's width (inline min-width from useMenuAnchor) so the menu
+   never reads wider than the control that opened it. The overflow menu keeps
+   a small floor so a one-item menu stays a comfortable click target. */
+.bar-overflow .bar-menu-popup {
+  min-width: 120px;
+}
+
+.bar-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bar-menu-item:hover:not(:disabled) {
+  background: rgba(var(--tint), 0.08);
+}
+
+.bar-menu-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Plain glyph, no box: the row's own hover/active wash carries the state,
+   and a bordered well around every icon made the list read as a grid of
+   buttons rather than a set of choices. */
+.bar-menu-item-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--fg-muted);
+}
+
+.bar-menu-item-icon svg,
+.bar-menu-item-icon .mode-icon-mask,
+.bar-menu-item-icon .mode-icon-placeholder {
+  width: 16px;
+  height: 16px;
+}
+
+.bar-menu-item-icon .mode-icon-spinner {
+  width: 12px;
+  height: 12px;
+}
+
+.bar-menu-item-label {
+  flex: 1 1 auto;
+}
+
+/* The active row is the mode you are looking at — semibold, brighter glyph,
+   and an accent wash over the whole row (it replaced a trailing checkmark:
+   the row itself now carries the state). That wash is the last accent left
+   in this chrome, and it still means exactly one thing: the active view
+   mode. Kept stronger than the 8% hover tint so the two never blur. */
+.bar-menu-item.active {
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.bar-menu-item.active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.bar-menu-item.active .bar-menu-item-icon {
+  color: var(--fg);
+}
+
+/* Group divider inside an overflow popup (the path `⋮` separates what it does
+   to the FILE — reveal, copy path — from what it does to the WINDOW: the two
+   splits). Inset to the rows' own padding so it reads as a break in the list
+   rather than a line drawn across the box. */
+.bar-menu-sep {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
+}
+
+.star-btn {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.star-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
+
+/* Neutral, like the ★ itself: bookmark state is not the active view mode, so
+   it carries no accent. */
+.star-btn.starred {
+  color: var(--fg);
+  border-color: var(--border);
+  background: rgba(var(--tint), 0.08);
+}
+
+/* The PAGE-LEVEL split (shell/App.tsx StatView): this view's own column, and
+   then the preview sidebar's when a file preview opens one
+   (apps/explorer/PreviewSidebar). Always rendered, so with no sidebar it is
+   simply the single-column layout it was. Sits directly inside #main, which is a
+   flex COLUMN — hence the flex/min-height here, and `row` for the split. */
+.stat-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+/* The left column: the crumb bar, then #content. The bar lives IN here rather
+   than spanning the window, so it ends at the divider and the sidebar's own
+   header row is the top of the window on its side — same arrangement, and the
+   same reason, as .listing-main over a folder. */
+.stat-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Portal target for the sidebar (preview-side-slot.ts). `display: contents` so
+   the divider and the column it holds become flex children of .stat-split
+   itself — and so the slot, empty on every route that has no sidebar, costs the
+   layout nothing whatsoever. */
+.stat-side-slot {
+  display: contents;
+}
+
+#content {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Route fade (App.tsx): routes hard-remount per navigation, so there is no
+     old-and-new overlap to cross-fade — a short fade-in on the content area
+     alone makes the cut read as intentional. Shorter than --dur-med on purpose:
+     it must not delay reading the page. The sidebar sits OUTSIDE this element
+     and never flashes; so does the crumb bar for a file view — over a FOLDER
+     the bar portals into the listing's left column and fades in with the
+     content it now belongs to. Replays because App keys this node on the nav
+     epoch (an iframe's param write doesn't bump it). */
+  animation: content-in 110ms var(--ease-out);
+}
+
+@keyframes content-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Listing view — a fixed search header above a scrolling table, so the search
+   box stays put as the table scrolls and the columns never jump between
+   listing and results. */
+.listing {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.listing-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  /* Positioning context for .marquee-band: its `left`/`top` are the scroller's
+     own content coordinates (useMarquee's sweepTo), so it must be positioned
+     against THIS element and not whatever ancestor happens to be relative. */
+  position: relative;
+}
+
+/* The rubber band a sweep draws over the rows it is crossing. Appended and
+   positioned imperatively by useMarquee (sweepTo) — never through React state,
+   so a sweep costs a render only when the SELECTION changes and not once per
+   pointermove. pointer-events: none so the band itself can never become the
+   target of the very pointer that is drawing it. */
+.marquee-band {
+  position: absolute;
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid var(--accent);
+  pointer-events: none;
+}
+
+/* The count strip under the list (Listing.tsx, listing/status-line.ts). A
+   hairline rather than the row's own border weight, since this is chrome
+   about the list and not one more row of it. tabular-nums keeps a selection
+   count from jittering sideways as its digits change; nowrap + ellipsis
+   because the line can carry a size and a folder count on top of the counts
+   themselves, and a folder's worth of text should never wrap the strip to a
+   second line. */
+.listing-status {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The list's floor: with the pane on, flexbox must refuse to shrink the table
+   below this sliver however wide the pane is. The drag clamps to the same
+   number (clampPaneWidth's LIST_MIN_W), so this only backstops a window
+   resize that narrows the container under an already-sized pane. Scoped to the
+   split-with-pane case — a paneless listing in a narrow panel/tab keeps
+   shrinking as it always did. */
+.listing-split:has(.listing-pane-slot) > .listing-main {
+  min-width: 60px;
+}
+
+/* Where the crumb bar hangs over a folder view (Breadcrumb.tsx BreadcrumbBar
+   portals into it, Listing.tsx renders it). `display: contents` so the wrapper
+   itself is invisible to the flex layout and `#breadcrumb` is a direct flex
+   item of .listing-main, sized and spaced exactly as it was under #main. */
+.listing-crumb-slot {
+  display: contents;
+}
+
+/* Left column of the split: the crumb bar (search box and `···` included —
+   see .crumb-search-slot), then the scrolling table, and nothing between them.
+   The crumb bar is IN this column, which is the whole point —
+   the pane beside it starts at the top of the window and runs to the bottom,
+   with its own header as the topmost thing on that side. */
+.listing-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Size container so the table's columns can respond to THIS column's width
+     (not the window's): a wide preview pane squeezes the list, and the size /
+     modified columns drop out below to keep the name readable. */
+  container-type: inline-size;
+}
+
+/* Squeezed list: shed the modified column first, then size, leaving just the
+   name at the narrowest. Header cells carry col-<key> classes to pair with
+   their td counterparts.
+
+   A shed column is COLLAPSED, not removed. `display: none` on the header
+   looks like the obvious way and is the wrong one: the column survives
+   regardless — the status and sentinel rows span the whole table (columnCount
+   in listing/types) — and a display:none header contributes no width to
+   table-layout:fixed, which left NAME and the shed column BOTH width-less.
+   WebKit splits the remainder evenly between width-less columns, so NAME took
+   half and the hidden column kept the other half as blank space running to
+   the preview-pane divider (a 385px table rendering 144 + 96 + 0).
+
+   Keeping the header cell rendered at width:0 leaves exactly ONE width-less
+   column, and the whole remainder is NAME's by construction. Note what this
+   deliberately avoids: pinning NAME with `calc(100% - 96px)` reads correctly
+   and is silently DISCARDED by WKWebKit for table cells under fixed layout
+   (measured: the cell stays at the 144px split, while a plain `289px` or
+   `75%` applies). The engine ships in a WKWebView, so only px lengths on the
+   collapsed columns are relied on here.
+
+   The `thead` in these selectors is load-bearing: it outranks the
+   `table.listing-table th.col-size { width: 96px }` defaults further down
+   this file, which would otherwise win on source order. */
+@container (max-width: 460px) {
+  table.listing-table td.mtime {
+    display: none;
+  }
+  table.listing-table thead th.col-mtime {
+    width: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    /* The label and sort arrow still exist in the cell; fixed layout would
+       otherwise let them paint straight over MODIFIED's neighbour. */
+    font-size: 0;
+  }
+  /* This used to be `overflow: hidden` on the cell above, which now also has
+     the folder `⋮` riding its right edge — and at width 0 that edge is the
+     TABLE's right edge, exactly where the button still belongs, so clipping the
+     cell would delete the menu at narrow widths. The two things that actually
+     needed clipping are silenced directly instead: the label by the font-size
+     above, the arrow (which carries its own 9px size) here. */
+  table.listing-table thead th.col-mtime .sort-arrow {
+    display: none;
+  }
+}
+
+@container (max-width: 300px) {
+  table.listing-table td.size {
+    display: none;
+  }
+  table.listing-table thead th.col-size {
+    width: 0;
+    padding: 0;
+    border: 0;
+    box-shadow: none;
+    overflow: hidden;
+    font-size: 0;
+  }
+}
+
+/* Split body when the preview pane is on: table on the left, a draggable
+   divider, the pane on the right. Without the pane the split holds just the
+   scroller, so the plain listing is untouched. */
+.listing-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.listing-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: transparent;
+  margin: 0 -2px;
+  z-index: 2;
+  /* The drag is pointer-captured; without this, touch scrolling fights it. */
+  touch-action: none;
+}
+
+/* Accent on hover/drag — the same affordance as the left sidebar's resize
+   handle (.sidebar-resize-handle, sidebar.css): every draggable seam in the
+   app lights up the same way.
+
+   A 1px LINE and not the 5px box (Akshil, 2026-09-10). The rule used to paint
+   the divider's whole hit area, so the seam jumped from a hairline to a 5px
+   accent bar the moment the cursor crossed it — six times its resting weight,
+   which is the thickness that was being complained about.
+
+   The accent goes ON THE SEAM ALREADY THERE (.listing-pane-slot::before) rather
+   than on a hairline of the divider's own. The slot's pseudo already IS the
+   seam, and it already carries the `z-index: 2` that lifts it over the pane's
+   sticky table header; a second line drawn from this element would need a
+   positioning context of its own (this box has none — its `z-index` is inert
+   without one) and a z-index above the slot's to show at all, and two rules
+   would then own one pixel. One line, two colours. */
+.listing-split:has(.listing-divider:hover) .listing-pane-slot::before,
+.listing-split:has(.listing-divider.dragging) .listing-pane-slot::before {
+  background: var(--seam-hot);
+  /* A breath of glow, so a 1px line stays findable without becoming a second,
+     wider one — 3px, the same figure as the other seams (sidebar.css says why). */
+  box-shadow: 0 0 3px color-mix(in srgb, var(--seam-hot) 35%, transparent);
+}
+
+/* While the divider drags, the pane's iframe must not swallow the captured
+   pointer stream (capture keeps events flowing, but an iframe is a separate
+   document — inert it for the drag's duration). */
+.listing-split:has(.listing-divider.dragging) .pane-frame {
+  pointer-events: none;
+}
+
+/* Slot the pane renders into. Its flex-basis is set inline as a PERCENTAGE of
+   the split container (listing/pane.ts stores the split as a fraction), so a
+   window resize rescales it; the drag clamps that fraction with
+   clampPaneWidth() to at least 220px and at most container - 60px so the LIST
+   keeps its own sliver floor. These two min-widths are what hold the pixel
+   floors when the window — not the divider — is what changed. The min-width
+   here is the pane's floor, not the list's; see .listing-main. */
+.listing-pane-slot {
+  flex: 0 0 auto;
+  /* THE COMPOSER'S OWN FLOOR, shared with the Tasks side peek so the same chat
+     stops at the same width in both panes (styles/tokens.css, and
+     platform/lib/pane-metrics.ts for the derivation). It was 220 — this pane's
+     own number, from before the composer row carried three selects, at which
+     width the row is already tightening its pills and about to break. */
+  min-width: var(--side-pane-min);
+  min-height: 0;
+  display: flex;
+  /* Anchors the seam below. */
+  position: relative;
+}
+
+/* The seam between the two columns — full height, header row included.
+
+   It briefly stopped at the header (`top: var(--topbar-h)`) so the crumb bar
+   and the pane header would read as one bar across the window, but that left
+   the seam's top segment a different color from the run below it wherever the
+   two sides' top strips don't share a background — one line, two colors.
+   A single continuous hairline won.
+
+   On the SLOT rather than on .listing-pane, because the pane is the scroll
+   container: an absolutely-positioned line inside it is laid out against the
+   padding box and would scroll away with a tall preview. The slot does not
+   scroll, so the line stays put.
+
+   The DRAG target is untouched: .listing-divider is a separate 5px flex item
+   spanning the full height, transparent until hover. */
+.listing-pane-slot::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+  /* Above the pane's own sticky table header (th is z-index:1 with an opaque
+     --bg), which otherwise paints over this line for exactly the header row's
+     height — a seam with a bite taken out of it. */
+  z-index: 2;
+  /* Eases into the accent on hover/drag (the `:has()` rule above) at the same
+     rate the other two seams do, so the three light up as one control. */
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* The pane itself: header bar + iframe / mini list / placeholder card. */
+.listing-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  background: var(--bg-alt);
+  /* The seam is painted by .listing-pane-slot::before, not by a border here:
+     it has to stop at the bottom of the header row. */
+}
+
+/* Fills whatever the pane has left — the whole pane for a file preview, the
+   space under the header bar for a folder's embedded app. flex (not
+   height:100%) so the header can't push it past the pane's bottom edge. */
+.listing-pane .pane-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  display: block;
+  background: var(--bg);
+}
+
+/* Placeholder / metadata card centered in the pane. */
+.listing-pane .pane-center {
+  margin: auto;
+  text-align: center;
+  color: var(--fg-muted);
+  padding: 32px;
+}
+
+.listing-pane .pane-big-icon {
+  display: inline-flex;
+  margin-bottom: 12px;
+}
+
+.listing-pane .pane-big-icon .file-icon {
+  width: 48px;
+  height: 48px;
+  stroke-width: 1.5;
+}
+
+.listing-pane .pane-title {
+  color: var(--fg);
+  font-size: 15px;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.listing-pane .pane-hint {
+  font-size: 12.5px;
+}
+
+.listing-pane .pane-open-btn {
+  margin-top: 14px;
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.listing-pane .pane-open-btn:hover {
+  background: var(--bg-alt);
+}
+
+/* The pane's chrome strip: the RIGHT COLUMN'S TOP BAR, since the pane now runs
+   the full height of the window with nothing above it. Directly across the
+   divider from the crumb bar (over a folder) or the search row (the
+   app-builder variant, which has no crumb bar) — one continuous strip split by
+   the divider — so it must match them exactly: same --topbar-h, same vertical
+   padding, same border, same background. Anything else puts a step in the line
+   under the two columns.
+
+   Present in EVERY pane state, including the ones with nothing to put in it (a
+   loading skeleton, an error, the metadata card, no selection). It holds no
+   text of its own any more — the row's icon and name came out
+   (ListingPreviewPane.tsx) — so the explicit `height` is the ONLY thing
+   standing the bar up in those states. It is not a nicety; without it the
+   strip collapses to its border and the seam breaks.
+
+   It leads with the way OUT of the column and ends with the mode pill — the file
+   sidebar's header exactly, and the shared `.side-header-tail` above is what packs
+   that end. `flex-start` here, therefore, rather than the `flex-end` this rule
+   carried while the strip had no leading item at all: the left end now holds the
+   close button and (for a folder with a page to open) the folder's own primary,
+   and those pack from the left like any bar's.
+
+   Horizontal padding stays at the PANE's 10px gutter (the crumb bar keeps the
+   listing's 16px): each bar lines up with the column underneath it, and the
+   seam is the border, not the gutter. */
+.listing-pane .pane-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: var(--topbar-pad-y) 10px;
+  height: var(--topbar-h);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+/* Folder preview fallback: the folder's own entries, read-only. Narrower
+   padding than the main table since it lives in the smaller pane. */
+.listing-pane .pane-mini-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+table.pane-mini-list {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.pane-mini-list td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.pane-mini-list tr.row {
+  cursor: pointer;
+}
+
+table.pane-mini-list tr.row:hover {
+  background: var(--sel);
+}
+
+table.pane-mini-list tr.row.ignored td.name {
+  opacity: 0.5;
+}
+
+table.pane-mini-list td.name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+table.pane-mini-list td.name .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.pane-mini-list td.size {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  width: 1%;
+}
+
+table.pane-mini-list td.status-message {
+  padding: 14px 10px;
+}
+
+/* Skeleton loading state: shimmering bars shaped like the real listing rows
+   (icon + name + size + mtime), plus a full-pane placeholder while a preview
+   loads. Token-derived (--bg-alt/--border) so it reads as part of the UI. */
+.skel-bar {
+  display: inline-block;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--bg-alt) 25%, var(--border) 50%, var(--bg-alt) 75%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.2s ease-in-out infinite;
+}
+
+.skel-bar.icon-skel {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+@keyframes skel-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+table.listing-table tr.skel-row td {
+  cursor: default;
+}
+
+table.listing-table tr.skel-row:hover {
+  background: transparent;
+}
+
+/* Shared "content is loading" block (components/Skeleton.tsx): a few ragged
+   shimmer bars, used where a bare "Loading…" line used to sit. */
+.skel-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+  padding: 6px 0;
+}
+
+.listing-pane .pane-skel {
+  flex: 1 1 auto;
+  margin: 14px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--bg-alt) 25%, var(--border) 50%, var(--bg-alt) 75%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.2s ease-in-out infinite;
+}
+
+/* Row 1 of the listing column in the hosts that have NO crumb bar (the app
+   builder), where this row is what the preview pane's header sits across the
+   divider from: same --topbar-h, so the seam under the two columns is one
+   line. Over a folder in the explorer the row is not a row at all — it portals
+   into the crumb bar and the rules further down strip this box off it. Its
+   30px input is the tallest thing in any of the strips, and is what sets the
+   shared height's content budget. */
+.listing-search {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--topbar-h);
+  box-sizing: border-box;
+  padding: var(--topbar-pad-y) 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Optical gutter alignment for the trailing path `···` (the folder view's,
+   moved down out of the crumb bar). The row pads 16px like the listing gutter
+   below it, but a ghost icon button is a 28px square with a 16px glyph
+   centred, so its dots would stop ~6px short of the gutter the MODIFIED column
+   above them ends on. Hang the button into the padding so the glyph, not the
+   box, lines up; the 28px hit area is unchanged. */
+.listing-search > .bar-overflow:last-child {
+  margin-right: -6px;
+}
+
+/* ---- …and the same row once it has moved INTO the crumb bar --------------
+   Over a folder the left column had two full-height strips stacked (crumbs,
+   then search) against the preview pane's one across the divider, which read
+   as a mistake in the layout rather than as two things. The row portals into
+   the bar instead (search-slot.ts): crumbs at the left, the box and the `···`
+   at the right end, ONE strip per column.
+
+   `display: contents` on the target so the row itself is the bar's flex item,
+   and the row then gives up everything that made it a strip — its height, its
+   padding, its border and its background all belong to the bar now. */
+.crumb-search-slot {
+  display: contents;
+}
+
+.crumb-search-slot > .listing-search {
+  /* Decision 1: this field IS the path bar for a claimed bar — a folder's or
+     a plain file's — no sibling `.crumbs` strip competes for the row
+     (Breadcrumb.tsx renders none while claimed), so the field grows to fill
+     the space a crumb strip would otherwise hold, right where one would sit
+     (Breadcrumb.tsx portals this slot immediately after the crumb-nav
+     arrows, ahead of the star). */
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  height: auto;
+  padding: 0;
+  border-bottom: none;
+  background: none;
+}
+
+/* The gutter hang exists to line the dots up with the MODIFIED column below
+   them. In the bar the reference is the bar's own 16px padding — a control in
+   this corner must sit on it, not 6px inside it. */
+.crumb-search-slot > .listing-search > .bar-overflow:last-child {
+  margin-right: 0;
+}
+
+/* Crumbs and the search box now share one row, and the box IS the path bar's
+   text area (decision 1: the merged field replaces the strip, it does not
+   sit beside it), so it grows into whatever width the row has to give rather
+   than resting at a small fixed size. */
+.crumb-search-slot .listing-search-box {
+  /* Grows with its row (above): the box holds the path now, so it takes
+     whatever width the bar has to give rather than sitting at a small fixed
+     resting size beside a strip of its own. */
+  flex: 1 1 auto;
+  width: auto;
+  /* The squeeze floor: below this, the placeholder it's chosen to hold
+     starts clipping before the box's own controls (magnifier or clear
+     button, count/spinner pin, star) have room to sit without overlapping
+     the text. */
+  min-width: 124px;
+}
+
+/* Who yields when the bar runs short, and in what order.
+   The crumbs go first and by a long way (shrink 6 against the box's 1):
+   ellipsizing and then scrolling is what a path bar is built to do, and the
+   tail — the folder you are actually in — is pinned into view, so a narrow
+   crumb strip still says where you are. A squeezed input just looks broken.
+
+   But they stop at 120px rather than at zero, because a path bar scrolled down
+   to nothing is no longer a path bar. Past that point the search box takes
+   over and gives up its own width, down to 124px — still the in-field
+   magnifier and the full "Search…" placeholder, just with no slack around it.
+   Between the two floors the strip stays one line at any width the split
+   allows, which is what keeps it the same height as the pane header across the
+   divider. Both floors hold at every width; the field never gives the path a
+   third state to fall back to. */
+#breadcrumb:has(.crumb-search-slot) .crumbs {
+  flex-grow: 0;
+  flex-shrink: 6;
+  min-width: 120px;
+}
+
+/* There is no `.crumbs`-hides-while-searching rule here. A claimed folder
+   never renders a `.crumbs` element at all (Breadcrumb.tsx: `claimed ? null
+   : <div className="crumbs">`) — the in-field strip that stands in for it
+   (`.listing-search-crumbs`, path-crumbs.tsx) is a different class on
+   purpose, and its own visibility is Listing.tsx's `query === ""` React
+   conditional, not CSS. A `:has(.listing-search.searching) .crumbs` rule
+   would not match anything here: the two conditions it would name (claimed
+   field, `.crumbs` present) are mutually exclusive.
+
+   The history arrows still get out of the way below, for the reason the path
+   would have: */
+/* …and so do the history arrows, for the same reason the path did — they hold
+   the field off the left edge, and a search box that spans the bar is what
+   someone typing a query is asking for. They come straight back on Esc or an
+   emptied query, so nothing is lost, only deferred.
+
+   The star does not join them any more: it moved off the bar's left/outer
+   zone and into the field itself (Listing.tsx renders it as the box's own
+   trailing affordance, past the count/spinner pin above), so it has nothing
+   left to stand down FROM — it grows and shrinks with the box it now lives
+   inside, same as the count chip beside it.
+
+   `display: none`, not visibility/opacity: the arrows are 28px each, and
+   hiding them while keeping the box would leave the field starting in from a
+   gap. A flex item removed this way takes its `gap` share with it, so there
+   is nothing left behind. (This is the opposite of the table-column case in
+   listing/column-shedding.test.ts, where the shed element had to stay
+   rendered — a table column under `table-layout: fixed` outlives its hidden
+   header.) */
+#breadcrumb:has(.listing-search.searching) .crumb-nav,
+#breadcrumb:has(.listing-search.expanded) .crumb-nav {
+  display: none;
+}
+
+/* Both halves of that: the ROW has to grow (idle it is `0 1 auto`, sized to
+   its box) and so does the BOX (idle `0 1 200px`). Only then does the field
+   actually span the strip rather than sitting at its resting width with the
+   freed-up crumb width as dead space beside it. */
+#breadcrumb:has(.listing-search.searching) .listing-search,
+#breadcrumb:has(.listing-search.expanded) .listing-search {
+  flex: 1 1 auto;
+}
+
+#breadcrumb:has(.listing-search.searching) .listing-search-box,
+#breadcrumb:has(.listing-search.expanded) .listing-search-box {
+  flex: 1 1 auto;
+  /* The open sweep, and it is declared HERE rather than on the resting box on
+     purpose: a transition only exists while the class that carries it does, so
+     opening animates and closing snaps back.
+     `flex-grow` is the animated property because grow, not `width`, is what
+     spans the strip; the row's own grow above is instant, so the field opens
+     rightward, eating the space between it and whatever else sits in the bar
+     (`#breadcrumb`'s `justify-content: space-between`). */
+  transition: flex-grow 130ms ease-out;
+}
+
+/* Terse now ("1.2K · 45.1K…" rather than the full sentence — Listing.tsx keeps
+   that in the title and the aria-label), so the room reserved for it inside
+   the input comes back to the query: 116px sized the old sentence, 96px sizes
+   the widest thing left (the multi-selection readout, "1,234 selected") once
+   the chip stops hanging 26px off the edge. Still a reservation and not a
+   reflow — the chip is absolutely positioned, so a digit more or less never
+   moves the box. 126px now: the star sits past the chip (below), and its
+   24px hit area plus a 6px gap is the same 30px added to `--pin-right`
+   beneath it — one reservation growing by one amount, not two. */
+.crumb-search-slot > .listing-search .listing-search-box.has-pin .listing-search-input {
+  padding-right: 126px;
+}
+
+/* Same +30px, for the caveat-widened pin ("indexing…" beside the count) —
+   the generic .wide-pin rule further down never learns about the star, since
+   it also covers listing rows with no crumb bar (and so no star) to clear. */
+.crumb-search-slot > .listing-search .listing-search-box.has-pin.wide-pin .listing-search-input {
+  padding-right: 240px;
+}
+
+/* The whole pin group moves in with it — the spinner too, or a streaming walk
+   would leave it hanging 16px out over the count. 40px, not 10px: the star
+   (below) claims the box's true right edge now, so the count/spinner pin
+   — still hanging off this same variable — has to sit 30px further in to
+   clear it, the same 24px hit area plus 6px gap `.has-pin` reserves for
+   above. */
+.crumb-search-slot .listing-search-box {
+  --pin-right: 40px;
+}
+
+/* THE OMNIBOX OVERLAP DEFECT (running-screen review, screenshot): the
+   trailing "Search ⌘L" button (`.listing-search-shortcut-hint` below) is
+   absolutely positioned, so it costs the box no LAYOUT space — but nothing
+   ever told the crumbs strip it was there. `--pin-right` above (40px) only
+   clears the star; the button rides the SAME slot the star does in this
+   host (`right: 38px`, past the star) and is far wider than the star's 24px
+   hit box once `boxWide` renders the label, so a long path's tail ran
+   straight under "Search ⌘L" exactly the way it once ran under the bare
+   star (the fix just above this one).
+
+   FIRST FIX (this file, since superseded): a pair of `:has()` rules read the
+   button's rendered form back out of the DOM and wrote a HAND-ESTIMATED
+   pixel width into `--pin-right-hint` for each form — 164px for the label,
+   72px for the collapsed glyph, both padded generously for the wider
+   non-Mac "Ctrl L" cap so the reservation would never be too tight. Also
+   fixed at that time: this used to write straight into `--pin-right`, which
+   only worked because these selectors happened to out-specificity every
+   other `--pin-right` setter (the star's bare 40px, `.has-clear`'s 38/68px)
+   by ACCIDENT of selector shape — the button writing its own
+   `--pin-right-hint` property instead, read via `max()` by every consumer
+   below, is the part of that fix that is still current; only the ESTIMATE
+   half is gone.
+
+   THE OMNIBOX-OVERLAP-DEFECT FOLLOW-UP (running-screen review, screenshot,
+   2026-09-13): the estimate was tried and REJECTED on a running screen with
+   this exact symptom class — sized generously "so it's never too tight" is
+   the same trade in reverse for every combination the estimate wasn't tuned
+   for (a Mac's shorter "⌘L", any font/zoom setting other than the one the
+   estimate was eyeballed at): too loose, reserving far more than the button
+   occupies, truncating a long path to a leading ellipsis behind a dead gap
+   of visible air. An estimate cannot be simultaneously right for both
+   platforms, both label forms, and every font/zoom setting — there is no
+   pixel count `:has()` could have selected instead that fixes this.
+
+   So `--pin-right-hint` is no longer SET here at all. `SearchField.tsx`
+   measures the button's actual rendered position against this box's own
+   right edge (`useControlReservationRef`, search-hint-width.ts) and
+   publishes the result as this exact custom property, inline, on the box
+   element itself — inline style always wins over a stylesheet declaration
+   for the same property with no specificity contest to referee, which is
+   why no `:has()` selector is needed to make this win the cascade either.
+   When the button is hidden or unmounted the inline style is left UNSET
+   (not "0px" — see the React side for why), so every `max(var(--pin-right,
+   …), var(--pin-right-hint, 0px))` consumer below falls back to its own
+   0px default, i.e. the plain star/border clearance, with no leftover
+   reservation for a button that isn't there. */
+
+/* A pin (the multi-selection readout, "12 selected", or the streaming
+   spinner) reserves 126px of the input as padding-right (above) — the box
+   itself keeps the plain grow-with-the-row sizing every merged field gets
+   (`flex: 1 1 auto; width: auto;`), so a pin never squeezes the path down to
+   a fixed width; the crumbs are scrollable and give up room first. */
+
+/* The star, trailing the count/spinner pin at the box's own right edge
+   (Listing.tsx renders it there once this row has portaled into a claimed
+   crumb bar — see `barSearchSlot` there). Absolutely positioned like the rest
+   of the pin group, so it costs the box no layout and sits inside the
+   field's own border rather than out past it. `margin-left` overrides the
+   path-tightening -6px `#breadcrumb .bookmark-star-btn` carries for the star's
+   other position (further down) — that pairing does not exist in here, and
+   the negative margin would just pull the glyph off-centre in its 24px box. */
+#breadcrumb .crumb-search-slot .listing-search-box .bookmark-star-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 0;
+}
+
+/* Wraps the input plus its pinned chips (count / spinner), so the preview-pane
+   toggle can sit beside them without disturbing the inside-the-input pin.
+   `container-type: inline-size` scopes the shortcut hint's own narrow-width
+   rule (`.listing-search-shortcut-hint` below) to THIS box's own width
+   rather than the row's — the row can be as wide as the whole crumb bar
+   while the box itself, squeezed by a deep path, is the one that runs out of
+   room for the hint.
+
+   `--chip-inset` is where the crumbs (`.listing-search-crumbs`) and the
+   input's own text (`.listing-search-input`) both START — set HERE and only
+   READ at the two sites below, so the pair can never drift apart the way
+   two separately-typed numbers eventually would.
+
+   SPEC-omnibox-search-affordance.md scope item 2: this used to be two
+   values, one per mode (`.listing-search-box.search` overrode it for the
+   wider "Search" word) — the chip carried a WORD then, and "Path"/"Search"
+   are different widths. The chip is glyph-only now (scope item 1), and a
+   glyph is the same width regardless of which one it is, so the split
+   collapsed to this one value. Recomputed for the glyph, not left at the
+   old text-derived number — the whitespace bug #1091 (`worktree-omnibox-
+   chip-padding`) exists to fix, reintroduced.
+
+   8px (the chip's own left inset) + 12px (its glyph) + 8px clearance = 28px.
+
+   `--completion-row-pad-y` is the same idea on the OTHER axis. The
+   dropdown's folder-completion rows and the teaching-examples rows both
+   render `.listing-completion-row` (below) and so already shared one rule
+   — but that rule spent its vertical padding as a bare number, not a
+   token, which is exactly the shape that let `--chip-inset` itself drift
+   into two values before scope item 2 of this spec collapsed it back to
+   one. Pulled out here, next to `--chip-inset`, before that has a chance
+   to happen on this axis too — one named value a future change reads and
+   writes in one place, rather than a number someone has to remember lives
+   in a shared rule at all. Bumped from 4px to 6px on a running-screen
+   comparison: the user preferred the examples panel's more generous feel,
+   so the shared value moves to match it rather than the tighter one the
+   plain folder-completion rows had been sitting at before either surface
+   had a name for this number. */
+.listing-search-box {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  container-type: inline-size;
+  --chip-inset: 28px;
+  --completion-row-pad-y: 6px;
+}
+
+/* The mode chip: the field's leading readout, always rendered (Listing.tsx
+   has no visibility condition of its own, only the search/path choice) —
+   the field must never be caught with neither glyph showing. Left-aligned
+   at the same 8px inset the trailing controls use on their own edge,
+   `pointer-events: none` so a press here lands on the input beneath it, the
+   same fall-through the crumbs use. No background, no hover, no cursor
+   change: this is a readout, not a third pressable thing beside the star
+   and the clear button — the whole point of a chip that never lies about
+   the mode is that it also never invites a click that would do nothing.
+
+   SPEC-omnibox-search-affordance.md scope item 1: the word this chip used
+   to carry ("Path"/"Search") is gone — the 12px folder/magnifier glyph
+   alone carries the mode, kept clearly different in SHAPE (not colour
+   alone) so the two states stay distinguishable for more than a colour
+   check. The word survives only as a screen-reader-only `.sr-only` span
+   (SearchField.tsx), so the mode still has a spoken label even with
+   nothing left on screen to read. */
+.listing-search-mode {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Search takes the accent: it marks the state with an action pending
+   (commit the query), the same argument the focused/searching border and
+   the enter-row wash already make elsewhere in this box. Path stays muted —
+   it is the resting state, not a claim about anything. */
+.listing-search-mode.search {
+  color: var(--accent);
+}
+
+.listing-search .listing-search-input {
+  width: 100%;
+  padding-right: 10px;
+}
+
+/* Decision 1: the breadcrumbs shown behind the merged field at REST, empty
+   and unfocused (query === "" && !pinnedOpen, Listing.tsx). Same
+   click-through trick as the mode chip ahead of it uses — the strip itself
+   lets a press fall through to the input underneath (which is what focuses
+   and expands the box), while an actual crumb link claims its own click to
+   navigate instead. Left-aligned at `--chip-inset` (`.listing-search-box`
+   above) — sized for whichever word the chip is CURRENTLY showing, "Path" or
+   "Search", so "Path"'s shorter word leaves no dead space before the text
+   the way one number fixed at "Search"'s width always did. Clipped rather
+   than wrapped, since the box beneath it is one line tall.
+
+   A narrow field still has to keep the CURRENT folder readable rather than
+   the root, so PathCrumbs.tsx pins the strip's scrollLeft to its own end —
+   the same tail-pin `#breadcrumb .crumbs` runs — instead of this rule
+   packing the content against the right edge. `scrollbar-width`/
+   `::-webkit-scrollbar` hide the bar a real scroll container would
+   otherwise render.
+
+   NOT shown while focused, even with an empty query: a row of crumb LINKS
+   sitting where a caret is about to type reads as editable text the first
+   keystroke is about to destroy, and it says nothing about the field taking
+   more than a filename. That is a React condition in Listing.tsx
+   (`!pinnedOpen`), not a CSS one — there is no `.listing-search-crumbs`
+   selector here to gate visibility with, so the JSX above is the only thing
+   that decides whether this element renders at all.
+
+   This class does not double as `.crumbs`: PathCrumbs.tsx renders only this
+   class here, so no `#breadcrumb .crumbs`/`.crumbs`-keyed rule elsewhere in
+   this file — several exist for a sibling strip that does not exist once a
+   folder is claimed — can match this element by accident. This rule
+   declares everything it needs on its own name instead: the same monospace
+   face AND the same 12px size `#breadcrumb .crumbs`/`.panel-crumbs` wear,
+   left-aligned with no packing, visible for exactly as long as the JSX
+   above renders it and no longer.
+
+   12px, not the search input's 13px it floats over: this element is a PATH
+   STRIP, not a bigger version of the input's placeholder text, so its
+   reference is every other path strip in the app, not the field beneath it.
+   A monospace face is already the widest glyph set here, and the rest of
+   this row sits at 12–12.5px, so matching the input's size instead would
+   make the resting path read as the largest thing in the bar. */
+.listing-search-crumbs {
+  position: absolute;
+  inset: 0;
+  left: var(--chip-inset);
+  /* `--pin-right` (the same star/pin clearance vocabulary the crumb-slot
+     host reads below) rather than a bare number, with the old 10px kept as
+     the fallback for the one host that never sets it at all — the inline/
+     pane copy of this box, which has neither a star nor (see the shortcut-
+     hint reservation just below) a differently-sized button to clear, only
+     its own border.
+
+     `max(…, var(--pin-right-hint, 0px))`, not `--pin-right` alone: the
+     shortcut button writes its own reservation into `--pin-right-hint`
+     rather than into `--pin-right` (see the button rules below), so the
+     crumbs always clear whichever of "the star/clear/count pin" or "the
+     button" reaches furthest in — a fact about the two numbers, not about
+     which selector has more classes on it. */
+  right: max(var(--pin-right, 10px), var(--pin-right-hint, 0px));
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.listing-search-crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+/* THE PLAIN-BOX HALF of the same omnibox overlap defect the crumb-slot
+   fix (above, next to `--pin-right`'s other crumb-slot rules) exists for:
+   the inline/pane copy of this field (no crumb bar, no star) renders its OWN
+   "Search ⌘L" button at `right: 8px` (`.listing-search-shortcut-hint` below,
+   unscoped), and the crumbs above never reserved room for it either — the
+   base rule's plain `right: 10px` only ever cleared the box's own border.
+
+   Like the crumb-slot host, this used to carry a pair of `:has()` rules
+   writing a hand-estimated width (134px label / 42px glyph, the same 8px
+   inset plus the same estimated label/glyph widths the crumb-slot rule
+   above once used) into `--pin-right-hint`. Removed for the same reason and
+   at the same time as the crumb-slot rule above: the estimate was tried and
+   rejected on a running screen showing exactly this box, over-reserving
+   space and truncating the path behind a dead gap. `--pin-right-hint` is
+   set here the same way now too — inline, by `SearchField.tsx`'s
+   `useControlReservationRef` measurement, on WHICHEVER box (this plain host
+   or the crumb-slot one) the button actually rendered inside — so this
+   selector needs no rule of its own any more; see the crumb-slot comment
+   above for the full mechanism. */
+
+/* The crumb-slot host's own star sits at the box's true right edge
+   (`.bookmark-star-btn` below, `right: 8px` in a 24px hit box) — the plain
+   `right: 10px` above only clears the box's own border, not that button, so
+   PathCrumbs.tsx's tail-pinned scrollLeft (the comment above explains why it
+   pins to the END, not this rule packing the content) drove the current
+   folder's own name straight under the star on any path deep enough to fill
+   the strip.
+
+   `--pin-right` (above, `.crumb-search-slot .listing-search-box`) is
+   already exactly this reservation — it exists so the count/spinner pin
+   sits clear of the star, and the star's position does not change between
+   that case and this one, so the same value clears it here too. Not a new
+   custom property: introducing a second number for the same distance is the
+   drift `--chip-inset` and `--completion-row-pad-y` (above) both exist to
+   avoid.
+
+   Scoped to the crumb-slot host on purpose: the inline/pane copies of this
+   box (Breadcrumb.tsx's own star, not this one) have no star inside
+   `.listing-search-box` at all, and `--pin-right` is never set to 40px
+   outside this host — reserving it there would open dead space after a
+   short path for no button that exists to fill it.
+
+   The count/spinner pin itself cannot collide with the crumbs to begin
+   with: both only render while `query !== ""` (Listing.tsx `hasPin`,
+   `useListingSearch.ts`'s `runsSearch`), and the crumbs only render while
+   `query === "" && !pinnedOpen` (SearchField.tsx) — mutually exclusive
+   states, confirmed by reading `searchState`'s `!runsSearch` branch, not
+   assumed. Only the star needed a rule here.
+
+   CODE REVIEW (2026-09-13): also `max()`s in `--pin-right-hint` (the
+   shortcut button's own reservation, set by the `:has()` rules above `--pin-
+   right`) rather than trusting this selector to keep outranking them on
+   specificity forever — the button and this host's other `--pin-right`
+   setters (the star's bare 40px, `.has-clear`'s 68px) are mutually
+   exclusive today for the same reason the count pin is (the button only
+   renders while `query === ""`), but that is a fact about SearchField.tsx's
+   current guards, not about the cascade, and this way the cascade can't get
+   it wrong even if that fact ever stops holding. */
+#breadcrumb .crumb-search-slot .listing-search-box .listing-search-crumbs {
+  right: max(var(--pin-right, 40px), var(--pin-right-hint, 0px));
+}
+
+/* Scoped to the anchor tag, not `.path-crumb` generally: the LAST segment
+   (the current folder, path-crumbs.tsx's `<span class="path-crumb last">`)
+   has no navigate handler — it's a no-op to click, you're already there.
+   Re-enabling pointer-events on it would only create a dead zone that
+   swallows presses meant for the input underneath, worst at narrow widths
+   where the tail-pin scrolls the strip so the current folder fills most of
+   the visible field. Leaving it at `pointer-events: none` (inherited from
+   `.listing-search-crumbs` above) lets a click on it fall through to the
+   input, the same way the magnifier already does. Do not widen this
+   selector back to `.path-crumb` — that's the bug this comment guards.
+   `.path-crumb.last` is unaffected either way (spans don't take `href`). */
+.listing-search-crumbs a.path-crumb {
+  pointer-events: auto;
+  flex: 0 0 auto;
+}
+
+.listing-search-crumbs span.path-crumb {
+  flex: 0 0 auto;
+  /* Overrides the shared `.path-crumb` rule's `cursor: pointer` — this span
+     (the current folder, the only `.path-crumb` that renders as a span here)
+     is `pointer-events: none`, so a pointer cursor over it can never fire. */
+  cursor: default;
+}
+
+.listing-search-crumbs .path-crumb-sep {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+
+/* Room for whichever chip is pinned inside the right edge, sized for the
+   longest count text ("showing 250 of 7734 matches"). Only while one is
+   actually pinned (Listing.tsx `hasPin`): reserving it unconditionally cost
+   116px of an idle box, which clipped the placeholder outright once the
+   window was narrow and the preview pane open. Esc clears the query. */
+.listing-search .listing-search-box.has-pin .listing-search-input {
+  padding-right: 116px;
+}
+
+/* Native WebKit cancel × collides with the absolutely-positioned count chip;
+   hidden (Esc clears the query instead). */
+.listing-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* Match count pinned inside the input's right edge (no layout shift).
+   `--pin-right` is where the pinned chips hang from, so the two hosts can move
+   the whole pin group without either chip being left behind (the crumb-bar row
+   pulls it in — see .crumb-search-slot).
+
+   `max(…, var(--pin-right-hint, 0px))` (code review, 2026-09-13): the
+   shortcut button's own reservation lives in `--pin-right-hint`, separate
+   from `--pin-right`, precisely so a consumer like this one clears the
+   button too without depending on which of the two setters wins the
+   cascade. This chip and the button are mutually exclusive by construction
+   today (the button needs `query === ""`; this chip needs `hasPin`, which
+   needs a non-empty, active search), so `--pin-right-hint` is always 0px
+   here in practice — this is defensive, not currently load-bearing. */
+.listing-search-count {
+  position: absolute;
+  right: max(var(--pin-right, 26px), var(--pin-right-hint, 0px));
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* While a scan runs, the pinned chip also carries the "indexing…" caveat, so
+   it needs more room than a bare match count. Same slot, wider reservation —
+   a SECOND element in this row would have to fight the absolutely-pinned chip
+   for the same pixels on a narrow pane. */
+.listing-search .listing-search-box.has-pin.wide-pin .listing-search-input {
+  padding-right: 210px;
+}
+
+/* A streaming walk shows BOTH — the spinner and the live count — and they hung
+   from the same offset, so the spinner sat on top of the digits. They stack
+   instead: spinner outermost, count shifted in by its width plus a gap. The
+   sibling combinator works because that is the DOM order (Listing.tsx renders
+   the spinner first), and it costs nothing in the settled state, where the
+   spinner is gone and the count keeps the pin to itself. */
+.listing-search-spinner + .listing-search-count {
+  right: calc(max(var(--pin-right, 26px), var(--pin-right-hint, 0px)) + 17px);
+}
+
+/* Small spinner shown while the recursive walk is still in flight, so a
+   search on a huge folder doesn't look stalled while the input stays
+   fully interactive. Reads `--pin-right-hint` alongside `--pin-right` for
+   the same reason `.listing-search-count` above does — see its comment. */
+.listing-search-spinner {
+  position: absolute;
+  right: max(var(--pin-right, 26px), var(--pin-right-hint, 0px));
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  margin-top: -5.5px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--fg-muted);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: listing-search-spin 0.6s linear infinite;
+}
+
+@keyframes listing-search-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Real clear control (not the suppressed native WebKit cancel button, which
+   collides with this same pinned chip group) — a quiet pill matching the
+   star's own resting/hover treatment (`--ctl-quiet-bg`/`--ctl-quiet-bg-hover`,
+   tokens.css), so it reads as pressable before the pointer ever arrives. Only
+   rendered while there is a query (Listing.tsx `hasClear`), and always
+   nearer the box's true right edge than the count/spinner pin — the star, if
+   present, still claims the very edge (crumb-slot rule below moves this one
+   in to clear it). */
+.listing-search-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  border: none;
+  border-radius: 6px;
+  background: var(--ctl-quiet-bg);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.listing-search-clear:hover {
+  color: var(--fg);
+  background: var(--ctl-quiet-bg-hover);
+}
+
+/* In the claimed-folder crumb bar the star still sits at the box's own true
+   right edge (right: 8px, a 24px hit box) — this control moves in to clear
+   it: 24px of star plus a 6px gap. */
+.crumb-search-slot .listing-search-box .listing-search-clear {
+  right: 38px;
+}
+
+/* SPEC-omnibox-search-affordance.md scope item 3 (variant F), revised: a
+   real button on the app's own `bar-ctl` family (explorer.css, above) — the
+   same recipe the neighbouring `⋮` trigger rides — with the WORDS as its
+   content, not a glyph: "Search ⌘L" was never the defect, an unclickable
+   pill wearing no chassis was. `bar-ctl` alone (no `.bar-ctl-icon`) is the
+   wide form, sized to its own text/kbd content; `bar-ctl-icon` narrows it
+   to the same 28px square the `⋮` trigger uses once `SearchField.tsx`'s
+   `boxWide` says there isn't room for the words (reusing the placeholder's
+   own `HINT_WIDE_PX` measurement, not a second breakpoint). Either way this
+   rule only POSITIONS it, absolute, in the clear button's own trailing slot
+   rather than a fixed left gutter — the two never render at once
+   (SearchField.tsx's `!hasClear` guard), so sharing the position costs
+   nothing and needs no extra width reserved anywhere. No
+   `pointer-events: none`: unlike the mode chip beside it, this one IS the
+   control — a press must land on it, not fall through to the input
+   beneath.
+
+   Vertically centred with `margin-top` on a fixed half-height, not the
+   usual `transform: translateY(-50%)` — `.bar-ctl:active` (base.css) already
+   claims `transform` for its own 1px press nudge, and the two would fight:
+   whichever declaration a browser resolves last wins the WHOLE property,
+   snapping the button to either "pressed" or "centred" but never both. */
+.listing-search-shortcut-hint {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  margin-top: -14px;
+}
+
+.crumb-search-slot .listing-search-box .listing-search-shortcut-hint {
+  right: 38px;
+}
+
+/* The shortcut wears the key-cap; the label does not. A chip around BOTH
+   halves makes "Search ⌘L" one undifferentiated object — the reader has to
+   parse the box to find out that half of it is a keystroke and half is a
+   name. The cap around the shortcut alone says which half is which at a
+   glance, and leaves the label as plain text sitting on the bar like every
+   other word in this chrome.
+
+   Same face and same size as the label: the cap is what separates them, so
+   a second scale on top of it is a difference doing no work — and with
+   `align-items: center` two different sizes centre their BOXES, which
+   leaves the baselines a pixel apart and the pair looking misaligned.
+
+   Rounded to 5px, not square: it reads as a physical key, and it is nested
+   inside a 6px box (`.listing-search-box`) — a right angle inside that
+   corner reads as a mistake rather than a choice. */
+.listing-search-shortcut-hint kbd {
+  font: inherit;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+}
+
+/* Absent, not clipped, on a narrow box — a deep path or a narrow window can
+   squeeze `.listing-search-box` well below the width even the COLLAPSED
+   glyph form needs. `container-type: inline-size` on the box itself (above)
+   is what makes this query answer the BOX's own width rather than the
+   row's, which can stay wide (the whole crumb bar) while the box inside it
+   has already given up most of that width to the path. A CSS query rather
+   than a measured ref: `useWidthThresholdRef`'s own comment records a
+   `useLayoutEffect([])` version of a similar measurement freezing on a null
+   ref and never recovering — this has no such failure mode because there is
+   nothing to attach or miss.
+
+   THE DEFECT (code review, 2026-09-10, verified against source): this used
+   to share `boxWide`'s own 360px — the SAME number `HINT_WIDE_PX`
+   (SearchField.tsx) measures the placeholder against, at 340px. Both rules
+   read the same box, so 340-360px was self-contradictory: `boxWide` was
+   already true there (the label form, `Search`+`⌘L`, is what renders), and
+   this rule hid the button outright in the same range — the glyph branch
+   `!boxWide` renders below 340px never got a width where it was both
+   CHOSEN and VISIBLE. Below 340px this rule fired too (340 < 360), so the
+   glyph form was unreachable at every width: label above 360, nothing
+   (hidden by this rule) below it.
+
+   The two consumers want different numbers because they're asking
+   different questions. `HINT_WIDE_PX` (340px) asks "does `HINT_LONG` fit
+   without clipping" — a full sentence. This asks "does even the collapsed
+   28px `bar-ctl-icon` glyph still have room" — a single square control,
+   right-anchored (`right: 8px`, or `right: 38px` past the star in
+   `.crumb-search-slot` — see above), against the mode chip and crumbs on
+   the box's other end, above the box's own 124px squeeze floor
+   (`.crumb-search-slot .listing-search-box`'s `min-width`, above). 190px
+   is chosen well clear of that 124px floor — the glyph, its inset, the mode
+   chip and a breathing gap between them all still fit — while sitting
+   comfortably under `HINT_WIDE_PX` so the ordering holds across the whole
+   range: wide label (>= 340px) -> glyph only (190-339px) -> hidden
+   (< 190px), each with a real width span rather than a knife-edge or a
+   crossed pair. */
+@container (max-width: 189px) {
+  .listing-search-shortcut-hint {
+    display: none;
+  }
+}
+
+/* The count/spinner pin moves in to clear the clear button the same way it
+   already moves in to clear the star (`--pin-right` above) — 24px of hit
+   area plus a 6px gap, on top of whichever base the context already sets. */
+.listing-search-box.has-clear {
+  --pin-right: 38px;
+}
+
+.crumb-search-slot .listing-search-box.has-clear {
+  --pin-right: 68px;
+}
+
+/* Input right-padding, so typed text never runs under the clear button —
+   each rule adds the same 30px (24px hit area + 6px gap) on top of whatever
+   the has-pin/wide-pin matrix above already reserves for the count chip. */
+.listing-search-box.has-clear:not(.has-pin) .listing-search-input {
+  padding-right: 40px;
+}
+
+.listing-search .listing-search-box.has-pin.has-clear .listing-search-input {
+  padding-right: 146px;
+}
+
+.listing-search .listing-search-box.has-pin.wide-pin.has-clear .listing-search-input {
+  padding-right: 240px;
+}
+
+.crumb-search-slot > .listing-search .listing-search-box.has-pin.has-clear .listing-search-input {
+  padding-right: 156px;
+}
+
+.crumb-search-slot
+  > .listing-search
+  .listing-search-box.has-pin.wide-pin.has-clear
+  .listing-search-input {
+  padding-right: 270px;
+}
+
+/* THE DEFECT (running-screen review, 2026-09-10): the has-pin/wide-pin
+   matrix above reserves a FIXED amount of the input's right edge no matter
+   how wide the box actually is — at a ~600px box with a wide pin ("31
+   matches · not refreshed"), that fixed reservation left a committed query
+   like a two-segment glob ending in `.zip` (e.g. `~`, a wildcard folder, a
+   wildcard filename) clipped to about four visible characters. The rule: the
+   query text — what the user actually typed, and may still want to edit —
+   always outranks the pin, which is only ever supplementary. When there
+   isn't room for both, the pin gives way, one rung at a time, never the
+   query.
+
+   Both breakpoints below key off `.listing-search-box`'s OWN inline-size
+   container (`container-type: inline-size`, declared on it above) — the
+   exact axis the shortcut hint's own container query above uses (though at
+   a different width — the button and this chip give way for different
+   reasons, see the shortcut hint's own comment) — rather than a second,
+   independent width signal. `:has(.listing-search-count)` scopes every override to the
+   moment the pin is actually a MATCH-COUNT chip (SearchField.tsx only
+   renders that span when `searchCount !== null`), so the streaming
+   spinner's own, much smaller `.has-pin` reservation (no count yet) is
+   untouched — this defect and its fix are both about the count/caveat/
+   latency chip specifically, not the spinner.
+
+   Rung 1 -> 2, "31 matches · not refreshed" -> "31 matches": the detail —
+   the timing figure or the freshness caveat — is the least actionable part
+   of the chip (a caveat you cannot act on beats one you cannot even read),
+   so it is what goes first. 480px is a judgment call, not a measured
+   number — a human needs to confirm it on a running screen (see
+   DECISIONS-omnibox-search-affordance.md) — chosen as comfortably above
+   the wide pin's own 210/240px (plain) / 126/156px (crumb-slot)
+   reservations, so there is still genuine room left for the query above
+   this width and the wide reservation stops paying for itself below it.
+
+   Rung 2 -> 3, "31 matches" -> nothing: 360px, its own number — no longer
+   the shortcut hint's own breakpoint (that one now collapses the button to
+   its glyph below 340px and hides it entirely below 190px, a judgment call
+   about a 28px control's own minimum, not about this chip) — but still a
+   deliberate reuse of the SAME width this file already treats as "narrow"
+   for the has-pin/wide-pin matrix's own padding-right rungs a few lines up
+   rather than inventing a second number: below it, the plain match-count
+   reservation is itself what is crowding the query, so
+   it goes too. The chip's own DOM node is not removed — `.listing-search-
+   count` keeps a small, non-zero hoverable footprint — because the
+   freshness caveat must never be lost silently: its full, untruncated
+   sentence still lives in that node's own `title`/`aria-label` (set once,
+   unconditionally, in SearchField.tsx), so it stays reachable as a tooltip
+   even with nothing left to read on screen. */
+@container (max-width: 480px) {
+  .listing-search-count-detail {
+    display: none;
+  }
+  .listing-search
+    .listing-search-box.has-pin.wide-pin:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 116px;
+  }
+  .listing-search
+    .listing-search-box.has-pin.wide-pin.has-clear:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 146px;
+  }
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin.wide-pin:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 126px;
+  }
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin.wide-pin.has-clear:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 156px;
+  }
+}
+
+@container (max-width: 360px) {
+  .listing-search-count-base,
+  .listing-search-count-detail {
+    display: none;
+  }
+  .listing-search-count {
+    width: 10px;
+    height: 10px;
+  }
+  /* Falls all the way back to the same reservation the box uses when there
+     is no pin at all (`.listing-search .listing-search-input` / `.has-
+     clear:not(.has-pin)` above) — both the plain and wide-pin classes are
+     matched explicitly here (rather than just `.has-pin`) so this rule's
+     specificity ties the 480px block's above and this one wins on source
+     order at any width where both apply. */
+  .listing-search
+    .listing-search-box.has-pin:has(.listing-search-count)
+    .listing-search-input,
+  .listing-search
+    .listing-search-box.has-pin.wide-pin:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 10px;
+  }
+  .listing-search
+    .listing-search-box.has-pin.has-clear:has(.listing-search-count)
+    .listing-search-input,
+  .listing-search
+    .listing-search-box.has-pin.wide-pin.has-clear:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 40px;
+  }
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin:has(.listing-search-count)
+    .listing-search-input,
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin.wide-pin:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 10px;
+  }
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin.has-clear:has(.listing-search-count)
+    .listing-search-input,
+  .crumb-search-slot
+    > .listing-search
+    .listing-search-box.has-pin.wide-pin.has-clear:has(.listing-search-count)
+    .listing-search-input {
+    padding-right: 40px;
+  }
+}
+
+/* Dims the results briefly while a background render (React's deferred
+   value) is catching up to the latest keystroke on a large search. */
+.listing-stale {
+  opacity: 0.6;
+  transition: opacity 0.1s ease-out;
+}
+
+/* Results a generation behind, with nothing on its way to replace them: the
+   search deliberately does not refetch while you are reading (listing/
+   revalidate), and the chip in the input says so in words. Much lighter than
+   .listing-stale above, because this one is not a flicker — it can hold for as
+   long as the search is open, and rows nobody can read are worse than rows
+   that are a few minutes old. The two compound when both apply, which is
+   correct: that is genuinely the least certain state there is. */
+.listing-behind {
+  opacity: 0.86;
+}
+
+/* Search-input chrome (explorer header). Left padding reads `--chip-inset`
+   (`.listing-search-box`) — the same property `.listing-search-crumbs`
+   above reads — so typed text and the crumbs it stands in for at rest both
+   begin exactly where the CURRENT mode's chip clearance ends, "Path"'s
+   narrower one included: no more dead space after the shorter word. */
+.listing-search-input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px 6px var(--chip-inset);
+}
+
+.listing-search-input::placeholder {
+  color: var(--fg-muted);
+}
+
+/* Focus affordance: a muted border brighten, not the accent yellow — still
+   clearly perceivable against the resting `--border`, just not loud.
+   `--fg-muted` is token-based, so it costs no per-theme rule. The accent
+   already carries meaning on this surface — the sorted column header uses
+   it for "this is the active sort" — and focus is the single most frequent
+   transient state in the app (every click into the field, every Ctrl+L),
+   already legible from the caret, the crumbs-to-input swap, and the
+   dropdown besides. Spending the palette's loudest colour on the commonest
+   state would dilute what the accent means elsewhere and make routine
+   interaction read like an alert. `.expanded` (focused, Listing's
+   `pinnedOpen`) fires the moment the field is entered, even before the
+   first character — that IS the state change, not a wait for a query —
+   and `.searching` (a non-empty query) keeps it lit after a blur that
+   leaves text behind. Neither implies the other, so both are named
+   alongside the plain `:focus` case; one rule, one treatment, for all
+   three. */
+.listing-search-input:focus,
+.crumb-search-slot .listing-search.expanded .listing-search-input,
+.crumb-search-slot .listing-search.searching .listing-search-input {
+  outline: none;
+  border-color: var(--fg-muted);
+}
+
+/* Decision 2: the completion dropdown, floated below the field it belongs to.
+   `.listing-search-box` (above) is already `position: relative` for the
+   pinned chips, so this is positioned against the box, not the whole bar —
+   it tracks the field's own left/right edges at any bar width instead of a
+   fixed offset that would drift at a narrow window.
+
+   No ancestor between here and the viewport clips overflow (`#breadcrumb`
+   sets none), so the dropdown is free to extend below the bar over the
+   listing underneath. It needs no z-index to win that: `#breadcrumb` and the
+   listing table are both un-positioned in-flow siblings, and a positioned
+   descendant like this one paints after ALL such content regardless of DOM
+   order — the small z-index below is just insurance against a future
+   ancestor picking up `position` (and its own stacking context) for
+   unrelated reasons, kept well under the 200/9000 tier this file reserves
+   for modal-grade overlays since a path dropdown is not one. */
+/* Surface treatment matches the app's other floating menus (`.context-menu`,
+   context-menu.css:15-17): `--bg-alt` background, a neutral `--border`, and a
+   soft 8px/28px shadow, so the dropdown reads as a card floating above the
+   listing rather than a box drawn on top of it. The border stays neutral on
+   purpose — accent on this file means "this control is live" (the focused
+   input above gets an accent border plus a 3px glow), and a menu is not a
+   control; an accent border here would put two equally-loud accent
+   rectangles on screen and pull the eye to a border instead of to the
+   results. `top` clears the input's 3px focus ring (`box-shadow: 0 0 0 3px`
+   above) with 4px of air on top of that ring, not just 4px off the field's
+   own edge — 7px total, so the ring's outer edge doesn't visually touch the
+   panel. */
+/* ITEM 4 (running-screen review, 2026-09-10): `right: 0` alone stretches
+   this panel to the full width of the search FIELD, which is often
+   1100px+ while its own content — one sentence, or a name/hint pair — only
+   ever needs a few hundred. A short row against a field-wide card leaves
+   its own affordance (the `↵`, or the "folder"/size hint) stranded far
+   from the label it belongs to, reading as a rendering fault rather than
+   one row. `max-width` (not `width`) so a field narrower than the cap
+   still governs it, for every row kind this dropdown renders; a name
+   or a label longer than the cap degrades through
+   `.listing-completion-name`'s own `text-overflow: ellipsis` rather than
+   forcing the panel wide again. Left-aligned for free — `left: 0` on the
+   box already puts this at the input's own text edge. */
+/* ITEM 5 (running-screen review, 2026-09-10): `--completion-panel-pad`
+   insets the rows from this card's own rounded (8px) border. Before this,
+   a highlighted row's background ran full-bleed to the card's edges and
+   got clipped square by them (`overflow: hidden` here, radius 8px) — a
+   fill crossing a rounded corner reads as escaping the container the
+   corner defines. Read by `.listing-completion-row`'s own left padding,
+   below, to keep the query-text alignment `--chip-inset` exists to
+   protect: subtracting this inset from `--chip-inset` there cancels this
+   padding back out, so a row's TEXT still starts exactly `--chip-inset`
+   from the FIELD's own left edge, same as before this padding existed. */
+.listing-completion {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  right: 0;
+  max-width: 460px;
+  z-index: 5;
+  overflow: hidden;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px var(--shadow-lg);
+  --completion-panel-pad: 4px;
+  /* The leading icon slot's width and the gap after it, as tokens because
+     `.listing-completion-row`'s left padding subtracts both to keep a
+     suggestion's NAME under the query text (see there). */
+  --completion-icon-w: 16px;
+  --completion-icon-gap: 9px;
+  padding: var(--completion-panel-pad);
+}
+
+/* The rows scroll once there are more than fit at rest. `max-height` is set
+   inline from Listing.tsx, computed off a rendered row's own `offsetHeight`
+   rather than duplicated here as a second, driftable guess at this rule's
+   own padding/font-size — see the comment on `rowsMaxHeight` there. 5.5
+   rows, not an even 5: half a sixth row peeking past the bottom edge is
+   what tells a 6+-item list apart from one that simply ended at 5 — the
+   "there is more, scroll" cue. The inline style is cleared (no max-height)
+   when 5 or fewer rows exist, so a short list still sizes to its own
+   content instead of padding out to a fixed height.
+
+   This rule's own `max-height` is the fallback for a render where the
+   inline one hasn't landed yet (row 0 not measurable, or a browser dropping
+   an inline style JS set): 5.5 rows at this row's own padding/font-size,
+   rounded up. Precise on a fully rendered dropdown, since the inline style
+   overrides it; only load-bearing on that one gap.
+   `scrollbar-width`/`::-webkit-scrollbar` hide the bar a real scroll
+   container would otherwise render, same pattern `.listing-search-crumbs`
+   above uses. */
+.listing-completion-rows {
+  max-height: 132px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.listing-completion-rows::-webkit-scrollbar {
+  display: none;
+}
+
+/* Left padding reads the same `--chip-inset` custom property
+   `.listing-search-input` does, inherited down from `.listing-search-box`
+   (this row is a descendant of it, not a sibling — the dropdown portals
+   nowhere), so a suggestion name lands directly under the query text it
+   completes — reading the property rather than a re-typed number is what
+   keeps the two from being able to drift apart. Right padding stays at
+   11px. Top/bottom padding reads `--completion-row-pad-y` the same way —
+   this ONE rule is what every row kind in this dropdown (folder
+   completions, the not-found notice, the search-action row) renders
+   through, so there was never a second rule set to drift; the token exists
+   so the number itself can't silently diverge from `--chip-inset`'s own
+   pattern the next time any of them changes.
+
+   ITEM 5: `calc(var(--chip-inset) - var(--completion-panel-pad))`, not a
+   bare `var(--chip-inset)`, now that the panel itself carries
+   `--completion-panel-pad` (above) — the panel's own padding already moves
+   this row's box `--completion-panel-pad` to the right of the field's
+   edge, so the row's own left padding gives back exactly that much to land
+   the TEXT at the same `--chip-inset` offset it always has. `border-radius`
+   matches the panel's own corner family (smaller, since this sits INSIDE
+   it) so a painted background (`.highlight`, `:hover`) reads as an inset
+   pill rather than a square fill butting against the panel's rounded
+   corner. */
+.listing-completion-row {
+  display: flex;
+  /* `center`, not `baseline`: an inline SVG has no baseline of its own to
+     align to, so the icon slot dropped to the bottom of the line box and the
+     glyph sat low against its name. */
+  align-items: center;
+  gap: var(--completion-icon-gap);
+  /* The icon slot, not the name, is what now lives in the gutter
+     `--chip-inset` opens: the name has to stay under the QUERY TEXT it
+     completes, so the row gives back the slot and its gap on top of the
+     panel's own padding. `max()` guards the arithmetic — at today's numbers
+     the three terms come to 24px against a 25px slot, i.e. the icon lands one
+     pixel left of the field's own folder glyph and the name lands on the
+     query text; a future `--chip-inset` smaller than the slot would make this
+     negative, and a negative length invalidates the whole shorthand rather
+     than clamping. */
+  padding: var(--completion-row-pad-y) 11px var(--completion-row-pad-y)
+    max(
+      0px,
+      calc(
+        var(--chip-inset) - var(--completion-panel-pad) -
+          var(--completion-icon-w) - var(--completion-icon-gap)
+      )
+    );
+  font-size: 12.5px;
+  cursor: default;
+  border-radius: 6px;
+}
+
+.listing-completion-row:last-child {
+  padding-bottom: 7px;
+}
+
+/* SPEC-omnibox-search-affordance.md scope item 4: a non-interactive line
+   above the real rows: the not-found warning for a path-shaped query that
+   does not resolve. Reuses `.listing-
+   completion-row`'s own padding rhythm rather than a second number, but
+   never wears `.highlight` (nothing sets it) and binds no mousedown or
+   mouseenter of its own — it is text, not a row the arrow keys count. */
+.listing-completion-notice {
+  color: var(--fg-muted);
+  white-space: normal;
+  /* No icon slot of its own, so it pays back what the row above subtracted
+     for one — this sentence starts on the query text, like every name below
+     it. */
+  padding-left: calc(var(--chip-inset) - var(--completion-panel-pad));
+}
+
+/* The mock's `.di.act`: accent-tinted row background plus accent text,
+   reusing --row-bg-active/--accent-soft rather than the mock's literal hex —
+   the same pairing the app's other "this row is the active one" treatments
+   use (e.g. the selected-entry row in the listing table itself). */
+.listing-completion-row.highlight {
+  background: var(--row-bg-active);
+  color: var(--accent-soft);
+}
+
+/* The listing table's own icon slot, at the same width and the same gap, so a
+   completion row and the row it will become line up rather than nearly doing
+   so. Fixed width regardless of what it holds — a folder, a typed file glyph,
+   the search action's magnifier — because a slot that sizes to its content
+   makes every name in the list start at a different x. */
+.listing-completion-icon {
+  flex: 0 0 var(--completion-icon-w);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+}
+
+.listing-completion-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listing-completion-hint {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.listing-completion-row.highlight .listing-completion-hint {
+  color: inherit;
+}
+
+/* Matched-substring highlight in search results (explorer). */
+.search-mark {
+  background: rgba(var(--accent-rgb), 0.22);
+  color: var(--fg);
+  border-radius: 2px;
+}
+
+/* Relative path shown in an explorer search row, in place of a bare name. */
+.search-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The item's own name (plain listing, not a search hit) — sibling of
+   .search-path above and the same flex child of .row-handle, so it needs the
+   same overflow/ellipsis pair: without `overflow` set here, this span had no
+   automatic minimum size (the flexbox "automatic minimum size" rule only
+   zeroes a flex item's min-width when ITS OWN overflow isn't visible), so it
+   never shrank below its full text width. `.row-handle`'s own overflow:hidden
+   then had to hard-clip the overflowing box from outside, which clips
+   mid-character with no ellipsis — exactly the bug this fixes. `white-space`
+   is inherited from `.row-handle`, but set explicitly here too since this
+   span, unlike `.search-path`, is the one every plain row actually renders. */
+.name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Space and mute the "/" segment separators in a multi-segment search-hit
+   path, so it reads as layered folders rather than one long run of
+   characters (renderHighlightPath, listing/bits.tsx). Margin, not a literal
+   space — the character positions highlightSegments works from are computed
+   against the raw path string, and the path still has to copy to the
+   clipboard as the exact string it names, with no extra whitespace in it. */
+.path-sep {
+  margin: 0 2px;
+  color: rgba(var(--fg-muted-rgb), 0.6);
+}
+
+/* Fixed layout is what makes the list unscrollable sideways: with `auto`, the
+   cells' white-space:nowrap sets a min-content width the table refuses to go
+   below, so a wide preview pane pushed the columns past the scroller and
+   .listing-scroll grew a horizontal scrollbar (the cells' own ellipsis never
+   got a chance — a column can't shrink under its content in auto layout).
+   Fixed layout hands SIZE and MODIFIED the widths declared below and gives
+   NAME the remainder, whatever that is, so NAME ellipsizes instead. The
+   container queries above still shed MODIFIED and then SIZE before NAME's
+   remainder gets uselessly small. */
+table.listing-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+/* Empty folder: the column LABELS describe no rows, so they hide — but the
+   strip itself stays, because the folder `⋮` lives on it and an empty folder
+   is exactly where that menu matters most (no row to right-click, and the
+   background context menu is the least discoverable surface in the app).
+   `visibility` rather than the whole thead's old `display: none` so the strip
+   keeps its height and hairline and the `⋮` doesn't jump when the first entry
+   lands. Sorting an empty listing is a no-op, so the still-clickable th costs
+   nothing. */
+table.listing-table thead.listing-head-empty .col-label,
+table.listing-table thead.listing-head-empty .sort-arrow {
+  visibility: hidden;
+}
+
+/* SIZE is a quantity: right-aligned so the magnitudes line up by digit, header
+   included (a column heading that doesn't sit over its own values reads as a
+   different column). MODIFIED stays left-aligned with its header — dates are
+   read left to right, not compared by magnitude. Both get tabular figures so
+   digits don't jitter between rows. */
+table.listing-table th.col-size,
+table.listing-table td.size {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+table.listing-table td.mtime {
+  font-variant-numeric: tabular-nums;
+}
+
+/* SIZE: formatSize (platform/lib/format.ts) never emits "1023.9 KB" — that
+   string mixes the two branches it never mixes in practice. The one-decimal
+   branch only fires for v < 10 ("9.9 KB", 6 chars); everything from 10 up
+   uses toFixed(0), and because the loop divides by 1024 while v >= 1024, v
+   sits under 1024 going in — except toFixed(0) itself can round 1023.5+ up
+   to "1024", so the true widest output is "1024 KB"/"1024 MB"/"1024 GB" (7
+   chars; TB is the final unit and isn't re-divided, but reaching a 4-digit
+   TB value needs a single ~1000+ TB file, not a realistic listing entry).
+   96px was sized for the unreachable 9-char string; 84px covers the real
+   7-char one plus the 16px cell padding each side with a few px to spare.
+
+   MODIFIED: formatMtime's "12/31/25, 11:59 PM" IS the genuine widest case —
+   checked against every common 12-hour-clock English locale (en-US, en-IN,
+   en-AU all top out at that 18-char shape; 24-hour-clock and CJK locales
+   render shorter) — so its 172px stays as-is.
+
+   Both columns disappear entirely before the list is narrow enough for
+   these to matter (see the container queries). */
+table.listing-table th.col-size {
+  width: 84px;
+}
+
+table.listing-table th.col-mtime {
+  width: 172px;
+}
+
+table.listing-table th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--fg-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 8px 16px;
+  position: sticky;
+  top: 0;
+  z-index: 1; /* stay above rows scrolling underneath */
+  background: var(--bg);
+  /* border-collapse drops the sticky cell's own border as rows scroll under
+     it, leaving a 1px bleed gap — paint the divider as an inset shadow so it
+     rides with the header instead. */
+  box-shadow: inset 0 -1px 0 var(--border);
+  user-select: none;
+}
+
+/* Only a header that sorts something gets the affordance. Search mode's single
+   PATH header does not sort (relevance order only — Listing.tsx's thead), and
+   a pointer cursor over it promised a click that does nothing. */
+table.listing-table th.sortable {
+  cursor: pointer;
+}
+
+table.listing-table th.sortable:hover {
+  color: var(--fg);
+}
+
+/* The search-hits header names the base the shown relative paths are rooted
+   at ("Path in ~/Downloads"), which can run long — truncate to one line with
+   an ellipsis rather than wrapping the sticky header taller, and carry the
+   full text in the title attribute (Listing.tsx) for the truncated case. */
+table.listing-table th.col-search-base {
+  max-width: 0; /* lets the table-layout width win over the text's own size */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The "Path in " label is chrome and stays uppercase with the rest of the
+   header row; the path itself is data. Linux paths are case-sensitive, so
+   inheriting the header's uppercase would show a path that does not exist. */
+table.listing-table .col-search-base-path {
+  text-transform: none;
+}
+
+/* The accent means "the view mode you are in" and nothing else (only the
+   active row's wash in the mode dropdown carries it). A sorted header is not a mode:
+   it needs to read as the selected one among three muted headers, which full
+   --fg at 600 already does — and the arrow says which way. */
+table.listing-table th.sorted {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* One glyph (▲) for both directions: desc rotates it, so flipping the order
+   turns the arrow over instead of swapping one character for another (a swap
+   replaces the element, and a replaced element can only pop). Moving the arrow
+   to a different column DOES replace it — that one fades in. */
+table.listing-table .sort-arrow {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 9px;
+  transition: transform 100ms var(--ease-out);
+  animation: sort-arrow-in 100ms var(--ease-out);
+}
+
+table.listing-table .sort-arrow.desc {
+  transform: rotate(180deg);
+}
+
+@keyframes sort-arrow-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* A row that just appeared in the folder (dir-watch refresh, views/Listing.tsx):
+   an accent wash that fades out over ROW_NEW_MS, so a file that landed while you
+   were looking elsewhere is visible instead of silently slotting in. On the cells
+   rather than the row, because the row's own background is the hover/selection
+   channel and must keep working underneath. Removals need no cue beyond the
+   FLIP. Reduced motion collapses the animation, which drops the cue entirely —
+   correct: it is decoration, and nothing depends on seeing it. */
+table.listing-table tr.row.row-new > td {
+  animation: row-new-fade 1.5s var(--ease-out);
+}
+
+@keyframes row-new-fade {
+  from {
+    background-color: rgba(var(--accent-rgb), 0.2);
+  }
+  to {
+    background-color: rgba(var(--accent-rgb), 0);
+  }
+}
+
+/* Rows glide to their new slots after a reorder (lib/flip). Higher specificity
+   than the shared hover-transition rule so it wins for the length of the
+   animation; the class is added for exactly FLIP_MS and then removed. */
+table.listing-table tr.row.flip-animating {
+  transition: transform var(--dur-slow) var(--ease-out);
+}
+
+table.listing-table td {
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A status row (the zero-match offer's "No matches for X. Search Y instead",
+   "Searching…", the capped-away count) is a sentence, not a single-file
+   name — the nowrap+ellipsis above is right for a real row but wrong here:
+   at a narrow pane width it clips the offer's own text instead of letting
+   it wrap onto a second line, which is exactly the dead end the offer
+   exists to get the user out of. */
+table.listing-table td.status-message {
+  white-space: normal;
+}
+
+/* The zero-match offer is the one status row that DOES something, and Enter
+   in the search box is aimed at it — so it wears the app's own "this row is
+   the active one" pairing (`--row-bg-active` + `--accent-soft`, the same two
+   the completion dropdown's `.highlight` uses) rather than sitting in the
+   plain status treatment beside "Searching…". Without it the offer reads as
+   another sentence about the failure, and the fact that a key is pointed at
+   it is invisible. */
+table.listing-table tr.zero-match-offer-row {
+  background: var(--row-bg-active);
+  color: var(--accent-soft);
+  cursor: pointer;
+}
+
+/* Sentence on the left, `↵` pinned right, the same shape the completion rows
+   use. A flex WRAPPER inside the cell rather than `display: flex` on the
+   `<td>` itself, which would take the cell out of the table's own column
+   sizing. `baseline` so the glyph sits on the text's line however many lines
+   the sentence wraps onto at a narrow pane. */
+.zero-match-offer {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.zero-match-offer-text {
+  flex: 1 1 auto;
+}
+
+table.listing-table tr.row {
+  cursor: pointer;
+  /* Rows are a selection widget, not prose — don't let a drag paint a text
+     highlight over them. Necessary but not sufficient on its own: this stops the
+     rows' own text being selectable, but a Shift+click can still set a selection
+     ENDPOINT here and have the browser paint a range anchored somewhere outside
+     the table. Listing.tsx's onRowMouseDown handles that half. */
+  user-select: none;
+}
+
+/* Files matched by .gitignore inside a git repo: dimmed, but still clickable
+   and readable on hover (the row keeps full opacity while hovered). */
+table.listing-table tr.row.ignored {
+  opacity: 0.45;
+}
+
+/* Git decoration, the file-tree convention: a name in a colour because git has
+   something to say about that path (server/git_status.py decides what). The ROW
+   carries the state as a class and only the NAME cell wears it — a tinted SIZE
+   or MODIFIED would read as a second, unrelated signal about the same row.
+   Folders are tinted by whatever is most urgent beneath them, so a change can't
+   hide inside a folder nobody opened.
+
+   The state is funnelled through one `--git-tint` rather than four colour rules
+   so the badge in listing/bits.tsx picks up the same value from the same place;
+   the two cannot drift into disagreeing about what a row's colour is. */
+table.listing-table tr.row.git-untracked {
+  --git-tint: var(--git-untracked);
+}
+table.listing-table tr.row.git-modified {
+  --git-tint: var(--git-modified);
+}
+table.listing-table tr.row.git-staged {
+  --git-tint: var(--git-staged);
+}
+table.listing-table tr.row.git-conflicted {
+  --git-tint: var(--git-conflicted);
+}
+table.listing-table tr.row.git-untracked > td.name,
+table.listing-table tr.row.git-modified > td.name,
+table.listing-table tr.row.git-staged > td.name,
+table.listing-table tr.row.git-conflicted > td.name {
+  color: var(--git-tint);
+}
+
+/* The one-letter badge beside a tinted name (listing/git-mark.ts says why a
+   letter exists at all). Same tint as the name, at the muted weight of a
+   margin note: it annotates the filename rather than competing with it.
+   `flex: 0 0 auto` keeps it from being the thing that shrinks — the name has
+   `min-width: 0` and ellipsizes, and a badge clipped to "M" reading as "!" is
+   the one failure this element cannot afford. */
+table.listing-table td.name .git-mark {
+  flex: 0 0 auto;
+  color: var(--git-tint);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.85;
+  cursor: default;
+  user-select: none;
+}
+
+table.listing-table tr.row:hover {
+  background: var(--bg-alt);
+  opacity: 1;
+}
+
+/* The row is already the click target (tr.row's own `cursor: pointer`,
+   above) — this is what tells a hovering eye WHERE in it a click lands. Same
+   pattern as transcript.css's `.annsum-note:hover .annsum-txt`: a row that is
+   itself the affordance, with the underline landing on its text rather than
+   a second background or border competing with `tr.row:hover`'s own. Covers
+   both the plain listing's name and a search hit's relative path — the same
+   "this is the name" role in either row shape. */
+table.listing-table tr.row:hover .name-text,
+table.listing-table tr.row:hover .search-path {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Keyboard-selected row (arrow-key navigation). Distinct from :hover so the
+   selection stays visible while the cursor is elsewhere; full opacity so a
+   selected .ignored row is still readable. */
+table.listing-table tr.row.selected {
+  background: var(--sel);
+  opacity: 1;
+}
+
+/* A row whose entry is on the in-app clipboard as a CUT: dimmed until it's
+   pasted (moved), like Finder's faded cut icon, plus a dashed left edge so the
+   pending state is a MARK and not just "this row looks faint". Dashed vs. the
+   copy's solid bar is the whole tell between the two ops at a glance. Stays
+   fully readable on hover.
+   0.6 rather than a deeper fade: the row still has to be legible, and the badge
+   + edge now carry the signal that the dimming used to carry alone. */
+table.listing-table tr.row.cut {
+  opacity: 0.6;
+}
+table.listing-table tr.row.cut:hover {
+  opacity: 1;
+}
+/* Same surface as the copy bar below (the first cell's inset shadow), so it
+   survives :hover and .selected untouched; dashed is faked with two stacked
+   insets since box-shadow has no dash. */
+table.listing-table tr.row.cut > td:first-child {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--fg-muted) 0 5px,
+    transparent 5px 9px
+  );
+  background-repeat: no-repeat;
+  background-size: 3px 100%;
+  background-position: left top;
+}
+
+/* A row whose entry is on the clipboard as a COPY. Dimming would be wrong here
+   (nothing is leaving), so a copy is marked positively — a SOLID bar down the
+   row's left edge, against the cut's dashed one.
+ *
+ * Deliberately the same muted grey as the cut bar, not the accent: an accent bar
+ * plus an accent row wash (both of which this used to carry) shouted, and a copy
+ * is transient state, not a highlight. With the wash gone the row background is
+ * left entirely to :hover and .selected, so there is no specificity dance to get
+ * right; the bar is an inset shadow on the first CELL, a surface neither the row
+ * background nor the hover/selected rules touch, so the mark survives every
+ * combination including selected+copied. */
+table.listing-table tr.row.copied > td:first-child {
+  box-shadow: inset 3px 0 0 var(--fg-muted);
+}
+
+/* --- drag to move --------------------------------------------------------
+ *
+ * The folder row under a drag that may land there. An accent ring rather than
+ * a background wash: the row underneath may already be .selected (the dragged
+ * set often includes rows either side of the target), and a second background
+ * would fight the first. Matches the sidebar's own .drag-into ring, which is
+ * the same promise in the other panel.
+ *
+ * The REFUSED case is quiet on purpose — it is the "which row said no" half of
+ * a verdict the cursor says first (see the drag cursors below, which the
+ * gesture now has to paint itself). */
+table.listing-table tr.row.drop-into > td {
+  box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent);
+  background: var(--row-bg-active);
+}
+table.listing-table tr.row.drop-into > td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 2px 0 var(--accent),
+    inset 0 -2px 0 var(--accent);
+}
+table.listing-table tr.row.drop-into > td:last-child {
+  box-shadow: inset -2px 0 0 var(--accent), inset 0 2px 0 var(--accent),
+    inset 0 -2px 0 var(--accent);
+}
+table.listing-table tr.row.drop-reject > td {
+  background: rgba(var(--error-rgb), 0.1);
+}
+
+/* The listing's background as a target: "move these into the folder I'm
+   looking at". It only ever lights up when that would actually move something
+   (dropping rows into the folder they already live in is a no-op — see
+   drag-drop's dropIsValid), so the ring is a promise, not a hover. */
+.listing-scroll.drop-into {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* THE DRAG CURSOR, which used to come free from the native drag's `dropEffect`
+   and now has to be painted like everything else about the gesture
+   (listing/row-drag.ts sets these two classes on <body> for its lifetime).
+   `* !important` because the cursor is otherwise decided by whatever the
+   pointer happens to be over — a row says `pointer`, a link says `pointer`, and
+   the answer during a drag is about the DROP, not about what is underneath.
+   The same class kills text selection across the whole page, which the native
+   drag also did for us. */
+body.fs-dragging,
+body.fs-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+/* Refused: over a file, over a folder the entries already live in, over
+   nothing at all. Set from the SAME dropIsValid verdict that paints the
+   highlight, so the cursor and the row can never disagree. */
+body.fs-dragging.fs-drag-refused,
+body.fs-dragging.fs-drag-refused * {
+  cursor: no-drop !important;
+}
+
+/* The ghost under the cursor during a drag (listing/row-drag.ts). It used to be
+   built off screen for `setDragImage` to snapshot and thrown away a frame
+   later; there is no setDragImage any more, so this is a real element that
+   lives for the whole drag and is moved with `transform` on every pointermove.
+   `pointer-events: none` is load-bearing: the drop target is found with
+   elementFromPoint, and a ghost under the cursor would be the only thing it
+   ever found. */
+.fs-drag-image {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9000;
+  pointer-events: none;
+  will-change: transform;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* How many entries are coming with the one named in the ghost. */
+.fs-drag-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+table.listing-table td.name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  /* Positioning context for .clip-mark below. */
+  position: relative;
+}
+
+/* The icon-and-name group inside a row's name cell — the item itself, and the
+ * row's only drag SOURCE (data-fs-drag-handle, read by useMarquee's
+ * pressedRow). Everything else in the row, selected or not, is marquee
+ * ground: a press there always sweeps, never moves a file.
+ *
+ * `cursor: grab` lives here and nowhere else in the row for the same reason:
+ * it is a promise about what a press DOES, and only a press on this span
+ * moves anything.
+ *
+ * THIS USED TO carry `max-width: max(52px, calc(100% - 48px))` to guarantee a
+ * dead-space strip beside a name long enough to fill the cell — without one,
+ * the row's only sweep-able pixels would be wherever that name happened to
+ * end, and a long enough name could claim the whole row for the drag source,
+ * leaving nowhere in it to start a sweep from. But the 48px came straight out
+ * of the FILENAME's own budget: stacked with td.name's 32px of padding (16px
+ * each side, `table.listing-table td`) and the icon+gap's 24px (both also
+ * inside td.name, both also unavailable to the text), names were ellipsizing
+ * with something like 100 CSS px of the Name column still empty and unused —
+ * exactly the complaint this rule exists to fix. Measured on a ~540px listing
+ * table: names capped near 205px of column while the column itself ran to
+ * ~305px.
+ *
+ * The fix is to stop taking the dead zone out of layout width at all. There
+ * is no max-width here any more: this span is free to use every pixel the
+ * flexbox (td.name, `display:flex`) gives it, same as `.git-mark` already
+ * assumes (its own comment: "the name has min-width:0 and ellipsizes" — it
+ * was always meant to be the one flexible child). The guaranteed sweep-start
+ * strip moves to `.sweep-anchor` below: an absolutely-positioned sibling
+ * pinned to the cell's right edge, invisible and out of flow, so it costs
+ * the text nothing but still wins the hit test for any press that lands in
+ * its strip — regardless of how far the (possibly full-width) name or this
+ * span actually renders under it.
+ *
+ * inline-flex so it hugs its contents rather than filling the cell, and
+ * min-width:0 so a long name still ellipsizes inside it (the .search-path
+ * child's overflow rule needs a shrinkable parent). */
+table.listing-table td.name .row-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: grab;
+}
+
+/* The guaranteed sweep-start strip `.row-handle` used to carve out of its own
+ * width (see the comment above). Absolutely positioned against td.name
+ * (`position: relative` above), so it costs nothing from the flex layout —
+ * `.row-handle` and the filename inside it can run the full remaining width
+ * of the cell, right underneath this strip, and nothing looks different: the
+ * strip has no background, border, or content of its own.
+ *
+ * What it buys is a press target that exists NO MATTER how long the name is.
+ * It is a sibling of `.row-handle`, not a descendant, which is what keeps it
+ * off the drag source: useMarquee's `pressedRow` decides `onHandle` with
+ * `el.closest('[data-fs-drag-handle]')`, and this element never matches that
+ * selector, so a press here is marquee ground exactly like the empty cell
+ * used to be. 20px is plenty of target for a mouse or a finger, and small
+ * enough to read as ordinary trailing whitespace rather than a dead band —
+ * a small fraction of the ~100px this column used to waste. */
+table.listing-table td.name .sweep-anchor {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+}
+
+/* A SELECTED row is draggable across its full width, not just the handle: a
+ * press anywhere on it moves the selection (drag-drop's pressStartsDrag reads
+ * `rowWasSelected` with no `onHandle` requirement). `grab` says so everywhere
+ * on the row, not only over the .row-handle span above. An unselected row has
+ * no such rule — only its handle says `grab` — because a press on its dead
+ * space sweeps instead. */
+table.listing-table tr.row.selected {
+  cursor: grab;
+}
+
+/* "Cut" / "Copied" badge in the name cell of a row on the in-app clipboard
+   (Listing.tsx ClipMark). This and the row styling above are the ONLY pending-
+   clipboard UI — no chrome-level chip — so the badge carries the Esc-to-cancel
+   tooltip, which is also why it must not get `pointer-events: none`. Small
+   caps-y type keeps it subordinate to the name it annotates.
+ *
+ * BOTH ops use the same muted grey on --bg-alt — the accent (which copy used to
+ * carry here and on its edge bar) read as a highlight rather than as transient
+ * state. The op is told by the border, matching the row's edge bar: solid for
+ * copy, dashed for cut. Opaque base, not a translucent wash: the badge is out of
+ * flow (below), so a long filename can run beneath it and a see-through pill
+ * would show that text through the label.
+ *
+ * Pinned to the name column's right edge rather than sitting inline after the
+ * filename: the table is auto-layout, so an in-flow badge widens the name column
+ * and shoves SIZE/MODIFIED sideways the instant you press Copy — a whole-table
+ * jump on a keystroke (the no-jumpy-lists rule). Out of flow it costs zero
+ * layout. Accepted edge case: a filename long enough to define the column's
+ * width runs under the badge; the badge is on top and stays readable. */
+.clip-mark {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1;
+  /* 2px + the 1px border = the 3px the pill reads as */
+  padding: 2px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  background: var(--bg-alt);
+  cursor: default;
+  user-select: none;
+}
+.clip-mark.cut {
+  border-style: dashed;
+}
+
+table.listing-table .icon {
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+/* Per-filetype icons (components/FileIcons.tsx): monochrome inline SVGs tinted
+   by a muted, desaturated per-category colour that sits calmly on the dark
+   shell — folder brightest, generic file dimmest. Only html leans toward the
+   accent yellow: those files launch as apps, so they get to stand out. The
+   SVG is a block so it has no inline-baseline gap; the parent .icon span lives
+   in a flex row (td.name / .sidebar-item) that vertically centres it. */
+.file-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+.file-icon--folder  { color: var(--icon-folder); }
+.file-icon--code    { color: var(--icon-code); }
+.file-icon--data    { color: var(--icon-data); }
+.file-icon--json    { color: var(--icon-json); }
+.file-icon--html    { color: var(--accent-soft); } /* launchable app — leans toward --accent */
+.file-icon--image   { color: var(--icon-image); }
+.file-icon--doc     { color: var(--icon-doc); }
+.file-icon--media   { color: var(--icon-media); }
+.file-icon--geo     { color: var(--icon-geo); }
+.file-icon--archive { color: var(--icon-archive); }
+.file-icon--db      { color: var(--icon-db); }
+.file-icon--file    { color: var(--icon-file); }
+
+table.listing-table td.size,
+table.listing-table td.mtime {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* The top-level embed's strip (apps/explorer/EmbedStrip.tsx): the crumb bar's
+   height, ground and rule, so the one piece of chrome an unframed embed gets
+   sits where the crumb would. `body.embed` hides #breadcrumb, not this. */
+.embed-strip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: var(--topbar-h);
+  padding: var(--topbar-pad-y) 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  box-sizing: border-box;
+}
+
+.embed-strip-name {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.embed-strip-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.embed-strip-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The close sits apart at the far right: the rest are the page's actions,
+   this one is about the bar. */
+.embed-strip-close {
+  margin-left: 6px;
+  font-size: 12px;
+}
