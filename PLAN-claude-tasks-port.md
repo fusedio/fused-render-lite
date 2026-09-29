@@ -5,7 +5,7 @@ fused-render-lite `main` d2ed3d2 (0.10.0).
 
 ## Status (2026-09-29, later the same day): phase 1 + basic UI landed
 
-Ported from fused-render's `fused-tasks-api` worktree (last synced at commit ad9b58405,
+Ported from fused-render's `fused-tasks-api` branch, now on fused-render main (last synced at 9152c5d08,
 which carries D890). The approach changed from the plan below in one way:
 the WHOLE cluster is copied verbatim with import rewrites, schedule /
 drafts / project queue included, instead of a hand-extracted subset. Fewer
