@@ -62,8 +62,9 @@ download page) — `editlink.py`.
 
 Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens fused-render's
 Tasks page — the same React page (List / Board / Cards / Calendar, filters,
-New task, the side peek with the chat in it): `frontend/` is fused-render's
-frontend copied verbatim, built into `static/shell-dist/` by
+New task, the side peek with the chat in it): `frontend/` is the slice of
+fused-render's frontend those two routes import (copied verbatim, pruned to
+the import closure, no tests), built into `static/shell-dist/` by
 `scripts/build_shell.sh`, with Render App's own entry (`frontend/lite.html`,
 `src/lite.tsx`, `src/LiteApp.tsx`) hosting two routes: `/tasks`, and
 `/chat?_file=<folder>` — fused-render's native chat beside the folder's app

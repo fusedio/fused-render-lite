@@ -175,19 +175,161 @@ FRONTEND_PATCHES = {
 }
 
 
-def sync_frontend(src_root: str) -> None:
-    """Copy fused-render's `frontend/` verbatim (its React shell: the Tasks
-    page, the native Claude chat and everything they import), keeping Render
-    App's own entry files (`FRONTEND_OWN`). Then `scripts/build_shell.sh`."""
+#: Always kept under `frontend/src` beside the closure (type-only modules
+#: esbuild erases, ambient declarations).
+FRONTEND_ALWAYS = ("src/global.d.ts",)
+
+
+def _closure(frontend: str) -> set[str]:
+    """The files under `src/` the lite entry reaches, from esbuild's metafile
+    (CSS included, `import type` erased — `_restore_type_only` covers those)."""
+    import json
     import subprocess
+    import tempfile
+
+    out = tempfile.mkdtemp(prefix="lite-closure-")
+    meta = os.path.join(out, "meta.json")
+    subprocess.run(
+        ["bunx", "esbuild", "src/lite.tsx", "--bundle", "--metafile=" + meta, "--outdir=" + out,
+         "--loader:.png=file", "--loader:.svg=file", "--loader:.css=css", "--loader:.ico=file",
+         "--alias:@shell=./src/shell", "--alias:@platform=./src/platform",
+         "--alias:@apps=./src/apps", "--alias:@assets=./src/assets",
+         '--define:__BUILD_VERSION__="0"',
+         "--external:tailwindcss", "--external:tailwindcss/*", "--external:tw-animate-css",
+         "--external:shadcn", "--external:shadcn/*", "--log-level=error"],
+        cwd=frontend, check=True)
+    with open(meta, encoding="utf-8") as f:
+        inputs = json.load(f)["inputs"]
+    return {k for k in inputs if k.startswith("src/")}
+
+
+def _missing_modules(frontend: str) -> list[str]:
+    """Module specifiers `tsc --noEmit` cannot find (TS2307)."""
+    import re
+    import subprocess
+
+    proc = subprocess.run(["bunx", "tsc", "--noEmit"], cwd=frontend, capture_output=True, text=True)
+    return sorted(set(re.findall(r"TS2307: Cannot find module '([^']+)'", proc.stdout + proc.stderr)))
+
+
+def sync_frontend(src_root: str) -> None:
+    """Copy the slice of fused-render's `frontend/` the lite entry imports —
+    the Tasks page, the native Claude chat and everything they reach — keeping
+    Render App's own files (`FRONTEND_OWN`) and re-applying its patches.
+
+    The whole tree is rsync'd first, then pruned to the import closure (no
+    tests, none of the explorer / AI models / canvases apps), then `tsc`
+    names the type-only modules the closure walk cannot see and those come
+    back from the full copy, until the type check is clean. Then
+    `scripts/build_shell.sh`."""
+    import shutil
+    import subprocess
+    import tempfile
 
     src = os.path.join(src_root, "frontend") + os.sep
     dst = os.path.join(os.path.dirname(DST), "frontend") + os.sep
-    cmd = ["rsync", "-a", "--delete", "--exclude", "node_modules", "--exclude", ".vite"]
+    full = tempfile.mkdtemp(prefix="lite-frontend-") + os.sep
+    subprocess.run(["rsync", "-a", "--exclude", "node_modules", "--exclude", ".vite", src, full], check=True)
+    # Render App's own entry + config over the full copy, so the closure walk
+    # and the type check run against what will ship.
     for own in FRONTEND_OWN:
-        cmd += ["--exclude", own]
-    subprocess.run(cmd + [src, dst], check=True)
-    print("dir frontend/ (kept: %s)" % ", ".join(FRONTEND_OWN))
+        shutil.copy2(os.path.join(dst, own), os.path.join(full, own))
+    for rel, patches in FRONTEND_PATCHES.items():
+        _apply_patches(os.path.join(full, rel), rel, patches)
+    if not os.path.isdir(os.path.join(full, "node_modules")):
+        os.symlink(os.path.join(dst, "node_modules"), os.path.join(full, "node_modules"))
+    keep = _closure(full) | set(FRONTEND_ALWAYS)
+    keep |= {own for own in FRONTEND_OWN if own.startswith("src/")}
+
+    # Rebuild frontend/src from the closure; everything else under src goes.
+    src_dst = os.path.join(dst, "src")
+    shutil.rmtree(src_dst, ignore_errors=True)
+    for rel in sorted(keep):
+        target = os.path.join(dst, rel)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(os.path.join(full, rel), target)
+    # Type-only imports (erased by the bundler): restore until tsc is clean.
+    for _ in range(6):
+        missing = _missing_modules(dst)
+        if not missing:
+            break
+        restored = 0
+        for spec in missing:
+            for importer in _files_importing(dst, spec):
+                cand = _resolve_spec(full, importer, spec)
+                if not cand:
+                    continue
+                target = os.path.join(dst, os.path.relpath(cand, full))
+                if not os.path.exists(target):
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copy2(cand, target)
+                    restored += 1
+        if not restored:
+            sys.exit("could not restore type-only modules: %r" % missing)
+    # Top-level files (package.json, bun.lock, tsconfig, scripts/, public/):
+    # fused-render's, minus its own two entry pages and the npm lock.
+    for name in os.listdir(full):
+        if name in ("src", "node_modules", "index.html", "lan.html", "package-lock.json") or name in FRONTEND_OWN:
+            continue
+        s, d = os.path.join(full, name), os.path.join(dst, name)
+        if os.path.isdir(s):
+            shutil.rmtree(d, ignore_errors=True)
+            shutil.copytree(s, d)
+        else:
+            shutil.copy2(s, d)
+    shutil.rmtree(full, ignore_errors=True)
+    print("dir frontend/ (%d files in the lite closure; kept: %s)" % (len(keep), ", ".join(FRONTEND_OWN)))
+
+
+_ALIASES = {"@shell/": "src/shell/", "@platform/": "src/platform/", "@apps/": "src/apps/",
+            "@assets/": "src/assets/"}
+
+
+def _files_importing(frontend: str, spec: str) -> list[str]:
+    """The files under `frontend/src` that import `spec` (relative to `frontend`)."""
+    out = []
+    for root, _dirs, files in os.walk(os.path.join(frontend, "src")):
+        for name in files:
+            if not name.endswith((".ts", ".tsx")):
+                continue
+            path = os.path.join(root, name)
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            if ("'%s'" % spec) in text or ('"%s"' % spec) in text:
+                out.append(os.path.relpath(path, frontend))
+    return out
+
+
+def _resolve_spec(full: str, importer: str, spec: str) -> str | None:
+    """The file `spec` names from `importer`, in the full copy — a relative
+    path or one of the four aliases — or None."""
+    if spec.startswith("."):
+        base = os.path.join(os.path.dirname(os.path.join(full, importer)), spec)
+    else:
+        for alias, folder in _ALIASES.items():
+            if spec.startswith(alias):
+                base = os.path.join(full, folder, spec[len(alias):])
+                break
+        else:
+            return None
+    for ext in (".ts", ".tsx", "/index.ts", "/index.tsx"):
+        cand = os.path.normpath(base + ext)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _apply_patches(path: str, rel: str, patches) -> None:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for old, new in patches:
+        if new in text:
+            continue
+        if old not in text:
+            sys.exit(f"frontend patch anchor missing in {rel}: {old!r}")
+        text = text.replace(old, new)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
     for rel, patches in FRONTEND_PATCHES.items():
         path = os.path.join(dst, rel)
         with open(path, encoding="utf-8") as f:

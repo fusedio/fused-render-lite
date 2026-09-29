@@ -944,8 +944,9 @@ class Handler(BaseHTTPRequestHandler):
             "writable": os.access(path, os.W_OK),
             # fused-render's registry-resolved template modes for a path
             # (SPEC PT-8). Render App has one: the Claude chat, offered on
-            # every path — the React chat resolves its agent dir from this
-            # entry (`resolveAgentDir`) and the pane logic reads the list.
+            # every path. The React chat reads only the entry's DIRECTORY
+            # (`resolveAgentDir` -> `<dir>/agent.py`); the legacy page the
+            # path names is not shipped, the native chat never loads it.
             "templates": [{"mode": "claude",
                            "path": os.path.join(TEMPLATES_DIR, "claude", "template.html"),
                            "icon": os.path.join(TEMPLATES_DIR, "claude", "icon.svg")}],
