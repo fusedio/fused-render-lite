@@ -3,6 +3,7 @@
 Pages
   GET  /                    placeholder: drop a .fused here / open one
   GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
+                            (a folder app — ~/Fused/local/<app>, localapps.py — opens in place)
   GET  /open?_url=<http(s)> downloads (POST /api/fetch), then navigates to _file
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
 
@@ -41,9 +42,11 @@ API (the six supported fused.* calls, plus what the shell needs)
                                                  rowModifier: "alt", rowModifierDisplay: "⌥", pinnedBound: bool|null}
   POST /api/launcher/settings {hotkey?, rowModifier?}  stores (+ rebinds); 400 on a bad
                                                spec, nothing written -> same shape. /api/launcher/hotkey = alias.
-  GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id}],
+  GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id,local}],
+                                                local:[{file,name,title,description,preview,...}], local_dir,
                                                 showcase:[{id, file, title, description, has_preview, preview, ...}]}
-                                               (home page: dock entries newest first, then the showcase apps not among them)
+                                               (home page: dock entries newest first, then the ~/Fused/local folder
+                                                apps and the showcase apps not among them)
   GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
   fused.daemon (background_routes.py, copied from fused-render):
   GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
@@ -80,7 +83,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, localapps, showcase, jobs, paths
 from fused_render_app.update import mac as mac_update
 from fused_render_app._web import APIRouter, Request, Response, StreamingResponse, call_on_loop, call_route, run_async
 from fused_render_app.routes import ai_relay, ai_routes
@@ -122,14 +125,21 @@ def _js(value: str) -> str:
 
 
 def app_dir_for(path: str) -> str | None:
-    """The extracted-app root that ``path`` lives under, or None."""
+    """The app root that ``path`` lives under — an extract under
+    ``paths.apps_dir()`` or a folder app under ``localapps.local_dir()`` —
+    or None."""
     root = os.path.realpath(paths.apps_dir())
     real = os.path.realpath(path)
-    if not real.startswith(root + os.sep):
-        return None
-    rel = real[len(root) + 1:]
-    top = rel.split(os.sep, 1)[0]
-    return os.path.join(root, top)
+    if real.startswith(root + os.sep):
+        rel = real[len(root) + 1:]
+        top = rel.split(os.sep, 1)[0]
+        return os.path.join(root, top)
+    return localapps.app_dir_for(path)
+
+
+def _openable(path: str) -> bool:
+    """A ``.fused`` on disk, or a folder app (`appfile.is_app_dir`)."""
+    return os.path.isfile(path) or appfile.is_app_dir(path)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -353,7 +363,7 @@ class Handler(BaseHTTPRequestHandler):
         if not file or not os.path.isabs(file):
             return self._error("file must be an absolute .fused file path")
         try:
-            result = appfile.open_app_file(file)
+            result = appfile.open_app(file)
         except appfile.AppFileError as exc:
             return self._error(str(exc))
         try:
@@ -370,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
         if not file or not os.path.isabs(file):
             return self._error("file must be an absolute .fused file path")
         try:
-            result = appfile.open_app_file(file)  # re-use of the extract; cheap
+            result = appfile.open_app(file)  # re-use of the extract; cheap
         except appfile.AppFileError as exc:
             return self._error(str(exc))
         self._json(env.status(result["dir"]))
@@ -498,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
         elif action == "remove":
             dock_store.remove(file)
         elif action == "open":
-            if not os.path.isfile(file):
+            if not _openable(file):
                 return self._error(f"no such file: {file}")
             hook = native_hooks.get("focus_or_open")
             if hook is None:

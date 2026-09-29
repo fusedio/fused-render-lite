@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.parse
 
 from fused_render_app.update import common
@@ -35,6 +36,14 @@ PROBE_URL = f"{SCHEME}://open"
 DOWNLOAD_PAGE = "https://render.fused.io"
 MANIFEST_URL = f"{DOWNLOAD_PAGE}/latest.json"
 FETCH_TIMEOUT_S = 4.0
+
+
+def can_edit(app_file: str | None) -> bool:
+    """Whether Edit applies to the window: a ``.fused`` file. A folder app
+    (``~/Fused/local/<app>``) IS fused-render's editable copy already, and
+    the deep link's receiver accepts only ``.fused`` paths, so the button is
+    disabled there as on Home."""
+    return bool(app_file) and app_file.lower().endswith(".fused") and os.path.isfile(app_file)
 
 
 def edit_url(app_file: str) -> str:

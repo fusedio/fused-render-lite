@@ -21,6 +21,9 @@ A corrupt or missing file is an empty list, never an error: the dock is a
 convenience over files the user still has on disk, and losing the list is
 strictly better than a menu-bar shell that will not open.
 
+``file`` may also be a folder app (``~/Fused/local/<app>``, localapps.py):
+the same bookkeeping, keyed on the folder's path.
+
 An entry whose .fused is gone from disk is dropped on the next read
 (``list_apps``), pinned or not: there is no "missing" state. Deleting (or
 moving, or unmounting) a file removes it from the dock and from the home
@@ -230,6 +233,12 @@ def _card_info(file: str) -> tuple[bool, int | None, bool, int | None]:
     return has_icon, icon_version, has_preview, preview_version
 
 
+def _on_disk(file: str) -> bool:
+    """A ``.fused`` that still exists, or a folder app that still declares
+    an entry (a folder whose marked page went away is "gone" too)."""
+    return os.path.isfile(file) or appfile.is_app_dir(file)
+
+
 def _pruned() -> list[dict]:
     """The stored entries minus those whose file is no longer on disk. When
     anything was dropped the store is rewritten so the file is gone for good;
@@ -244,7 +253,7 @@ def _pruned() -> list[dict]:
     re-checks the disk."""
     with _lock:
         apps = _load()
-    gone = [a for a in apps if not os.path.isfile(a["file"])]
+    gone = [a for a in apps if not _on_disk(a["file"])]
     if not gone:
         return apps
     with _lock:

@@ -52,14 +52,14 @@ def page_target(page: str, apps_root: str,
     if not page or not os.path.isabs(page):
         return ("home", "")
     page_abs = os.path.normpath(page)
-    root = os.path.normpath(apps_root)
-    if page_abs == root or page_abs.startswith(root + os.sep):
-        for fused_path, extract_dir in candidates:
-            if not extract_dir:
-                continue
-            d = os.path.normpath(extract_dir)
-            if page_abs == d or page_abs.startswith(d + os.sep):
-                return ("window", fused_path)
+    # Candidates are matched wherever the page lives: a folder app's
+    # extract dir is the folder itself, outside ``apps_root``.
+    for fused_path, extract_dir in candidates:
+        if not extract_dir:
+            continue
+        d = os.path.normpath(extract_dir)
+        if page_abs == d or page_abs.startswith(d + os.sep):
+            return ("window", fused_path)
     if os.path.isfile(page_abs):
         return ("reveal", page_abs)
     return ("home", "")

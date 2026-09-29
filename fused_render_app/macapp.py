@@ -25,7 +25,7 @@ import threading
 import urllib.request
 import webbrowser
 
-from fused_render_app import __version__, fetch, paths, server
+from fused_render_app import __version__, appfile, fetch, paths, server
 from fused_render_app.cli import open_url
 from fused_render_app.update import mac as mac_update
 
@@ -159,7 +159,8 @@ def main() -> None:
     # http(s) or render-app:// links to a .fused (downloaded by the open
     # page, fetch.py).
     argv_urls = [u for u in (fetch.url_from_link(a) for a in sys.argv[1:]) if u]
-    argv_files = [a for a in sys.argv[1:] if a.lower().endswith(".fused") and os.path.isfile(a)]
+    argv_files = [a for a in sys.argv[1:]
+                  if (a.lower().endswith(".fused") and os.path.isfile(a)) or appfile.is_app_dir(a)]
 
     existing = find_running_server()
     if existing is not None:

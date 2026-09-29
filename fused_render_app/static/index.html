@@ -94,6 +94,7 @@
   .showcase { width: 100%; min-width: 0; }
   .showcase[hidden] { display: none; }
   .showcase h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--fg); text-align: left; }
+  .showcase h2 .hint { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .version { font-size: 11px; color: var(--muted); text-align: center; letter-spacing: .04em; display: flex; justify-content: center; align-items: center; }
   .version[hidden] { display: none; }
   .version a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
@@ -112,7 +113,7 @@
   .rail::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
   .rail::-webkit-scrollbar-track { background: transparent; }
   .card {
-    flex: 0 0 150px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
+    flex: 0 0 150px; min-width: 0; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px;
     padding: 0; background: transparent; border: 0; color: var(--fg); font: inherit; cursor: pointer; text-align: left;
   }
   .card .shot {
@@ -235,6 +236,14 @@
     <button class="rail-nav prev" type="button" title="Previous" aria-label="Scroll apps left">&#8249;</button>
     <div class="rail"></div>
     <button class="rail-nav next" type="button" title="Next" aria-label="Scroll apps right">&#8250;</button>
+  </div>
+</section>
+<section class="showcase" id="local" hidden>
+  <h2>Local apps <span class="hint" id="local-dir" title="Folder apps in fused-render's workspace, run in place"></span></h2>
+  <div class="rail-wrap">
+    <button class="rail-nav prev" type="button" title="Previous" aria-label="Scroll local apps left">&#8249;</button>
+    <div class="rail"></div>
+    <button class="rail-nav next" type="button" title="Next" aria-label="Scroll local apps right">&#8250;</button>
   </div>
 </section>
 <div class="version" id="version" hidden>
@@ -418,13 +427,16 @@
     };
   }
 
-  // One list: recent apps (what the menu-bar dock remembers, newest first)
-  // and then the showcase apps packaged with the app that are not among them
-  // — the server computes both halves (showcase.home()). A fresh install is
-  // all showcase; an opened showcase app moves to the front and leaves the
-  // tail. Re-fetched whenever the page comes back into view, so an app
-  // opened or a file deleted meanwhile shows up without a reload.
+  // Two rails. "Apps": recent apps (what the menu-bar dock remembers, newest
+  // first) and then the showcase apps packaged with the app that are not
+  // among them — the server computes both halves (showcase.home()). A fresh
+  // install is all showcase; an opened showcase app moves to the front and
+  // leaves the tail. "Local apps": the folder apps in fused-render's
+  // workspace (~/Fused/local) not yet in Recent; hidden when there are none.
+  // Re-fetched whenever the page comes back into view, so an app opened or
+  // a file deleted meanwhile shows up without a reload.
   const rail = railOf(document.getElementById("showcase"));
+  const localRail = railOf(document.getElementById("local"));
   let loadSeq = 0;
   async function loadHome() {
     const seq = ++loadSeq;
@@ -438,6 +450,8 @@
     }
     if (seq !== loadSeq) return; // a newer load is in flight
     rail.fill([...(data.recent || []), ...(data.showcase || [])]);
+    localRail.fill(data.local || []);
+    document.getElementById("local-dir").textContent = data.local_dir || "";
   }
   loadHome();
   window.addEventListener("pageshow", (e) => { if (e.persisted) loadHome(); });

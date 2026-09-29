@@ -22,6 +22,10 @@ opened after them. A showcase app the user has opened therefore moves into
 Recent and leaves the Showcase tail; once the dock evicts it (``MAX_RECENT``)
 it falls back into the tail. Nothing is stored for this: it is computed from
 ``dock_store.list_apps()`` (which also prunes deleted files) on every request.
+
+A third row, ``local``, lists the folder apps in fused-render's workspace
+(``localapps.list_local()``, ``~/Fused/local/<app>``) not already in Recent:
+what the user is editing in fused-render runs here without an export.
 """
 from __future__ import annotations
 
@@ -29,7 +33,7 @@ import json
 import os
 import urllib.parse
 
-from fused_render_app import appfile, container, dock_store
+from fused_render_app import appfile, container, dock_store, localapps
 
 SHOWCASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "showcase")
 SIDECAR = os.path.join(SHOWCASE_DIR, "showcase.json")
@@ -113,23 +117,30 @@ def preview_bytes(app_id: str) -> bytes | None:
 
 
 def home() -> dict:
-    """``{"recent": [...], "showcase": [...]}`` for the home page.
+    """``{"recent": [...], "local": [...], "showcase": [...]}`` for the home page.
 
     ``recent`` rows: ``{file, name, title, description, preview, opened_at,
-    showcase_id}`` — every dock entry, most recently opened first, with the
-    sidecar's title/description when the file is a shipped showcase app
-    (``showcase_id`` is then its listing id, else None). ``showcase`` rows are
+    showcase_id, local}`` — every dock entry, most recently opened first, with
+    the sidecar's title/description when the file is a shipped showcase app
+    (``showcase_id`` is then its listing id, else None) and the local
+    listing's when it is a folder app (``local`` True). ``showcase`` rows are
     ``list_showcase()`` minus the files already in ``recent``, each with a
-    ``preview`` URL too, so the page draws both rows with one card builder.
+    ``preview`` URL too, so the page draws every row with one card builder.
+    ``local`` rows are ``localapps.list_local()`` minus the folders already
+    in ``recent`` (``preview`` through ``/api/dock/preview``, which reads a
+    folder's ``preview.png`` in place).
     """
     apps = dock_store.list_apps()
     apps.sort(key=lambda a: a.get("openedAt") or "", reverse=True)
     listing = list_showcase()
     by_file = {os.path.abspath(row["file"]): row for row in listing}
+    local = localapps.list_local()
+    local_by_file = {row["file"]: row for row in local}
     recent = []
     for a in apps:
         file = a["file"]
         ex = by_file.get(file)
+        loc = local_by_file.get(file)
         preview = None
         if a.get("hasPreview"):
             preview = ("/api/dock/preview?file=" + urllib.parse.quote(file, safe="/")
@@ -137,13 +148,23 @@ def home() -> dict:
         recent.append({
             "file": file,
             "name": a["name"],
-            "title": ex["title"] if ex else a["name"],
-            "description": ex["description"] if ex else "",
+            "title": ex["title"] if ex else (loc["title"] if loc else a["name"]),
+            "description": ex["description"] if ex else (loc["description"] if loc else ""),
             "preview": preview,
             "opened_at": a.get("openedAt"),
             "showcase_id": ex["id"] if ex else None,
+            "local": loc is not None,
         })
     seen = {r["file"] for r in recent}
+    local_rows = []
+    for row in local:
+        if row["file"] in seen:
+            continue
+        preview = None
+        if row["has_preview"]:
+            preview = ("/api/dock/preview?file=" + urllib.parse.quote(row["file"], safe="/")
+                       + "&v=" + urllib.parse.quote(str(row["preview_version"] or "")))
+        local_rows.append({**row, "preview": preview, "local": True})
     rest = []
     for row in listing:
         if os.path.abspath(row["file"]) in seen:
@@ -153,4 +174,5 @@ def home() -> dict:
             "preview": ("/api/showcase/preview?id=" + urllib.parse.quote(row["id"]))
             if row["has_preview"] else None,
         })
-    return {"recent": recent, "showcase": rest}
+    return {"recent": recent, "local": local_rows, "local_dir": localapps.local_dir(),
+            "showcase": rest}
