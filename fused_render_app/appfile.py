@@ -333,7 +333,9 @@ def extract_dir_for(fused_path: str) -> str | None:
     came from. Cheap on repeat calls (`_file_key` memoises on size+mtime)."""
     fused_path = os.path.abspath(fused_path)
     if os.path.isdir(fused_path):
-        return fused_path if is_app_dir(fused_path) else None
+        # realpath, as `open_app_dir` answers ``dir``: a job row's page is
+        # under that, and jobnotify compares the two as strings.
+        return os.path.realpath(fused_path) if is_app_dir(fused_path) else None
     try:
         manifest = read_manifest(fused_path)
         name = manifest.get("name") if isinstance(manifest.get("name"), str) else "app"

@@ -52,13 +52,17 @@ def page_target(page: str, apps_root: str,
     if not page or not os.path.isabs(page):
         return ("home", "")
     page_abs = os.path.normpath(page)
+    page_real = os.path.realpath(page_abs)
     # Candidates are matched wherever the page lives: a folder app's
-    # extract dir is the folder itself, outside ``apps_root``.
+    # extract dir is the folder itself, outside ``apps_root``. Both sides
+    # are compared realpath'd too, so a symlinked ~/Fused still matches.
     for fused_path, extract_dir in candidates:
         if not extract_dir:
             continue
         d = os.path.normpath(extract_dir)
-        if page_abs == d or page_abs.startswith(d + os.sep):
+        d_real = os.path.realpath(d)
+        if (page_abs == d or page_abs.startswith(d + os.sep)
+                or page_real == d_real or page_real.startswith(d_real + os.sep)):
             return ("window", fused_path)
     if os.path.isfile(page_abs):
         return ("reveal", page_abs)

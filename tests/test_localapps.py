@@ -222,6 +222,26 @@ def test_job_banner_maps_a_folder_page_to_its_window(workspace, tmp_path):
     assert jobnotify.page_target(page, str(tmp_path / "apps"), candidates) == ("window", app)
 
 
+def test_symlinked_workspace_agrees_on_one_dir(workspace, tmp_path, monkeypatch):
+    """A symlinked ~/Fused: the window keys on the link path, the open/run
+    side on the real one. Every reader must land on the same folder, and a
+    job page under the real path must map back to the link-path window."""
+    link = tmp_path / "FusedLink"
+    os.symlink(workspace["ws"], link)
+    monkeypatch.setenv("FUSED_RENDER_DIR", str(link))
+    via_link = str(link / "local" / "calc-app")
+    real = os.path.realpath(workspace["app"])
+    assert via_link != real
+    assert appfile.open_app_dir(via_link)["dir"] == real
+    assert appfile.extract_dir_for(via_link) == real
+    assert server.app_dir_for(os.path.join(via_link, "lib", "deep.py")) == real
+    page = os.path.join(real, "index.html")
+    candidates = [(via_link, appfile.extract_dir_for(via_link))]
+    assert jobnotify.page_target(page, str(tmp_path / "apps"), candidates) == ("window", via_link)
+    # and the other way round: an abspath candidate against a real page
+    assert jobnotify.page_target(page, str(tmp_path / "apps"), [(via_link, via_link)]) == ("window", via_link)
+
+
 def test_edit_button_only_for_fused_files(workspace, v2_fused):
     assert editlink.can_edit(v2_fused) is True
     assert editlink.can_edit(workspace["app"]) is False
