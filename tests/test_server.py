@@ -108,6 +108,66 @@ def test_drop_saves_and_validates(client, v2_fused, app_home):
     assert status == 400 and not os.path.exists(str(app_home / "dropped" / "bad.fused"))
 
 
+def test_fs_list_answers_the_shells_target_check(client, tmp_path):
+    """The React shell's New task card probes its target with /api/fs/list
+    (NewJobModal: listDir(target), then listDir(parent)). A folder lists; a
+    file or a missing path 404s. Without the route every probe 404'd and a
+    task scoped to an app folder reported "This project's folder is missing"
+    (0.10.1 DMG, first task from a page)."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.txt").write_text("x")
+    status, _, body = client.get("/api/fs/list" + q(path=str(tmp_path)))
+    assert status == 200
+    data = json.loads(body)
+    assert data["path"] == str(tmp_path) and data["truncated"] is False
+    by_name = {e["name"]: e for e in data["entries"]}
+    assert by_name["sub"]["is_dir"] is True and by_name["sub"]["size"] is None
+    assert by_name["a.txt"]["is_dir"] is False and by_name["a.txt"]["size"] == 1
+    status, _, _ = client.get("/api/fs/list" + q(path=str(tmp_path / "a.txt")))
+    assert status == 404
+    status, _, _ = client.get("/api/fs/list" + q(path=str(tmp_path / "gone")))
+    assert status == 404
+    status, _, _ = client.get("/api/fs/list")
+    assert status == 404
+
+
+def test_make_server_exports_resolved_claude_bin(monkeypatch):
+    """`make_server` hands the chat engine the `claude` this process resolved
+    through FUSED_RENDER_CLAUDE_BIN: a Finder launch has launchd's PATH, so
+    agent.py's own lookup misses a CLI that claude_health knows about.
+    resolve() answers a (path, source) tuple; exporting the tuple raised a
+    swallowed TypeError and the variable stayed unset (0.10.1 DMG)."""
+    from fused_render_app import claude_health, jobs, server
+
+    monkeypatch.delenv("FUSED_RENDER_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("FUSED_RENDER_APP_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(claude_health, "resolve", lambda allow_shell=True: ("/fake/bin/claude", "known-location"))
+    jobs.reset()
+    srv, thread = server.serve_in_thread(0)
+    try:
+        assert os.environ.get("FUSED_RENDER_CLAUDE_BIN") == "/fake/bin/claude"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def test_make_server_without_claude_leaves_env_alone(monkeypatch):
+    from fused_render_app import claude_health, jobs, server
+
+    monkeypatch.delenv("FUSED_RENDER_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("FUSED_RENDER_APP_CLAUDE_BIN", raising=False)
+    monkeypatch.setattr(claude_health, "resolve", lambda allow_shell=True: (None, None))
+    jobs.reset()
+    srv, thread = server.serve_in_thread(0)
+    try:
+        assert "FUSED_RENDER_CLAUDE_BIN" not in os.environ
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
 def test_unsupported_apis_throw():
     js = open(os.path.join(os.path.dirname(env.__file__), "static", "runtime.js")).read()
     for name in ("ai", "capture", "fileIndex", "daemon", "trackJob", "watchJob",
