@@ -356,9 +356,19 @@ def call_route(fn, *, body, headers: dict, query: dict, path_params: dict, reque
                 kwargs[name] = body
         elif marker is not None and marker.kind == "query":
             key = marker.alias or name
-            kwargs[name] = _query_value(param, query[key]) if key in query else marker.default
+            if key in query:
+                kwargs[name] = _query_value(param, query[key])
+            elif marker.required:
+                raise HTTPException(422, f"query parameter required: {key}")
+            else:
+                kwargs[name] = marker.default
         elif marker is not None and marker.kind == "file":
-            kwargs[name] = (files or {}).get(name, marker.default)
+            if name in (files or {}):
+                kwargs[name] = files[name]
+            elif marker.required:
+                raise HTTPException(422, f"file required: {name}")
+            else:
+                kwargs[name] = marker.default
         elif marker is not None or name.startswith("x_"):
             header = name.replace("_", "-")
             kwargs[name] = lower.get(header, marker.default if marker is not None else None)

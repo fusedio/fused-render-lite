@@ -14,7 +14,10 @@ MANAGED_KEYS = ("model", "effortLevel")
 
 def main(action: str = "get", payload: str = "") -> dict:
     if action == "get":
-        settings = lib.read_settings()
+        try:
+            settings = lib.read_settings()
+        except lib.SettingsUnreadable as exc:
+            return {"ok": False, "error": str(exc)}
         return {"schema": [], "prefs": {k: settings.get(k) for k in MANAGED_KEYS}}
     if action == "patch":
         try:
@@ -27,7 +30,12 @@ def main(action: str = "get", payload: str = "") -> dict:
         if unknown:
             return {"ok": False, "error": f"unmanaged keys: {unknown}"}
         with lib._LOCK:
-            settings = lib.read_settings()
+            # Read-modify-write of the WHOLE file: an unreadable file is a
+            # refusal, never an empty object to overwrite it with.
+            try:
+                settings = lib.read_settings()
+            except lib.SettingsUnreadable as exc:
+                return {"ok": False, "error": f"could not read the Claude settings: {exc}"}
             changed = []
             for key, value in body.items():
                 if value is None:

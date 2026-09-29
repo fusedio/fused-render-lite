@@ -119,3 +119,33 @@ def test_shipped_templates_run_on_the_base_interpreter(client, tmp_path, script)
     assert status == 200, data
     assert data.get("ok") is True, data
     assert not os.path.isdir(os.path.join(str(tmp_path), "home", "legacy"))
+
+
+def test_required_query_and_file_answer_422():
+    """`Query(...)` / `File(...)` with no default are required: the shim
+    refuses the call like FastAPI's validation, instead of binding None."""
+    from fused_render_app import _web
+
+    router = _web.APIRouter()
+
+    @router.get("/api/need")
+    def need(thing: str = _web.Query(...), opt: str = _web.Query("d")):
+        return {"thing": thing, "opt": opt}
+
+    @router.post("/api/shot")
+    def shot(file: _web.UploadFile | None = _web.File(...)):
+        return {"name": file.filename}
+
+    fn, params = router.match("GET", "/api/need")
+    req = _web.Request("GET", "/api/need", {}, {})
+    with pytest.raises(_web.HTTPException) as exc:
+        _web.call_route(fn, body=None, headers={}, query={}, path_params=params, request=req)
+    assert exc.value.status_code == 422 and "thing" in exc.value.detail
+    assert _web.call_route(fn, body=None, headers={}, query={"thing": "x"}, path_params=params,
+                           request=req) == {"thing": "x", "opt": "d"}
+    fn, params = router.match("POST", "/api/shot")
+    with pytest.raises(_web.HTTPException) as exc:
+        _web.call_route(fn, body={}, headers={}, query={}, path_params=params, request=req, files={})
+    assert exc.value.status_code == 422
+    assert _web.call_route(fn, body={}, headers={}, query={}, path_params=params, request=req,
+                           files={"file": _web.UploadFile("a.png", "image/png", b"x")}) == {"name": "a.png"}

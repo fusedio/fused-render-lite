@@ -18,13 +18,26 @@ def settings_path() -> str:
     return os.path.join(config_dir(), "settings.json")
 
 
+class SettingsUnreadable(Exception):
+    """The settings file exists but cannot be read as a JSON object — a
+    truncated write, a parse error, a non-object. A patch must NOT proceed
+    from `{}` then: it would rewrite the file with only the managed keys and
+    drop hooks, env, permissions and everything else Claude Code keeps there."""
+
+
 def read_settings() -> dict:
+    """The settings object; `{}` only when the file does not exist."""
+    path = settings_path()
     try:
-        with open(settings_path(), encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, ValueError) as exc:
+        raise SettingsUnreadable(f"{path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SettingsUnreadable(f"{path}: not a JSON object")
+    return data
 
 
 def write_settings(settings: dict) -> None:

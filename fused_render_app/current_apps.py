@@ -48,7 +48,8 @@ def list_apps() -> list[dict]:
         pass
     try:
         for row in localapps.list_local():
-            path = row.get("dir") or row.get("path") or ""
+            # `file` is the folder (localapps rows share the dock's shape).
+            path = row.get("file") or row.get("dir") or row.get("path") or ""
             if path:
                 folders.setdefault(path, None)
     except Exception:  # noqa: BLE001 — a listing that cannot be read adds nothing
