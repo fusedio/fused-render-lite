@@ -73,6 +73,20 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.10.2
+
+Patch: one fix PR, no packaging change.
+
+- **`/api/fs/list` + claude binary export (#42)**: the React shell's New task
+  card probes its target with `GET /api/fs/list`; Render App's server had
+  raw/stat/write/upload/mkdir but no list, so every probe 404'd and a task
+  opened from inside an app could never be saved. `_fs_list` answers
+  fused-render's ListResult shape (capped at 2000 entries; file or missing
+  path → 404). `make_server` exported `claude_health.resolve()` as
+  `FUSED_RENDER_CLAUDE_BIN` without unpacking its `(path, source)` tuple, so
+  the variable was never set and a Finder launch could miss a `claude`
+  outside launchd's PATH — now unpacked.
+
 ## 0.10.1
 
 Patch: two features land, no packaging change to the Python side; the DMG
