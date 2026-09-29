@@ -276,9 +276,11 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/config":
                 return self._json(self._config())
             if route == "/api/current-apps":
-                # fused-render's sidebar "Current apps" registry; the Tasks page
-                # reads it for the peek's app preview. Render App keeps none.
-                return self._json({"apps": []})
+                # fused-render's "Current apps" desk; the Tasks peek previews a
+                # task's app from it (current_apps.list_apps).
+                from fused_render_app import current_apps
+
+                return self._json({"apps": current_apps.list_apps()})
             if route == "/dock":
                 return self._static("dock.html")
             if route == "/launcher":
@@ -349,6 +351,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._api_drop()
             if route == "/api/run":
                 return self._api_run()
+            if route.startswith("/api/current-apps/"):
+                # The desk's writes (open / read / add / archive / rename): the
+                # peek stamps "opened" on every open. Render App keeps no desk,
+                # so each answers the current listing unchanged.
+                if not self._guarded():
+                    return
+                from fused_render_app import current_apps
+
+                return self._json({"ok": True, "opened": False, "opened_at": time.time(),
+                                   "apps": current_apps.list_apps()})
             if route == "/api/capture/shot-region":
                 # fused-render's region still for the chat's Comment mode; the
                 # legacy chat page reads a 409 as "no still on this platform"
