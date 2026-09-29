@@ -23,7 +23,76 @@ def main(n: int = 1, label: str = "x") -> dict:
 def app_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("FUSED_RENDER_APP_HOME", str(home))
+    # The copied Claude sessions / tasks modules (tasks_store, drafts,
+    # agent.py) key their state dir off FUSED_RENDER_HOME; keep it in the same
+    # tmp home so no test touches ~/.fused-render or ~/.fused-render-app.
+    monkeypatch.setenv("FUSED_RENDER_HOME", str(home))
+    # Those modules compute their state dir at import, so the env alone does
+    # not redirect an already-imported module: pin the attribute too.
+    from fused_render_app import drafts, tasks_store
+    from fused_render_app.routes import claude_sessions
+
+    state = str(home / "claude-sessions")
+    for mod in (tasks_store, drafts, claude_sessions):
+        monkeypatch.setattr(mod, "STATE_DIR", state)
     return home
+
+
+@pytest.fixture(autouse=True)
+def _isolated_claude_home(tmp_path_factory, monkeypatch):
+    """Nothing under test reads the developer's real ~/.claude: the tasks
+    listing, the change-watcher and session liveness all walk
+    `~/.claude/projects` and `~/.claude/sessions`, so HOME and
+    CLAUDE_CONFIG_DIR point at an empty tree per test (fused-render's
+    conftest does the same). Its own tmp dir, not `tmp_path`: tests that
+    list `tmp_path` must not see it."""
+    fake_home = tmp_path_factory.mktemp("claude-home")
+    claude_dir = fake_home / ".claude"
+    claude_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    # Six copied modules bind CLAUDE_DIR (and PROJECTS_DIR / SESSIONS_DIR
+    # derived from it) at import; re-root every such constant to the fake tree.
+    from fused_render_app import (claude_artifacts, claude_session_move, session_liveness,
+                                  tasks_store, tasks_watch)
+    from fused_render_app.routes import claude_sessions
+
+    for mod in (claude_artifacts, claude_session_move, session_liveness, tasks_store,
+                tasks_watch, claude_sessions):
+        real = getattr(mod, "CLAUDE_DIR", None)
+        if not real:
+            continue
+        for name, value in list(vars(mod).items()):
+            if name.isupper() and isinstance(value, str) and (value == real or value.startswith(real + os.sep)):
+                monkeypatch.setattr(mod, name, str(claude_dir) + value[len(real):])
+    return fake_home
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_cli(monkeypatch, tmp_path):
+    """No test spawns the developer's real `claude`: `make_server` exports the
+    resolved binary as FUSED_RENDER_CLAUDE_BIN for the chat engine, and a
+    `client` test that hits /api/tasks/create would otherwise detach a real,
+    billed session. Both variables point at a path that does not exist; a
+    test that wants a CLI installs its own stub (test_claude_session_host)."""
+    missing = str(tmp_path / "no-such-claude")
+    monkeypatch.setenv("FUSED_RENDER_CLAUDE_BIN", missing)
+    monkeypatch.setenv("FUSED_RENDER_APP_CLAUDE_BIN", missing)
+
+
+@pytest.fixture(autouse=True)
+def _no_task_threads(monkeypatch):
+    """No test starts the scheduled-messages loop, the Tasks change-watcher
+    or a queue manager that outlives it (fused-render's `_no_schedule_loop_
+    thread` / `_no_tasks_watch_thread` / `_no_queue_manager_across_tests`).
+    Tests about them call `tick()` themselves."""
+    from fused_render_app import queue_manager, schedule, tasks_watch
+
+    monkeypatch.setattr(schedule, "start", lambda: None)
+    monkeypatch.setattr(tasks_watch, "start", lambda: None)
+    queue_manager.reset_for_tests(None)
+    yield
+    queue_manager.reset_for_tests(None)
 
 
 @pytest.fixture

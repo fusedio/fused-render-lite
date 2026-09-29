@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tasks</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1f2023; --muted: #6b7078; --bg: #f6f7f8; --card: #ffffff;
+    --line: #d9dce1; --accent: #ebfd66; --accent-ink: #0d0d0f; --err: #c62828;
+    --ok: #2e7d32; --warn: #b26a00; --run: #1565c0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8eaed; --muted: #9aa0a6; --bg: #131417; --card: #1b1d21; --line: #2c2f35;
+            --err: #ff6b6b; --ok: #81c784; --warn: #ffb74d; --run: #64b5f6; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    border-bottom: 1px solid var(--line); background: var(--card);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .scope { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40vw; }
+  button, select, input, textarea {
+    font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+  button.quiet { background: transparent; border-color: transparent; color: var(--muted); padding: 4px 6px; }
+  button.quiet:hover { color: var(--fg); background: var(--bg); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #list { flex: 1; overflow: auto; padding: 8px 0; min-width: 0; }
+  #peek { width: 0; border-left: 1px solid var(--line); display: none; }
+  #peek.open { width: 55%; display: block; }
+  #peek iframe { width: 100%; height: 100%; border: 0; }
+  .row {
+    display: grid; grid-template-columns: 96px 1fr auto; gap: 12px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .row:hover { background: var(--card); }
+  .row.selected { background: var(--card); box-shadow: inset 3px 0 0 var(--accent); }
+  .row .id { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  .row .title { min-width: 0; }
+  .row .title b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .row .title span { display: block; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .unread b::before { content: "●"; color: var(--run); margin-right: 6px; font-size: 10px; vertical-align: middle; }
+  .status { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+  .status.in_progress { color: var(--run); border-color: var(--run); }
+  .status.needs_attention, .status.blocked { color: var(--warn); border-color: var(--warn); }
+  .status.done { color: var(--ok); border-color: var(--ok); }
+  .status.archived, .status.upcoming, .status.queued { color: var(--muted); }
+  .actions { display: flex; gap: 2px; opacity: 0; }
+  .row:hover .actions, .row.selected .actions { opacity: 1; }
+  .empty { padding: 48px 16px; color: var(--muted); text-align: center; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--fg);
+    padding: 20px; width: min(560px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,0.35); }
+  dialog form { display: grid; gap: 10px; }
+  dialog label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  dialog textarea { min-height: 96px; resize: vertical; }
+  dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .err { color: var(--err); font-size: 13px; }
+  body.embed header h1 { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tasks</h1>
+  <span class="scope" id="scope"></span>
+  <span class="spacer"></span>
+  <label style="font-size:13px;color:var(--muted)"><input type="checkbox" id="showArchived" style="vertical-align:middle"> archived</label>
+  <button id="newTask" class="primary">New task</button>
+</header>
+<main>
+  <div id="list"><div class="empty">Loading…</div></div>
+  <div id="peek"></div>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <label>Folder
+      <input name="target" id="target" placeholder="/absolute/path/to/app-folder" required>
+    </label>
+    <label>Ask Claude
+      <textarea name="prompt" id="prompt" required placeholder="What should Claude do in this folder?"></textarea>
+    </label>
+    <label>Permission mode
+      <select name="permission_mode">
+        <option value="default">default — ask before risky tools</option>
+        <option value="auto">auto — no asks</option>
+        <option value="plan">plan — no edits</option>
+      </select>
+    </label>
+    <div class="err" id="formErr"></div>
+    <div class="buttons">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="primary">Run</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  // The Tasks page: fused-render's list over the same /api/tasks routes
+  // (routes/tasks.py), hand-written for Render App. A task IS a Claude
+  // session; opening one shows its chat (/chat?_file=<target>&session_id=…)
+  // beside the list. Params: `project=<dir>` scopes the list to one folder
+  // (`/api/tasks/ui` builds that URL for a page's iframe), `embed=1` hides the
+  // page title, `peek=<key>` opens that task on load.
+  const HDRS = { "X-Fused": "1", "Content-Type": "application/json" };
+  const q = new URLSearchParams(location.search);
+  const PROJECT = q.get("project") || "";
+  if (q.get("embed") === "1") document.body.classList.add("embed");
+  const listEl = document.getElementById("list");
+  const peekEl = document.getElementById("peek");
+  const scopeEl = document.getElementById("scope");
+  const showArchived = document.getElementById("showArchived");
+  let rows = new Map();
+  let gen = -1;
+  let selected = q.get("peek") || "";
+  scopeEl.textContent = PROJECT ? PROJECT : "";
+  scopeEl.title = PROJECT;
+
+  const listUrl = () => "/api/tasks" + (PROJECT ? "?under=" + encodeURIComponent(PROJECT) : "");
+
+  async function load() {
+    try {
+      const r = await fetch(listUrl(), { cache: "no-store" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.status);
+      rows = new Map();
+      (d.tasks || []).forEach((t) => rows.set(t.key, t));
+      if (typeof d.generation === "number") gen = d.generation;
+      draw();
+    } catch (e) {
+      listEl.innerHTML = '<div class="empty">Could not load tasks: ' + esc(String(e.message || e)) + "</div>";
+    }
+  }
+
+  async function watch() {
+    for (;;) {
+      if (document.hidden) { await new Promise((r) => setTimeout(r, 2000)); continue; }
+      try {
+        const url = "/api/tasks/changes?since=" + gen + "&wait=25" + (PROJECT ? "&under=" + encodeURIComponent(PROJECT) : "");
+        const r = await fetch(url, { cache: "no-store" });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || r.status);
+        const handshake = gen < 0;
+        if (typeof d.generation === "number") gen = d.generation;
+        if (handshake) continue;
+        if (d.full) { await load(); continue; }
+        (d.rows || []).forEach((t) => { rows.delete(t.key); rows.set(t.key, t); });
+        (d.gone || []).forEach((k) => rows.delete(k));
+        if ((d.rows || []).length || (d.gone || []).length) draw();
+      } catch (e) {
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+  // Row fields are routes/tasks.py `_row`: key, task_id, title, description,
+  // last_reply, status, attention {tool, summary}, unread (count),
+  // last_active / happened_at / started (epoch s), target, project, session_id.
+  function when(t) {
+    const ts = t.last_active || t.happened_at || t.started;
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    return isNaN(d) ? "" : d.toLocaleString();
+  }
+
+  function draw() {
+    const all = Array.from(rows.values()).sort((a, b) => (b.last_active || b.happened_at || 0) - (a.last_active || a.happened_at || 0));
+    const list = all.filter((t) => showArchived.checked || t.status !== "archived");
+    if (!list.length) {
+      listEl.innerHTML = '<div class="empty">No tasks yet. A task is a Claude conversation about a folder — start one with New task.</div>';
+      return;
+    }
+    listEl.innerHTML = "";
+    list.forEach((t) => {
+      const row = document.createElement("div");
+      row.className = "row" + (t.key === selected ? " selected" : "");
+      const title = t.title || t.description || "(untitled)";
+      const att = t.attention && typeof t.attention === "object" ? (t.attention.summary || t.attention.tool || "") : "";
+      const reply = t.last_reply && typeof t.last_reply === "object" ? (t.last_reply.text || "") : (t.last_reply || "");
+      const sub = [att || reply, t.target || t.project || "", when(t)].filter(Boolean).join(" · ");
+      row.innerHTML =
+        '<div class="id">' + esc(t.task_id || "") + "</div>" +
+        '<div class="title' + (t.unread ? " unread" : "") + '"><b>' + esc(title) + "</b><span>" + esc(sub) + "</span></div>" +
+        '<div style="display:flex;align-items:center;gap:8px">' +
+          '<span class="status ' + esc(t.status || "") + '">' + esc((t.status || "").replace("_", " ")) + "</span>" +
+          '<span class="actions">' +
+            (t.status === "in_progress" ? '<button class="quiet" data-act="cancel" title="Stop">■</button>' : "") +
+            (t.status === "archived" ? '<button class="quiet" data-act="unarchive" title="Unarchive">↩</button>'
+                                     : '<button class="quiet" data-act="archive" title="Archive">▣</button>') +
+            '<button class="quiet" data-act="erase" title="Erase (deletes the transcript)">✕</button>' +
+          "</span>" +
+        "</div>";
+      row.addEventListener("click", (ev) => {
+        const act = ev.target && ev.target.dataset && ev.target.dataset.act;
+        if (act) { ev.stopPropagation(); return action(act, t); }
+        open(t);
+      });
+      listEl.appendChild(row);
+    });
+  }
+
+  async function action(act, t) {
+    if (act === "erase" && !confirm("Erase " + (t.task_id || t.key) + "? This deletes the Claude session transcript.")) return;
+    const url = act === "cancel" ? "/api/tasks/" + encodeURIComponent(t.key) + "/cancel" : "/api/tasks/" + act;
+    const r = await fetch(url, { method: "POST", headers: HDRS, body: JSON.stringify({ key: t.key }) });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      alert(act + " failed: " + (d.error || d.detail || r.status));
+    }
+    load();
+  }
+
+  function open(t) {
+    selected = t.key;
+    const target = t.target || t.project || PROJECT;
+    if (!target) return;
+    const session = t.session_id || (t.key.indexOf("pending:") === 0 ? "" : t.key);
+    const u = "/chat?_file=" + encodeURIComponent(target) + (session ? "&session_id=" + encodeURIComponent(session) : "") + "&chat_only=1";
+    peekEl.innerHTML = "";
+    const f = document.createElement("iframe");
+    f.src = u;
+    f.allow = "clipboard-read; clipboard-write; microphone; camera";
+    peekEl.appendChild(f);
+    peekEl.classList.add("open");
+    draw();
+    fetch("/api/tasks/read", { method: "POST", headers: HDRS, body: JSON.stringify({ key: t.key, all: true }) }).catch(() => {});
+  }
+
+  // ---- new task ---------------------------------------------------------
+  const dlg = document.getElementById("dlg");
+  const form = document.getElementById("form");
+  const formErr = document.getElementById("formErr");
+  document.getElementById("newTask").addEventListener("click", () => {
+    formErr.textContent = "";
+    if (PROJECT) document.getElementById("target").value = PROJECT;
+    dlg.showModal();
+    (PROJECT ? document.getElementById("prompt") : document.getElementById("target")).focus();
+  });
+  document.getElementById("cancel").addEventListener("click", () => dlg.close());
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const data = Object.fromEntries(new FormData(form).entries());
+    formErr.textContent = "";
+    try {
+      const r = await fetch("/api/tasks/create", { method: "POST", headers: HDRS, body: JSON.stringify(data) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || d.detail || r.status);
+      dlg.close();
+      form.reset();
+      selected = d.key || "";
+      load();
+    } catch (e) {
+      formErr.textContent = String(e.message || e);
+    }
+  });
+  showArchived.addEventListener("change", draw);
+
+  load().then(() => {
+    if (selected && rows.has(selected)) open(rows.get(selected));
+    watch();
+  });
+</script>
+</body>
+</html>

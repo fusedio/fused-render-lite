@@ -400,19 +400,7 @@ def _error(err_type: str, message: str, detail: str = "") -> dict:
             "stdout": ""}
 
 
-def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S) -> dict:
-    started = time.monotonic()
-    if not os.path.isfile(path):
-        return _error("FileNotFoundError", f"no such Python file: {path}")
-    inst = ensure(app_dir)
-    if inst is not None and inst.status in ("pending", "running"):
-        if not inst.wait(timeout):
-            return _error("EnvironmentNotReady", "the app's environment is still installing")
-    if inst is not None and inst.status == "error":
-        return _error("EnvironmentError",
-                      "the app's environment failed to install: " + (inst.error or ""),
-                      "\n".join(inst.lines[-40:]))
-    python = interpreter_for(app_dir)
+def _run_child(python: str, path: str, params: dict, timeout: float, started: float) -> dict:
     request = json.dumps({"path": path, "params": params or {}})
     try:
         proc = subprocess.run(
@@ -440,6 +428,38 @@ def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEO
                         f"worker exited with code {proc.returncode} without producing a result",
                         proc.stderr[-4000:])
     result.setdefault("duration_ms", round((time.monotonic() - started) * 1000))
+    return result
+
+
+def run_python_trusted(path: str, params: dict, timeout: float = RUN_TIMEOUT_S) -> dict:
+    """Run one of the package's own template scripts (the Claude chat engine,
+    `templates/claude/agent.py` and friends) on the app's base interpreter.
+    No app venv, no `ensure`: those scripts are stdlib-only and must not pay
+    for — or depend on — an environment install. fused-render's executor
+    spawns them the same way (`[sys.executable, _child.py]`, D72)."""
+    started = time.monotonic()
+    if not os.path.isfile(path):
+        return _error("FileNotFoundError", f"no such Python file: {path}")
+    result = _run_child(base_python(), path, params, timeout, started)
+    if not result.get("ok"):
+        err = result.get("error") or {}
+        logger.warning("template run failed for %s: %s: %s", path, err.get("type"), err.get("message"))
+    return result
+
+
+def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S) -> dict:
+    started = time.monotonic()
+    if not os.path.isfile(path):
+        return _error("FileNotFoundError", f"no such Python file: {path}")
+    inst = ensure(app_dir)
+    if inst is not None and inst.status in ("pending", "running"):
+        if not inst.wait(timeout):
+            return _error("EnvironmentNotReady", "the app's environment is still installing")
+    if inst is not None and inst.status == "error":
+        return _error("EnvironmentError",
+                      "the app's environment failed to install: " + (inst.error or ""),
+                      "\n".join(inst.lines[-40:]))
+    result = _run_child(interpreter_for(app_dir), path, params, timeout, started)
     if not result.get("ok"):
         err = result.get("error") or {}
         if err.get("type") == "ModuleNotFoundError" and not has_project(app_dir):

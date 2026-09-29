@@ -58,6 +58,20 @@ on Home. Without fused-render installed, a dialog offers to download the
 latest DMG (`render.fused.io/latest.json` → `dmg_url`, falling back to the
 download page) — `editlink.py`.
 
+### Claude tasks
+
+Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens the Tasks
+page: every Claude Code session on this machine as a task (`TASK-nnn` per
+folder), with its chat beside the list. A task is one `claude` session run
+by fused-render's chat engine, copied into the package
+(`fused_render_app/templates/claude/`): permission cards, follow-ups into a
+live session, snapshots, scheduling. New task asks for a folder and a
+prompt; the chat page (`/chat?_file=<folder>`) is the split view of the
+folder's app beside the conversation. Pages get the same thing
+programmatically as `fused.tasks.*` (fused-render D890). State lives under
+`~/.fused-render-app/claude-sessions/`, apart from fused-render's own; the
+transcripts are Claude Code's, under `~/.claude/projects`.
+
 ⌥Space (change it in Settings — the gear on the home page — or from the
 search panel's footer; right-click the menu-bar item → "Search Apps…" opens
 it without a shortcut) drops a Spotlight-like search panel: empty, it lists the
