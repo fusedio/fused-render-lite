@@ -249,6 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_raw(q)
             if route == "/api/fs/stat":
                 return self._fs_stat(q)
+            if route == "/api/fs/list":
+                return self._fs_list(q)
             if route == "/api/health":
                 return self._json({"ok": True, "version": __version__, "pid": os.getpid()})
             if route == "/api/update":
@@ -958,6 +960,46 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(f"no such file or directory: {q.get('path')}", 404)
         self._json(self._stat_payload(path))
 
+    # fused-render's LIST_MAX_ENTRIES: one page of a folder, never a whole
+    # disk, and the shell shows the `truncated` flag as "more…".
+    LIST_MAX_ENTRIES = 2000
+
+    def _fs_list(self, q: dict) -> None:
+        """`GET /api/fs/list?path=<dir>`: fused-render's directory listing
+        (`ListResult`: `path`, `entries[{name, is_dir, size, mtime}]`,
+        `truncated`). The React shell's New task card verifies its target with
+        it — a folder answers, a missing one 404s, and when the parent 404s too
+        the card reports the project folder gone. Without the route every
+        answer was a 404, so a task made from inside an app (the target locked
+        to the app's folder) could never be saved: "This project's folder is
+        missing, so there is nowhere to run the task." No .gitignore or git
+        status decoration here: those fields are optional on the wire."""
+        path = self._resolve(q)
+        if not path or not os.path.isdir(path):
+            return self._error(f"no such directory: {q.get('path')}", 404)
+        entries = []
+        truncated = False
+        try:
+            with os.scandir(path) as it:
+                for entry in sorted(it, key=lambda e: e.name.lower()):
+                    if len(entries) >= self.LIST_MAX_ENTRIES:
+                        truncated = True
+                        break
+                    try:
+                        st = entry.stat(follow_symlinks=False)
+                        is_dir = entry.is_dir()
+                        entries.append({
+                            "name": entry.name,
+                            "is_dir": is_dir,
+                            "size": None if is_dir else st.st_size,
+                            "mtime": st.st_mtime,
+                        })
+                    except OSError:
+                        continue
+        except OSError as exc:
+            return self._error(f"cannot list {path}: {exc}", 403 if isinstance(exc, PermissionError) else 404)
+        self._json({"path": path, "entries": entries, "truncated": truncated, "cursor": None})
+
     def _write_target(self, path: str | None, base: str | None) -> str | None:
         if not path or not isinstance(path, str):
             return None
@@ -1103,7 +1145,11 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     # binary this process resolved so both spawn the same `claude`.
     try:
         from fused_render_app import claude_health
-        bin_path = claude_health.resolve()
+        # resolve() answers ``(path, source)`` — ``(None, None)`` when there
+        # is no CLI. Exporting the tuple itself raised TypeError (swallowed
+        # below), so the packaged app never told agent.py where `claude` is
+        # and a Finder launch, with launchd's PATH, could not find it.
+        bin_path, _source = claude_health.resolve()
         if bin_path and not os.environ.get("FUSED_RENDER_CLAUDE_BIN"):
             os.environ["FUSED_RENDER_CLAUDE_BIN"] = bin_path
     except Exception:  # noqa: BLE001 — no CLI is the chat's problem, not the server's
