@@ -1,0 +1,1189 @@
+// Route dispatch (super-app step 2 — shell + three sub-apps):
+//   "/"                      -> redirect (replaceState) to /explorer
+//   "/apps"                  -> apps homepage (the app home)
+//   "/explorer"              -> file-explorer homepage (FilesHome)
+//   "/explorer/view/<path>"  -> stat it: directory -> listing, file -> preview
+//   "/explorer/embed/<path>" -> chrome-free embed variant
+//   "/claude-config"         -> Claude config panel (native, no mount)
+//   "/claude-md"             -> legacy; redirects into the Claude config panel
+//   "/ai-models/<tab>"       -> AI Models (playground/local/engines/usage);
+//                             bare "/ai-models" redirects to the default tab
+//   "/preferences|/templates|/mounts" -> settings pages
+// Legacy pre-rename urls (/view/..., /embed/..., /view/_prefs-family) are
+// rewritten in place at boot by router.ts before any of this runs.
+// The active view is keyed by the nav epoch: every navigation remounts it,
+// which is the React equivalent of the vanilla shell rebuilding the view DOM
+// on each route() call (fresh iframes, fresh fetches, dropped local state).
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { subscribeJobDismissed, type Job } from "@platform/lib/jobs";
+import { useThemedIconSrc } from "@platform/lib/app-icon-src";
+import {
+  IS_EMBED,
+  IS_PREVIEW,
+  fsPathFromLocation,
+  isPanelPath,
+  navHintIsDir,
+} from "@platform/lib/router";
+import { useRecentsTracking } from "@apps/explorer/lib/recents";
+import {
+  appIconUrl,
+  getAppIcon,
+  statPath,
+  getMounts,
+  reconnectMount,
+  type Config,
+  type HttpError,
+  type Mount,
+  type StatResult,
+} from "@platform/lib/api";
+import { AccessDenied, isAccessDenied } from "@apps/explorer/AccessDenied";
+import {
+  useNavEpoch,
+  useDocumentTitle,
+  useFavicon,
+  useRefreshOnReturn,
+} from "@platform/lib/hooks";
+import { useMountHealth } from "@platform/lib/mountHealth";
+import { useScheduleEvents } from "@platform/lib/scheduleEvents";
+import { basename } from "@platform/lib/format";
+import { autoStartTourFor, maybeAutoStartTour } from "@platform/lib/tours";
+import { useThemeSync } from "@platform/lib/theme";
+import { installHints } from "@platform/lib/hints";
+import GlobalSidebar from "@shell/GlobalSidebar";
+import { appPathFromPath } from "@shell/current-apps-lib";
+import NotificationHost from "@platform/ui/NotificationHost";
+import UpdateNotifier from "@platform/ui/UpdateNotifier";
+import { ShareAppHost } from "@platform/ui/ShareAppModal";
+import EditAppFileBoot from "@shell/EditAppFileBoot";
+import { ShareFileHost } from "@platform/ui/ShareFileModal";
+import OnboardingWizard from "@shell/onboarding/OnboardingWizard";
+import { ONBOARDING_PATH, shouldAutoShow } from "@shell/onboarding/state";
+import { onboardingUrl } from "@shell/onboarding/progress";
+import StatusBar from "@platform/ui/StatusBar";
+import ModelsDock from "@shell/ModelsDock";
+import ActivityDock from "@shell/ActivityDock";
+import RepoUpdatesDock from "@shell/RepoUpdatesDock";
+import { pokeOnChatActivity, pokeTasks } from "@shell/tasksPulse";
+import { PEEK_PARAM } from "@shell/task-peek-store";
+import type { TasksScope } from "@shell/Scheduled";
+import { useTaskPeekEnabled } from "@shell/task-peek-flag";
+import { TASKS_CHANGED_EVENT } from "@platform/lib/tasksChanged";
+import { useTaskStatusNotify } from "@shell/useTaskStatusNotify";
+import ShortcutsOverlay from "@platform/ui/ShortcutsOverlay";
+import { isMod } from "@platform/lib/platform";
+import { isOverlayOpen } from "@platform/lib/ui-overlay";
+import { reconcileOsClipboard } from "@apps/explorer/lib/os-clipboard";
+import { BreadcrumbBar, StaticBreadcrumb } from "@apps/explorer/Breadcrumb";
+import EmbedStrip from "@apps/explorer/EmbedStrip";
+import Listing from "@apps/explorer/Listing";
+import Preview from "@apps/explorer/Preview";
+import { PreviewSideSlot } from "@apps/explorer/PreviewSidebar";
+import Panel from "@apps/explorer/Panel";
+import Tabs from "@apps/explorer/Tabs";
+import FilesHome from "@apps/explorer/FilesHome";
+import Home from "@shell/Home";
+import { useClaudeConfigAvailable } from "@apps/claude_config/available";
+import {
+  AI_MODELS_PREFIX,
+  DEFAULT_TAB,
+  isAiModelsPath,
+} from "@apps/ai_models/routes";
+
+// The boot-time "send a fresh install to the wizard" decision is made once
+// per page load (App's render below), not on every re-render — a user who
+// left the wizard would otherwise be pushed back in on the next state change.
+let autoShowDecided = false;
+
+// Route-gated surfaces, lazy-loaded: none of these render on the front door
+// (the explorer route above stays eager), only once a route nobody may ever
+// visit this session is actually opened — the settings pages, the AI Models
+// page, the app-builder hub, the Claude Config panel, and the bookmark-open
+// redirector. Splitting them out of the main chunk is what fixes vite's
+// "chunks larger than 500 kB" build warning without just raising the limit.
+const Preferences = lazy(() => import("@shell/Preferences"));
+const Templates = lazy(() => import("@shell/templates/Templates"));
+const Mounts = lazy(() => import("@shell/Mounts"));
+const AiModels = lazy(() =>
+  import("@apps/ai_models").then((m) => ({ default: m.AiModels })),
+);
+const Scheduled = lazy(() => import("@shell/Scheduled"));
+
+/** Params that belong to a PAGE rather than to a route — see `useNavEpoch`.
+ *  Module-level so the array identity is stable across renders. */
+const PAGE_PARAMS: readonly string[] = [PEEK_PARAM];
+/** …and the list when the side peek is off: EMPTY, so a traversal is judged on
+ *  the whole URL exactly as it was before the feature existed. Nothing else
+ *  pushes a same-path entry today, so the two lists behave identically in
+ *  practice — but "in practice" is not the flag's contract. */
+const NO_PAGE_PARAMS: readonly string[] = [];
+/** `/tasks?project=<abs app dir>` — the framed Tasks view an app page builds
+ *  (`/tasks?embed=1&project=…`) narrowed to that folder, exactly as AppPage's
+ *  own Tasks tab scopes it. Read per render: every URL write on the page
+ *  (`?view=`, `?peek=`, the one-shot strips) keeps `project` in place. Cached
+ *  on the value so the scope's identity is stable across App re-renders (it
+ *  feeds Scheduled's memos). `ownFrame`: this route has no host frame to
+ *  portal the peek into, so Scheduled draws its own, as unscoped `/tasks` does. */
+let urlScope: TasksScope | undefined;
+function tasksScopeFromUrl(): TasksScope | undefined {
+  const raw = new URLSearchParams(location.search).get("project");
+  const project = raw ? raw.replace(/\\/g, "/").replace(/(.)\/+$/, "$1") : "";
+  if (!project) return undefined;
+  if (urlScope?.project !== project) urlScope = { project, ownFrame: true };
+  return urlScope;
+}
+const AppPage = lazy(() => import("@shell/AppPage"));
+const Apps = lazy(() => import("@apps/builder/Apps"));
+const ClaudeConfig = lazy(() =>
+  import("@apps/claude_config").then((m) => ({ default: m.ClaudeConfig })),
+);
+// Canvases (legacy-workbench local development): the listing and the
+// per-canvas workspace with the embedded live workbench.
+const Canvases = lazy(() =>
+  import("@apps/canvases").then((m) => ({ default: m.Canvases })),
+);
+const CanvasWorkspace = lazy(() =>
+  import("@apps/canvases").then((m) => ({ default: m.CanvasWorkspace })),
+);
+
+type StatState =
+  | { status: "loading" }
+  | { status: "ok"; stat: StatResult }
+  // `httpStatus`: the response code, so StatErrorView can tell a refused
+  // read (403 → the Full Disk Access card) from missing/broken.
+  | { status: "error"; message: string; httpStatus?: number };
+
+// `reloadKey` re-runs the stat without a navigation — used to recover after a
+// disconnected mount is reconnected in place (StatErrorView), where fsPath and
+// epoch are both unchanged.
+function useStat(
+  fsPath: string | null,
+  epoch: number,
+  reloadKey: number,
+): StatState {
+  const [state, setState] = useState<StatState>({ status: "loading" });
+  useEffect(() => {
+    if (!fsPath) {
+      setState({ status: "loading" });
+      return;
+    }
+    let alive = true;
+    setState({ status: "loading" });
+    statPath(fsPath).then(
+      (stat) => alive && setState({ status: "ok", stat }),
+      (err: HttpError) =>
+        alive &&
+        setState({ status: "error", message: err.message, httpStatus: err.status }),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [fsPath, epoch, reloadKey]);
+  return state;
+}
+
+// A file on a mount goes unreachable when the mount is disconnected or wedged.
+// The raw stat error is a dead end, so detect that the failing path sits under
+// a known mount and offer to reconnect it in place. `state` is a real health
+// probe (rcd listing + a timed listdir, shell/mounts.py), but a stat can fail
+// under a mount for reasons the probe misses, so the button shows whenever the
+// path is under a mount — not only when it reports down.
+function StatErrorView({
+  fsPath,
+  message,
+  httpStatus,
+  onReload,
+}: {
+  fsPath: string;
+  message: string;
+  httpStatus?: number;
+  onReload: () => void;
+}) {
+  // undefined = still checking; null = not under any mount.
+  const [mount, setMount] = useState<Mount | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const [mountErr, setMountErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getMounts().then(
+      (r) => {
+        if (!alive) return;
+        // Longest matching mountpoint wins (nested mounts).
+        const hit = r.mounts
+          .filter(
+            (m) =>
+              fsPath === m.mountpoint || fsPath.startsWith(m.mountpoint + "/"),
+          )
+          .sort((a, b) => b.mountpoint.length - a.mountpoint.length)[0];
+        setMount(hit ?? null);
+      },
+      () => alive && setMount(null),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [fsPath]);
+
+  const reconnect = async () => {
+    if (!mount) return;
+    setBusy(true);
+    setMountErr(null);
+    try {
+      // reconnectMount handles every bad state in one call: clears rcd's
+      // tracking, force-unmounts a dead kernel mount that rejects a plain
+      // umount (the wedged-NFS case), then mounts fresh.
+      await reconnectMount(mount.id);
+      setBusy(false);
+      onReload(); // re-stat; success replaces this view with the preview
+    } catch (e) {
+      setMountErr((e as Error).message);
+      setBusy(false);
+    }
+  };
+
+  // Mount lookup still in flight: hold off rather than flash the generic
+  // stat error and then flip it to the reconnect card a beat later.
+  if (mount === undefined) return null;
+  if (mount) {
+    const wedged = mount.state !== "unmounted";
+    return (
+      <div className="status-message error">
+        <p>
+          <strong>{mount.name}</strong>{" "}
+          {wedged ? "isn’t responding" : "is disconnected"} — this file is on a
+          mount that isn’t currently available.
+        </p>
+        <button type="button" disabled={busy} onClick={reconnect}>
+          {busy ? "Reconnecting…" : wedged ? "Reconnect" : "Mount"}
+        </button>
+        {mountErr && <div className="deploy-error">{mountErr}</div>}
+      </div>
+    );
+  }
+  // A refused stat (403 — a file or folder macOS/TCC or mode bits won't let us
+  // read) gets the access card with the Full Disk Access strip in place of
+  // the raw errno plate (explorer/AccessDenied.tsx). Checked after the mount
+  // branch: a dead mount can surface as EPERM too, and reconnecting is the
+  // right offer there.
+  if (isAccessDenied({ status: httpStatus, message })) {
+    return (
+      <div className="status-message">
+        <AccessDenied path={fsPath} />
+      </div>
+    );
+  }
+  return (
+    <div className="status-message error">
+      Failed to stat {fsPath}: {message}
+    </div>
+  );
+}
+
+// First paint while `stat` is still in flight (~1.6s on a cold remote mount),
+// so a navigation shows a populated scaffold instead of a blank screen. The
+// breadcrumb is already rendered by StatView; here the preview header shows the
+// folder/file name (from the URL) with a spinner where the template
+// ModeSwitcher will land once stat resolves. When the nav hint says this is a
+// directory, the real Listing mounts NOW — its /api/fs/list runs in parallel
+// with stat rather than serialized behind it, and the same fetch is reused
+// (api.prefetchListDir) when stat resolves and the preview remounts the
+// listing. Without a directory hint we can't safely show a listing (a file's
+// list would 404), so only the header + a neutral loading body paint.
+function LoadingScaffold({
+  fsPath,
+  isDir,
+  headerless,
+}: {
+  fsPath: string;
+  isDir: boolean;
+  headerless?: boolean;
+}) {
+  return (
+    <>
+      {/* Mirror the loaded Header exactly (Preview.tsx `Header`): the name in a
+          `.preview-title` group, and a `.mode-switcher-placeholder` that reserves
+          the mode switcher's button height in the actions slot. Without this the
+          header grows (spinner → 28px buttons) when stat resolves, dropping the
+          name and the whole body — a visible layout shift on every navigation.
+          Skipped for the explorer (`headerless`): its actions live in the
+          breadcrumb bar's slot, and there is no second header bar at all. */}
+      {!headerless && (
+        <div className="preview-header">
+          <div className="preview-title">
+            <h1 title={fsPath}>{basename(fsPath)}</h1>
+          </div>
+          <div className="preview-actions">
+            <span className="mode-switcher-placeholder" aria-label="Loading">
+              <span className="mode-icon-spinner" />
+            </span>
+          </div>
+        </div>
+      )}
+      <div className="preview-body">
+        {isDir ? (
+          // provisional: the hint could be stale (file, not dir). Suppress
+          // Listing's hard "Failed to list" error while stat resolves — a 404
+          // here just means the hint was wrong; stat will paint the file view.
+          // `barChrome` on the scaffold too (same condition as `headerless`):
+          // whenever the nav hint already says "directory" this claims the
+          // bar's layout zone from the first paint, so the splits don't flash
+          // in and out across the scaffold→resolved swap. Only a hinted nav
+          // gets that — open a folder URL directly (or reload) and there is no
+          // `history.state` hint, so no Listing mounts here and the splits do
+          // still show for the length of the stat.
+          <Listing fsPath={fsPath} provisional barChrome={headerless} />
+        ) : (
+          <div className="preview-resolving">
+            <span className="mode-icon-spinner" />
+            Loading…
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// Suspense fallback for the lazy-loaded routes above. Brief on a local
+// server — most resolve within a frame or two — so this deliberately carries
+// no label of its own; each panel paints its own scaffolding once it mounts.
+function RouteFallback() {
+  return (
+    <div className="preview-resolving">
+      <span className="mode-icon-spinner" />
+    </div>
+  );
+}
+
+// Stat-backed views (listing/preview): breadcrumb + content under one hook
+// component so useStat only runs when the pathname is a real fs path, not a
+// sentinel.
+//
+// This carried a `variant` for the sub-app chrome, with two survivors by the
+// end: "explorer" (breadcrumb, full preview header, file recents) and "learn"
+// (none of them), for the /learn route that rendered the bundled learn content
+// chrome-free. An earlier third, "app", served the /apps/<tag>/<name> route:
+// no breadcrumb, the builder's sidebar, and the mode switcher pinned to an
+// APP_MODES allowlist (`app`, `claude`, and a per-path timeline mode). Route
+// and variant went together each time — an app folder is browsed on the
+// explorer route now, where it gets the breadcrumb it always had a path for
+// and the switcher's full list; the learn content moved out of the app to the
+// community catalog. Every caller is the explorer, so the chrome is
+// unconditional again.
+function StatView({
+  fsPath,
+  epoch,
+  home,
+}: {
+  fsPath: string;
+  epoch: number;
+  home: string;
+}) {
+  // Bumped by StatErrorView to re-stat in place after reconnecting a mount.
+  const [reloadKey, setReloadKey] = useState(0);
+  // Directory hint from the navigation that mounted this view (see router
+  // navHintIsDir). Captured ONCE at mount — StatView is keyed by epoch+fsPath
+  // so it remounts per navigation. In-place param syncs go through
+  // router.replaceSearch, which preserves history.state, so the hint survives
+  // for Back/Forward; capturing once here is belt-and-braces (and correct even
+  // if some future caller forgets to preserve it).
+  const [navIsDir] = useState<boolean | null>(() => navHintIsDir());
+  const stat = useStat(fsPath, epoch, reloadKey);
+  // null until the stat resolves — recents tracking opts out for anything that
+  // is not a confirmed file, so a directory never gets recorded before its kind
+  // is known.
+  const isDir = stat.status === "ok" ? stat.stat.is_dir : null;
+  // A "_render" preview (the file's own HTML, no template) reports its
+  // authored <title> here (Preview -> TemplatePreview); everything else
+  // (templates, listings, fallback cards) has no better name than the
+  // file's own, so this stays null and the basename wins below. Local state
+  // is safe to reset only on remount (StatView is keyed by fsPath in App),
+  // not on a `_mode` switch within the same file — TemplatePreview owns that.
+  const [renderedTitle, setRenderedTitle] = useState<string | null>(null);
+  useDocumentTitle(fsPath === "/" ? null : renderedTitle || basename(fsPath));
+  // Tab favicon: a path inside an app (the folder itself, or a page such as
+  // its index.html) wears that app's optional icon.svg — `/api/apps/icon`
+  // applies the server's ownership rule, so this agrees with the Projects row
+  // and the app page. Null (the shell's own icon) everywhere else. Guarded so
+  // a fast navigation cannot paint the previous path's answer.
+  const [iconHref, setIconHref] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setIconHref(null);
+    if (fsPath === "/") return;
+    getAppIcon(fsPath)
+      .then((r) => {
+        if (live) setIconHref(r.icon ? appIconUrl(r.icon, r.mtime) : null);
+      })
+      .catch(() => live && setIconHref(null));
+    return () => {
+      live = false;
+    };
+  }, [fsPath]);
+  // Theme-resolved: a picker-written icon.svg names its colour and the
+  // favicon cannot read a token itself (app-icon-src.ts).
+  useFavicon(useThemedIconSrc(iconHref));
+  // Recents: the explorer's own store, gated on a confirmed FILE, so a
+  // directory never lands there. The app
+  // builder's parallel (tag, name) store went with its route — nothing displays
+  // it now that the builder sidebar is gone.
+  useRecentsTracking(fsPath, isDir, renderedTitle);
+  let content = null;
+  if (stat.status === "loading") {
+    // Not a blank screen: paint the scaffold immediately (Fix #1). A directory
+    // nav also starts its listing fetch now, parallel with stat (Fix #2).
+    content = (
+      <LoadingScaffold fsPath={fsPath} isDir={navIsDir === true} headerless />
+    );
+  } else if (stat.status === "error") {
+    content = (
+      <StatErrorView
+        fsPath={fsPath}
+        message={stat.message}
+        httpStatus={stat.httpStatus}
+        onReload={() => setReloadKey((k) => k + 1)}
+      />
+    );
+  } else if (stat.status === "ok") {
+    // Dispatch (ARCHITECTURE §6): a target with templates previews — even a
+    // directory. Every directory resolves at least the universal `/` key's
+    // `["_listing"]` (D81), so the built-in listing is now the `_listing`
+    // sentinel mode and flows through Preview like any other mode (Preview
+    // renders the shell Listing component for it). A directory resolves to an
+    // empty list only when a `null` binding disables it; the shell still lists
+    // it then — a folder must always render something.
+    const s = stat.stat;
+    if (s.is_dir && s.templates.length === 0) {
+      content = <Listing fsPath={fsPath} barChrome />;
+    } else {
+      content = (
+        <Preview
+          fsPath={fsPath}
+          stat={s}
+          onRenderedTitle={setRenderedTitle}
+          actionsInTopbar
+          onReload={() => setReloadKey((k) => k + 1)}
+        />
+      );
+    }
+  }
+  // The PAGE-LEVEL split: this view's own column on the left — its bar and its
+  // content, one above the other — and, when a file preview opens one, the
+  // sidebar's column on the right (Preview's `_side`, apps/explorer/
+  // PreviewSidebar). The wrapper is unconditional so opening the sidebar cannot
+  // restructure the tree above `#content` and remount the view.
+  //
+  // The bar is INSIDE the left column, which is the whole point: it ends at the
+  // divider instead of spanning the window over both columns, so the sidebar's
+  // own header row is the top of the window on its side rather than a bar-height
+  // below the left one. Same shape as the listing and its preview pane over a
+  // folder (.listing-split / .listing-main), for the same reason.
+  //
+  // The slot stands empty on every route that has no sidebar — every folder,
+  // every embed pane — and `display: contents` on an empty
+  // element costs the layout nothing (explorer.css).
+  return (
+    <div className="stat-split">
+      <div className="stat-main">
+        {/* BreadcrumbBar owns the `#breadcrumb` box itself: over a folder it
+            portals the whole bar down into the listing's left column, so it
+            can't be a wrapper rendered here (Breadcrumb.tsx). */}
+        <BreadcrumbBar
+          fsPath={fsPath}
+          home={home}
+          renderedTitle={renderedTitle}
+        />
+        {/* The top-level embed's one piece of chrome (IS_TOP_EMBED): a
+            dismissable strip with the way back to the explorer and, for a
+            .fused, Clone. Here and not in Preview: the preview header is
+            CSS-hidden in embed, and the fusedapp template frames the entry
+            page as a SECOND embed, so only this outer shell is top-level. */}
+        <EmbedStrip fsPath={fsPath} isDir={isDir} />
+        <div id="content">{content}</div>
+      </div>
+      <PreviewSideSlot />
+    </div>
+  );
+}
+
+// /claude-config: the native Claude Config panel — no mount, no StatView; the
+// availability gate mirrors the sidebar entry's, so a direct URL hit while
+// ~/.claude is absent shows an honest empty state instead of a dead panel.
+function ClaudeConfigView() {
+  const available = useClaudeConfigAvailable();
+  return (
+    <div id="content">
+      <div className="cc-page">
+        {available ? (
+          <Suspense fallback={<RouteFallback />}>
+            <ClaudeConfig />
+          </Suspense>
+        ) : (
+          <div className="preview-resolving">
+            No Claude Code configuration found (~/.claude).
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function App({ config }: { config: Config }) {
+  // …and only while the feature is on (shell/task-peek-flag.ts): off, the epoch
+  // is judged on the whole URL, which is what it did before any of this.
+  const taskPeekOn = useTaskPeekEnabled();
+  // THE TASK PEEK'S PARAM IS NOT A ROUTE (shell/task-peek-store.ts). Opening,
+  // swapping and closing the peek each push an entry so Back can undo them —
+  // and every one of those entries is the SAME page. Left in the epoch, a Back
+  // out of an open peek remounted the whole Tasks page to close a panel, which
+  // is how a reader lost their search text, their filters, their expanded rows
+  // and their scroll position by pressing Back once.
+  const epoch = useNavEpoch(taskPeekOn ? PAGE_PARAMS : NO_PAGE_PARAMS);
+
+  // TERMINAL JOBS, ON THEIR WAY FROM Activity TO Notifications (D586,
+  // broadened by D662 to every terminal state — done/error/cancelled, not
+  // only error). `ActivityDock` already receives `DownloadManager`'s full
+  // jobs snapshot on every poll and forwards the terminal subset here;
+  // `RepoUpdatesDock` draws them beside its repo rows. This lives in `App`
+  // because it is the only place both sections are in scope — `StatusBar`
+  // deliberately takes them as opaque `ReactNode`s and must not learn what
+  // its children are. `ActivityDock` only calls up when the terminal-id SET
+  // changes, so this does not re-render the shell on every poll.
+  const [terminalJobs, setTerminalJobs] = useState<Job[]>([]);
+
+  // A real, server-side dismissal `platform/ui/JobPopupCard.tsx` cannot patch
+  // `terminalJobs` for itself (it is several components below here, with no
+  // other reach into this state) reports through `jobs.ts`'s
+  // `noteJobDismissed` instead — this is its one subscriber, dropping the id
+  // the moment the popup card's own row click really deletes it, rather than
+  // leaving the panel showing a row until the next Activity poll notices it
+  // gone.
+  useEffect(
+    () =>
+      subscribeJobDismissed((id) => {
+        setTerminalJobs((jobs) => jobs.filter((j) => j.id !== id));
+      }),
+    [],
+  );
+
+  // THE FLOATING JOB POP-UP (SPEC actionable-notifications) — the one
+  // currently-shown card, or `null`. `ActivityDock`'s own `popupTick` already
+  // enforces "latest wins", so a fresh call here always REPLACES rather than
+  // queues; `NotificationHost` clears it back to `null` once the card's own
+  // countdown (or an early open/dismiss) finishes. Lives beside `terminalJobs`
+  // for the identical reason: `ActivityDock` is the one place with the full
+  // poll snapshot, and `NotificationHost` is the one column that draws it.
+  const [popupJob, setPopupJob] = useState<Job | null>(null);
+
+  // Background mount-health poll → global disconnect/reconnect toasts. Mounted
+  // once here for the page's lifetime (no-ops in embed); renders via NotificationHost.
+  useMountHealth();
+
+  // The same shape, for scheduled messages: nobody is looking at /tasks when
+  // one fires, so "it ran" / "it failed" / "it was missed" has to arrive on its
+  // own rather than wait to be discovered. pokeTasks rides along: a done/failed
+  // event means a task's row just changed, so the shared tasks store (and the
+  // open Tasks page, through its feeder) re-reads now instead of on its next
+  // tick — handed in from here because that store is shell's and platform may
+  // not import up.
+  useScheduleEvents(pokeTasks);
+
+  // §5's OTHER half: interactive turns and needs-input, diffed off the same
+  // task-status poll rather than a second server channel (SPEC-quiet-
+  // notifications.md §5's "Sources" — /api/tasks already computes
+  // needs_attention/in_progress/blocked/done, this only watches the poll for
+  // the transitions between them). Narrator-gated internally, same as
+  // useScheduleEvents above.
+  useTaskStatusNotify();
+
+  // The INTERACTIVE half of the same promise. A follow-up typed into a chat
+  // creates no sys:schedule job and no schedule event, so neither wiring above
+  // fires — the Tasks page and the sidebar sat on stale unread until their next
+  // slow poll (Akshil, 2026-08-19). The chat template stamps CHAT_ACTIVITY_KEY
+  // in localStorage when a turn starts or ends; the chat is its own iframe
+  // document, so THIS document receives the `storage` event and pokes the
+  // shared store (which forwards to the mounted Tasks page's own reload).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => pokeOnChatActivity(e.key);
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // The third producer: an APP that just created a task (the Home hero's
+  // new-app composer). It sits below shell and cannot reach pokeTasks, so it
+  // announces on the window (platform/lib/tasksChanged.ts) and this is where
+  // the announcement becomes the poke.
+  useEffect(() => {
+    window.addEventListener(TASKS_CHANGED_EVENT, pokeTasks);
+    return () => window.removeEventListener(TASKS_CHANGED_EVENT, pokeTasks);
+  }, []);
+
+  // THE OTHER DIRECTION — a row that LEFT, and the composer still holding its
+  // words — IS NO LONGER WIRED HERE (design "one record", §3).
+  //
+  // This used to hear `onGone`, re-read the whole drafts store to find out which
+  // of those keys had really lost a record, and mark each one spent so every
+  // composer mounted on it emptied itself. Three things were wrong with it and
+  // all three are gone with the mechanism: `gone` says "this key is not a row",
+  // not "this draft was deleted", so it needed a verifying GET; that GET was one
+  // per announcement, which a server re-announcing one key turned into hundreds
+  // of `/api/drafts` a second on a real machine; and "spent" was a client-side
+  // belief that a second tab could not see.
+  //
+  // The server now pushes `drafts: {changed: [{key, version}], gone: [key]}` on
+  // the same change answer (contract §3), and the two editors that can be open
+  // on a draft — the chat composer and the New task card — subscribe for their
+  // OWN key (`tasksPulse.onDraftChange`). Nothing has to be looked up, nothing
+  // has to be coalesced, and the other window hears it too.
+
+  // Keep <html data-theme> in step with the appearance preference for the
+  // page's lifetime (SPEC §30): another window's override, and — while the
+  // setting is System — the OS flipping mid-session, including macOS's
+  // automatic sunset switch. Mounted in embed too: every pane's embed shell is
+  // its own document and has to repaint with the rest. The FIRST application
+  // already happened in index.html's pre-paint bootstrap, so this can never
+  // cause a flash, and it only ever writes an attribute — no re-render reaches
+  // a live iframe.
+  useThemeSync();
+
+  // The app's ONE instant tooltip (platform/lib/hints.ts). Installed here
+  // because it is a document-level listener set rather than anything React
+  // renders: every `data-hint` on the page is served by the same panel, and the
+  // installer is idempotent so a re-render or a second caller cannot double it.
+  useEffect(() => {
+    installHints();
+  }, []);
+
+  // Adopt files copied in the native file manager (SPEC §3). Returning to the
+  // app is the only moment the system clipboard can have changed from the
+  // user's point of view, and useRefreshOnReturn already coalesces the doubled
+  // focus/visibilitychange pair. It deliberately skips mount, so the app's
+  // first read is the effect below — otherwise a copy made in Finder *before*
+  // the window opened would never be seen.
+  useRefreshOnReturn(() => {
+    if (!IS_PREVIEW) void reconcileOsClipboard();
+  });
+  useEffect(() => {
+    if (!IS_PREVIEW) void reconcileOsClipboard();
+  }, []);
+
+  // Mod+K cheat sheet. Owned by App, not Listing: it documents the whole shell
+  // (breadcrumb, history, view chords), so it has to open from any route — a
+  // preview, panel/tab mode, Preferences, or an unrecognized URL where no
+  // Listing is mounted at all. Listing therefore has NO Mod+K binding of its
+  // own, which also means the chord can't be handled twice.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // Read inside the once-registered listener so it can't re-open an overlay
+  // that's already up (while open, ShortcutsOverlay's own handler owns Mod+K
+  // and closes it — a stale-closure `false` here would immediately reopen it).
+  const shortcutsOpenRef = useRef(false);
+  shortcutsOpenRef.current = shortcutsOpen;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if (!isMod(e) || e.key.toLowerCase() !== "k") return;
+      if (shortcutsOpenRef.current) return; // the overlay handles its own close
+      // Don't stack the cheat sheet on a dialog, context menu, or preview that
+      // already holds the overlay lock — Esc would then close them in the wrong
+      // order.
+      if (isOverlayOpen()) return;
+      e.preventDefault(); // don't let the browser's Ctrl/Cmd+K take it
+      setShortcutsOpen(true);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The Home page is the front door — "/" lands there. Render-time
+  // write is safe — it changes pathname, so the re-render (via fused:urlchange)
+  // derives the real route. (Legacy /view/_home, /view/_account, and the whole
+  // /view//embed namespaces are rewritten at boot by router.ts.)
+  if (location.pathname === "/") {
+    history.replaceState(null, "", "/home");
+  }
+  // A fresh install's first load lands on the setup wizard instead (its own
+  // route, shell/onboarding). Once per page load and only from the front
+  // door: a deep link (a bookmark, an app URL from the CLI) is honoured, and
+  // leaving the wizard must not bounce back in. Same render-time rewrite as
+  // "/" above; the flag the rule reads is the server's, so a completed or
+  // dismissed wizard stays gone across ports and browsers. The URL names the
+  // server's stored step, so a restart mid-wizard resumes where it was.
+  if (
+    !IS_EMBED &&
+    !autoShowDecided &&
+    location.pathname === "/home" &&
+    shouldAutoShow(config)
+  ) {
+    history.replaceState(null, "", onboardingUrl(config.onboarding?.stages));
+  }
+  autoShowDecided = true;
+  // Legacy: the CLAUDE.md explorer ("MD Files") was deleted from the Config
+  // panel in round 2, so the old page URL folds into the panel's default tab
+  // (same render-time rewrite as "/" above) rather than 404ing on someone's
+  // bookmark.
+  if (location.pathname === "/claude-md") {
+    history.replaceState(null, "", "/claude-config");
+  }
+  // The AI Models page names each of its five tabs in the path now, and the
+  // default is a name like the rest rather than the absence of one — so the
+  // bare prefix redirects to it (same render-time rewrite as "/" above). The
+  // QUERY is carried: `/ai-models?model=…` is how a link selects a model, and
+  // dropping it here would land the playground on its fallback pick.
+  if (location.pathname === AI_MODELS_PREFIX) {
+    history.replaceState(
+      null,
+      "",
+      AI_MODELS_PREFIX + "/" + DEFAULT_TAB + location.search,
+    );
+  }
+  // (The app page's tab is a query param, `?_tab=` — current-apps-lib — and
+  // the default is its absence, so that page needs no rewrite here.)
+
+  const pathname = location.pathname;
+  // Via the router's predicate, not a second copy of the two spellings: a pane's
+  // Listing asks the SAME question of its host document (IS_PANEL_PANE), and one
+  // route must not be spelled in two places.
+  const isPanel = isPanelPath(pathname);
+  const isTabs =
+    pathname === "/explorer/view/_tab" || pathname === "/explorer/embed/_tab";
+  const isPrefs = pathname === "/preferences";
+  const isTemplates = pathname === "/templates";
+  // PROTOTYPE: mounts page (see shell/Mounts.tsx).
+  const isMounts = pathname === "/mounts";
+  // Scheduled Claude messages (shell/Scheduled.tsx) — same chrome-free settings
+  // pattern as Mounts.
+  const isTasks = pathname === "/tasks";
+  // The AI Models page (apps/ai_models/) — a PREFIX, not one path: its five
+  // tabs are sub-paths beneath it (`/ai-models/local`, …), and the bare prefix
+  // has already been rewritten to the default tab above. Asked through the
+  // app's own predicate so the route is not spelled twice — the same reason
+  // `isPanelPath` lives in the platform router.
+  const isAiModels = isAiModelsPath(pathname);
+  // Apps hub = the app home: all detected apps with search + tag filters.
+  const isApps = pathname === "/apps";
+  // File-explorer homepage: the recents/sessions/repos launcher.
+  const isExplorerHome = pathname === "/explorer";
+  // The app's front door: search hero + the three recency strips.
+  const isHome = pathname === "/home";
+  const isClaudeConfig = pathname === "/claude-config";
+  // Canvases: the listing plus the parameterized workspace route. The name is
+  // constrained to the CLI's own canvas-name alphabet, so the match below is
+  // also the validation.
+  const isCanvases = pathname === "/canvases";
+  const canvasWorkspaceName =
+    /^\/canvases\/([A-Za-z0-9_]+)$/.exec(pathname)?.[1] ?? null;
+  // `/apps/<tag>/<name>` used to resolve HERE, to the app folder under the
+  // workspace (a pure fused_dir codec) or — for the virtual "linked" tag, whose
+  // folders live anywhere on disk — through GET /api/apps/linked-path, one async
+  // hop the route had to hold a blank frame for. Both are gone with the route:
+  // an app folder is an ordinary fs path, which /explorer/view/<path> already
+  // carries with no lookup at all. That two-level shape still falls through to
+  // the "Unrecognized URL" branch below, deliberately unredirected.
+  //
+  // Everything under the hub is the app PAGE (D488, shell/AppPage.tsx):
+  // `/apps/<folder path>?_tab=<tab>` is one app folder — anywhere on disk the
+  // Current apps desk can name — as a place: the app running in an Overview
+  // tab, its tasks in a Tasks tab, its files in a Files tab.
+  // Asked through the lib's own codec, which is also the validation (no `.`
+  // or `..` segment, a rooted folder). A stale `/apps/<tag>/<name>` builder
+  // link decodes as a folder that is not there and lands on the page's
+  // "missing" banner.
+  const appPagePath = appPathFromPath(pathname);
+  const isSentinel =
+    isPanel ||
+    isTabs ||
+    isPrefs ||
+    isTemplates ||
+    isMounts ||
+    isTasks ||
+    isAiModels ||
+    isApps ||
+    appPagePath !== null ||
+    isExplorerHome ||
+    isHome ||
+    isClaudeConfig ||
+    isCanvases ||
+    canvasWorkspaceName !== null;
+  const fsPath = isSentinel ? null : fsPathFromLocation();
+  // A resolved fsPath mounts StatView below, which owns the title itself.
+  useDocumentTitle(
+    isPanel
+      ? "Panel"
+      : isTabs
+        ? "Tabs"
+        : isPrefs
+          ? "Preferences"
+          : isTemplates
+            ? "Templates"
+            : isMounts
+              ? "Mounts"
+              : isTasks
+                ? "Tasks"
+                : isAiModels
+                  ? "AI Models"
+                  : isApps
+                    ? "Apps"
+                    : appPagePath
+                      ? basename(appPagePath)
+                      : isHome
+                        ? "Home"
+                        : isExplorerHome
+                          ? "File Explorer"
+                          : isClaudeConfig
+                            ? "Claude Config"
+                            : isCanvases
+                              ? "Workbench Canvases"
+                              : canvasWorkspaceName
+                                ? `Canvas: ${canvasWorkspaceName}`
+                                : fsPath
+                                  ? undefined
+                                  : null,
+  );
+
+  // First-run onboarding tours: the registry picks the tour this route is
+  // about, and it fires after paint so the route's own chrome is mounted
+  // (maybeAutoStartTour no-ops in embed / if already seen). Keyed on
+  // `pathname`, not mount-once: App never remounts, and every route change is
+  // both a new tour to consider and a retry for one whose chrome wasn't up yet
+  // (a first visit can land on the chrome-free "/"). The ref is the per-tour
+  // version of the old single `tourPending` — it stops the retries for a tour
+  // that has run, so a browser refusing the "seen" write can't restart it on
+  // every navigation, while leaving the other tours still armed.
+  //
+  // Not on the setup wizard's route (shell/onboarding): two first-run moments
+  // must not fire on top of each other. Keyed on pathname already, so the
+  // tour for wherever the wizard lets go fires on that navigation.
+  const firedTours = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (IS_EMBED || pathname === ONBOARDING_PATH) return;
+    const tour = autoStartTourFor(pathname);
+    if (!tour || firedTours.current.has(tour.id)) return;
+    // Retries IN PLACE, not only on the next route change: a tour can be held
+    // back by content still loading (maybeAutoStartTour returns false while
+    // home's apps strip is skeletons), and the user may just sit on the page.
+    // Bounded so a browser refusing the "seen" write, or a page whose content
+    // never settles, doesn't poll forever.
+    let tries = 10;
+    let id: ReturnType<typeof setTimeout>;
+    const attempt = () => {
+      if (maybeAutoStartTour(tour)) firedTours.current.add(tour.id);
+      else if (--tries > 0) id = setTimeout(attempt, 600);
+    };
+    id = setTimeout(attempt, 600);
+    return () => clearTimeout(id);
+  }, [pathname]);
+
+  // Route fade (A5). Every route hard-remounts on the nav epoch, so a cross-fade
+  // between old and new content is impossible — instead #content plays a short
+  // fade-in (shell.css) so a navigation cut reads as intentional rather than as
+  // a flicker. A CSS animation only replays on a NEWLY CREATED element, and the
+  // `<div id="content">` wrappers below outlive an epoch change (only their
+  // keyed child remounts), hence `key={epoch}` on each of them. StatView's own
+  // #content needs no key: StatView is already keyed on epoch+fsPath.
+  //
+  // Deliberately keyed on the nav epoch and nothing else: an iframe writing view
+  // params bumps useUrlVersion, which re-renders chrome without remounting, so
+  // param changes never re-trigger the fade.
+  let main;
+  if (isPanel) {
+    // No title row: a whole 48px bar that said only "Panel" (plus a ★) is
+    // 48px of the grid the panes actually need. The ★ moved into each pane
+    // bar's left edge (Panel.tsx) — it bookmarks the same `_layout` URL it
+    // always did. Nothing portals into #topbar-mode-slot on this route: the
+    // panes are /embed iframes, and an embed hides its own breadcrumb.
+    main = (
+      <div id="content" key={epoch}>
+        <Panel key={epoch} config={config} />
+      </div>
+    );
+  } else if (isTabs) {
+    main = (
+      <>
+        <div id="breadcrumb">
+          <StaticBreadcrumb label="Tabs" />
+        </div>
+        <div id="content" key={epoch}>
+          <Tabs key={epoch} config={config} />
+        </div>
+      </>
+    );
+  } else if (isPrefs) {
+    // Preferences (SPEC §20): a shell settings page — no topbar. Bookmark and
+    // split actions are explorer concepts and never render outside it.
+    main = (
+      <div id="content" key={epoch}>
+        <Suspense fallback={<RouteFallback />}>
+          <Preferences key={epoch} />
+        </Suspense>
+      </div>
+    );
+  } else if (isTemplates) {
+    // Templates management (TEMPLATE_MGMT_SPEC §3): shell settings page, no
+    // topbar.
+    main = (
+      <div id="content" key={epoch}>
+        <Suspense fallback={<RouteFallback />}>
+          <Templates key={epoch} />
+        </Suspense>
+      </div>
+    );
+  } else if (isMounts) {
+    // PROTOTYPE — remote-storage mounts, same chrome-free settings pattern.
+    main = (
+      <div id="content" key={epoch}>
+        <Suspense fallback={<RouteFallback />}>
+          <Mounts key={epoch} />
+        </Suspense>
+      </div>
+    );
+  } else if (isTasks) {
+    // Scheduled Claude messages — the durable list plus the form that adds to
+    // it. Keyed on `epoch` like its neighbours: the page has no URL-held view
+    // state of its own, so a remount per navigation is just a fresh read.
+    main = (
+      <div id="content" key={epoch}>
+        <Suspense fallback={<RouteFallback />}>
+          <Scheduled key={epoch} scope={tasksScopeFromUrl()} />
+        </Suspense>
+      </div>
+    );
+  } else if (isCanvases) {
+    // Canvases listing — same chrome-free settings pattern as Scheduled.
+    main = (
+      <div id="content" key={epoch}>
+        <Suspense fallback={<RouteFallback />}>
+          <Canvases key={epoch} />
+        </Suspense>
+      </div>
+    );
+  } else if (canvasWorkspaceName !== null) {
+    // Canvas workspace: the embedded workbench + sync strip. Keyed on the
+    // canvas name (not epoch): the page holds a live iframe and a token
+    // handshake, and its only same-route churn is its own sync poll.
+    main = (
+      <div id="content">
+        <Suspense fallback={<RouteFallback />}>
+          <CanvasWorkspace
+            key={canvasWorkspaceName}
+            name={canvasWorkspaceName}
+          />
+        </Suspense>
+      </div>
+    );
+  } else if (isAiModels) {
+    // AI Models (apps/ai_models/) — five tabs in the cc-* page chrome, one
+    // sub-path each. Reachable by URL even where the sidebar hides its entry
+    // (no cache dir yet); the page states that case itself.
+    //
+    // **Not keyed on `epoch`, unlike every branch around it — and the tab being
+    // a PATH now is exactly why that has to be said out loud.** Every other
+    // path change in this dispatcher remounts; a hop between two of this page's
+    // tabs must not. The walk they share is a filesystem crawl over every blob
+    // in the Hugging Face cache (lib/useCacheScan.ts), and a remount would
+    // re-run it and throw away whatever was typed into the Local tab's Hub
+    // search (D426). One
+    // branch, one mount, the page reading the path itself. Arriving from any
+    // OTHER route still mounts it fresh: the branches differ in their children,
+    // so React replaces the subtree regardless.
+    main = (
+      <div id="content">
+        <div className="cc-page">
+          <Suspense fallback={<RouteFallback />}>
+            <AiModels />
+          </Suspense>
+        </div>
+      </div>
+    );
+  } else if (isApps) {
+    // Apps hub — the app home. No breadcrumb bar; the page owns its own
+    // header. The shell sidebar renders beside it.
+    //
+    // Not keyed on `epoch` (same exception as AiModels above): the page's only
+    // same-route navigation is its tag filter, which lives in the URL
+    // (`?tag=`) so back/forward can undo it — and remounting would reload
+    // every app-preview iframe just to switch a chip. The page subscribes to
+    // the URL itself. Arriving from any other route still mounts it fresh.
+    main = (
+      <div id="content">
+        <Suspense fallback={<RouteFallback />}>
+          <Apps config={config} />
+        </Suspense>
+      </div>
+    );
+  } else if (appPagePath !== null) {
+    // The app page (D488): the app live in an Overview frame, its tasks in a
+    // Tasks tab. Keyed on the SLUG, not the epoch (the CanvasWorkspace
+    // exception): the tab is a path segment, so switching it is a navigation,
+    // and a remount would reload the running app to change tabs. A different slug
+    // still mounts fresh.
+    main = (
+      <div id="content">
+        <Suspense fallback={<RouteFallback />}>
+          <AppPage key={appPagePath} dir={appPagePath} config={config} />
+        </Suspense>
+      </div>
+    );
+  } else if (isHome) {
+    // The front door: search hero + Fused Apps / Claude Sessions / Recent
+    // files strips (shell/Home.tsx).
+    main = (
+      <div id="content" key={epoch}>
+        <Home key={epoch} config={config} />
+      </div>
+    );
+  } else if (isExplorerHome) {
+    // File-explorer homepage: the recents/sessions/repos launcher (FilesHome).
+    main = (
+      <div id="content" key={epoch}>
+        <FilesHome key={epoch} config={config} />
+      </div>
+    );
+  } else if (isClaudeConfig) {
+    // Claude Config panel — native, no mount (see ClaudeConfigView).
+    main = <ClaudeConfigView key={epoch} />;
+  } else if (!fsPath) {
+    main = (
+      <>
+        <div id="breadcrumb" />
+        <div id="content" key={epoch}>
+          <div className="status-message error">
+            Unrecognized URL: {pathname}
+          </div>
+        </div>
+      </>
+    );
+  } else {
+    // Windows expanduser returns backslashes; fsPath is always forward-slash.
+    main = (
+      <StatView
+        key={epoch + ":" + fsPath}
+        fsPath={fsPath}
+        epoch={epoch}
+        home={config.home.replace(/\\/g, "/")}
+      />
+    );
+  }
+
+  // ONE sidebar for every route (it replaced the per-context pair: the
+  // explorer's on fs routes, the shell app-switcher elsewhere). The shell no
+  // longer picks — GlobalSidebar carries nav, recents, bookmarks and the
+  // bottom Preferences menu itself.
+  const sidebar = <GlobalSidebar config={config} />;
+
+  // The setup wizard (shell/onboarding) is the whole window: no sidebar, no
+  // status bar, no docks — a pre-app surface, which is why it is not one more
+  // `main` branch above. Keyed on the epoch like every route, so reopening it
+  // from Help starts at step 1.
+  if (pathname === ONBOARDING_PATH && !IS_EMBED) {
+    return (
+      <div id="app">
+        <OnboardingWizard key={epoch} config={config} />
+        <NotificationHost />
+        {/* This whole branch already requires `!IS_EMBED` (the `if` above),
+            so this is never reachable under IS_EMBED today — but the guard
+            is spelled out explicitly anyway (finding #1, code review):
+            `UpdateNotifier`'s own header comment claims it runs "behind the
+            same !IS_EMBED guard as its siblings" everywhere it is mounted,
+            and leaving this instance implicit made that claim false at the
+            OTHER mount site below, which had no guard at all. Both sites now
+            say it the same way so the comment stays true regardless of how
+            this branch's own condition might change later. */}
+        {!IS_EMBED && <UpdateNotifier />}
+        {/* A fresh install routes Home to this wizard, and a Render App user's
+            very first fused-render action can be its Edit button: the
+            `?_edit_appfile=` hand-off must not die here unread. The boot
+            handler clones and moves to the copy (the wizard re-offers
+            itself next launch, `shouldAutoShow`); over an existing copy it
+            navigates there first, so its modal never sits on the wizard. */}
+        {!IS_EMBED && <EditAppFileBoot />}
+        {/* Mod+K is App-wide (the listener above runs here too), so the sheet
+            must be renderable here — or the flag flips with nothing shown and
+            the sheet pops open on whatever page the wizard lets go to. */}
+        {shortcutsOpen && (
+          <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div id="app">
+      {!IS_EMBED && sidebar}
+      <div id="main">
+        {main}
+        {/* Three sections, not three surfaces: ModelsDock is the shell's
+            wrapper around Models' own chip (it speaks apps/ai_models/lib's
+            shared runtime poll, which platform may not import). ActivityDock
+            is the shell's wrapper around the platform activity card (it
+            fills that card's queue/engines slots), handed in from here
+            rather than imported there because it speaks explorerUrl
+            (shell/schedule-lib) and platform/lib/api's engine poll — the
+            latter platform already owns, but it is grouped with the queue
+            poll in one shell composer rather than split across a shell file
+            and a platform file for one poll (`shell/ActivityDock.tsx`'s own
+            header has the fuller argument). RepoUpdatesDock is its own
+            sibling section (SPEC §36), handed in the same way and for the
+            same reason: it speaks explorer/lib's staged-Claude-ask store.
+            Inside `#main` (D563, not NotificationHost's fixed column) and
+            behind the same `!IS_EMBED` guard as the sidebar, so a pane in
+            panel/tab mode does not grow its own bar. */}
+        {!IS_EMBED && (
+          <StatusBar
+            models={<ModelsDock />}
+            /* D586/D662: every terminal job is re-routed from Activity to
+               Notifications, and this is the one place both sections are in
+               scope. Plain prop wiring on purpose — the alternative was a
+               shared store, which would be a new subsystem for a list that
+               one section already polls and the other only reads. */
+            activity={
+              <ActivityDock
+                onTerminalJobs={setTerminalJobs}
+                onJobPopup={setPopupJob}
+              />
+            }
+            repoUpdates={
+              <RepoUpdatesDock
+                terminal={terminalJobs}
+                onTerminalPatch={setTerminalJobs}
+              />
+            }
+          />
+        )}
+      </div>
+      <NotificationHost jobPopup={popupJob} onJobPopupGone={() => setPopupJob(null)} />
+      {/* The two self-update notifications (Download available / Restart
+          ready), plus in-flight restart narration re-notifying the same card
+          — SPEC-update-notifications.md's consolidation of what used to be 5
+          separate surfaces (UpdateBadge, UpdateProgressCard, the restart
+          dialog, ActivityDock's update row, RepoUpdatesDock) into "Activity =
+          progress, Notifications = decisions". Headless — mounted beside
+          `NotificationHost` (both draw through the same notify() store)
+          rather than inside it, so `NotificationHost` stays a pure renderer
+          of whatever's in the store. Behind `!IS_EMBED`, same as the sidebar
+          and `StatusBar` above (finding #1, code review): this mount had NO
+          guard at all before, so an app opened in an embedded pane raised
+          its OWN copy of both decision notifications AND (via `notify()`'s
+          pane->shell forwarding, `platform/lib/notifications.ts`) pushed a
+          SECOND copy into the top shell's own panel — the exact double-popup
+          this file's other `!IS_EMBED`-gated mounts already exist to avoid.
+          `UpdateNotifier` only needs to run once, in the top document; the
+          decision it raises already reaches every pane through the ordinary
+          notify() store, so a pane mounting its own instance can only
+          duplicate work, never add coverage. */}
+      {!IS_EMBED && <UpdateNotifier />}
+      {/* Render App's Edit button hand-off (`?_edit_appfile=`, DL-7): clones
+          the .fused into local/ or, over an existing copy, asks whether to
+          overwrite it. Once, top document, same guard as UpdateNotifier. */}
+      {!IS_EMBED && <EditAppFileBoot />}
+      {/* One dialog for every "Share" entry (card chip, card menu, app page,
+          explorer kebab): the menu entries cannot own a dialog, so they post
+          a request to platform/lib/share-app and this host renders it. */}
+      <ShareAppHost />
+      {/* Same shape, for any file the Fused catalog can render rather than
+          just a .fused app — platform/lib/share-file's openShareFile store. */}
+      <ShareFileHost />
+      {shortcutsOpen && (
+        <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />
+      )}
+    </div>
+  );
+}

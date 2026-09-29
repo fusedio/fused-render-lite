@@ -1,0 +1,1130 @@
+import { describe, expect, it } from "bun:test";
+import {
+  HOME_RESULT_CAP,
+  SCAN_START_GRACE_MS,
+  activeRow,
+  aiSearchUsable,
+  answerFrom,
+  expandWhitespaceQuery,
+  formatElapsed,
+  homeCountNote,
+  indexGap,
+  isAiRow,
+  isOpenRow,
+  nameStart,
+  narrowAnswer,
+  noteAnswer,
+  patternTail,
+  pathShortcut,
+  positionsWithin,
+  rankingSettled,
+  redirectsToSearch,
+  scanStarting,
+  stepHighlight,
+  submitRow,
+  willResolveToGlobMode,
+  type HomeAnswer,
+  type HomeHit,
+  type RowModel,
+} from "./home-search";
+import type { IndexRankHit, IndexRankResult } from "@platform/lib/api";
+import { globMatch } from "@platform/lib/fuzzy";
+
+const HOME = "/Users/me";
+
+function rankHit(rel: string, over: Partial<IndexRankHit> = {}): IndexRankHit {
+  return {
+    rel,
+    is_dir: false,
+    size: 10,
+    mtime: 1_800_000_000,
+    ...over,
+  };
+}
+
+function rankResult(over: Partial<IndexRankResult> = {}): IndexRankResult {
+  return {
+    covered: true,
+    reason: "",
+    hits: [rankHit("Downloads/a.csv")],
+    truncated: false,
+    total: 1,
+    base: HOME,
+    mode: "substring",
+    pattern: "",
+    ...over,
+  };
+}
+
+function answer(over: Partial<HomeAnswer> = {}): HomeAnswer {
+  return {
+    query: "a",
+    base: HOME,
+    mode: "substring",
+    hits: [],
+    truncated: false,
+    total: 0,
+    covered: true,
+    reason: "",
+    elapsedMs: 0,
+    ...over,
+  };
+}
+
+describe("expandWhitespaceQuery / willResolveToGlobMode", () => {
+  it("is a no-op ONLY without whitespace or '*'", () => {
+    expect(expandWhitespaceQuery("report")).toBe("report");
+    expect(expandWhitespaceQuery("")).toBe("");
+    expect(willResolveToGlobMode("report")).toBe(false);
+  });
+
+  it("whitespace-only has nothing to search for (A2)", () => {
+    // A whitespace-only query used to collapse into "*" (match everything);
+    // there is no literal character left to narrow on, so it now resolves
+    // to "", same as an empty query.
+    expect(expandWhitespaceQuery("   ")).toBe("");
+    expect(expandWhitespaceQuery(" ")).toBe("");
+  });
+
+  it("wraps a whitespace-free glob's LEADING end, but suppresses the trailing wrap once a user '*' is anywhere in the final segment (reversed: icon*copy no longer agrees with icon copy)", () => {
+    expect(expandWhitespaceQuery("*.pdf")).toBe("*.pdf");
+    expect(expandWhitespaceQuery("icon*copy")).toBe("**icon*copy");
+    expect(expandWhitespaceQuery("src/**/*.ts")).toBe("src/**/*.ts");
+    expect(willResolveToGlobMode("*.pdf")).toBe(true);
+  });
+
+  it("does not trim leading/trailing whitespace", () => {
+    // "icon " and " icon" are NOT symmetric: the trailing space's own
+    // collapse (rule 4) already produces a cross-directory "**" at that
+    // end, so rule 5's append never fires for it — but the LEADING space
+    // collapses to a "**" at the START, leaving the END untouched, so rule
+    // 5's single-"*" append still fires there (code review finding: the
+    // trailing case used to also get "**", leaking across a "/").
+    expect(expandWhitespaceQuery("icon ")).toBe("**icon**");
+    expect(expandWhitespaceQuery(" icon")).toBe("**icon*");
+    expect(expandWhitespaceQuery("*.js ")).toBe("*.js**");
+    expect(expandWhitespaceQuery("hello world ")).toBe("**hello**world**");
+    expect(expandWhitespaceQuery(" hello world")).toBe("**hello**world*");
+  });
+
+  it("the motivating trailing-space case: a space only ever widens (A3)", () => {
+    // "src" (substring mode) already matches "srcdir/file.txt"; "src " must
+    // keep matching it, which requires the inserted wildcard to cross a
+    // directory boundary.
+    expect(expandWhitespaceQuery("src ")).toBe("**src**");
+  });
+
+  it("collapses whitespace runs to '**' and wraps the final segment", () => {
+    expect(expandWhitespaceQuery("hello world")).toBe("**hello**world*");
+    expect(expandWhitespaceQuery("hello  world")).toBe("**hello**world*");
+    expect(expandWhitespaceQuery("  hello world  ")).toBe("**hello**world**");
+    expect(willResolveToGlobMode("hello world")).toBe(true);
+  });
+
+  it("wraps only the final segment, not earlier ones", () => {
+    expect(expandWhitespaceQuery("~/My Documents/report")).toBe("~/My**Documents/**report*");
+  });
+
+  it("wraps only the end that needs it (trailing end now also skipped when a '*' is ANYWHERE in the segment)", () => {
+    expect(expandWhitespaceQuery("*.pdf")).toBe("*.pdf");
+    expect(expandWhitespaceQuery("report*")).toBe("**report*");
+    expect(expandWhitespaceQuery("*.pdf*")).toBe("*.pdf*");
+  });
+
+  it("never stacks a star beside a user star, and now suppresses the trailing wrap entirely once a user star is anywhere in the segment", () => {
+    expect(expandWhitespaceQuery("report *.pdf")).toBe("**report*.pdf");
+    expect(expandWhitespaceQuery("*.pdf report")).toBe("*.pdf**report");
+    expect(expandWhitespaceQuery("a * b")).toBe("**a*b");
+  });
+
+  it("trailing wrap does not cross a directory (code review finding) — demonstrated with a whitespace-only wrap, since a user '*' anywhere now suppresses the trailing wrap entirely", () => {
+    // An earlier version appended "**" (the same cross-directory token as
+    // the leading wrap), which let a folder-anchored query leak into a
+    // differently-named subtree. The trailing wrap's job is only to let an
+    // unanchored fragment also match a longer name in the SAME folder,
+    // which a single "*" already gives in full. `/*.pdf` no longer
+    // exercises this (a user '*' anywhere now suppresses the trailing wrap
+    // outright, see the test above), so this uses a query whose final
+    // segment has neither whitespace nor '*' of its own but still gets
+    // wrapped because an EARLIER segment has whitespace.
+    const pattern = expandWhitespaceQuery("My Documents/report");
+    expect(pattern).toBe("My**Documents/**report*");
+  });
+
+  // Code review finding: JS's `\s` (and `String.trim()`) treat U+FEFF
+  // (ZERO WIDTH NO-BREAK SPACE / a leading BOM) as whitespace; Python's `\s`
+  // (and `str.strip()`) do not — U+FEFF is Unicode category Cf (format), not
+  // a whitespace category. `expand_whitespace_query` in query.py therefore
+  // takes rule 2's no-op branch for a BOM-prefixed literal (no real
+  // whitespace, no "*") and leaves it byte-for-byte unchanged, still
+  // substring mode. This mirror is written to agree with that — a BOM is
+  // never treated as a query-widening whitespace run here either — rather
+  // than with JS's native notion of "whitespace", so the documented
+  // byte-equivalence with query.py holds for this input too.
+  it("does not treat a leading BOM (U+FEFF) as whitespace (matches Python's \\s)", () => {
+    const bom = "﻿";
+    expect(expandWhitespaceQuery(bom + "abc")).toBe(bom + "abc");
+    expect(willResolveToGlobMode(bom + "abc")).toBe(false);
+    // A BOM alone has a real (non-whitespace) character in it as far as
+    // this grammar is concerned, so it is not the "nothing to search for"
+    // case either — matching Python's `chr(0xFEFF).strip() != ""`.
+    expect(expandWhitespaceQuery(bom)).toBe(bom);
+  });
+
+  // Code review finding 7(b): the BOM fix above closed ONE gap between
+  // Python's `\s` and JS's native `\s`, but not the only one. Python's `\s`
+  // (and `str.isspace()`) also matches the four C0 "information separator"
+  // control characters U+001C-U+001F (FS/GS/RS/US) and U+0085 (NEL, NEXT
+  // LINE) — both because CPython's Unicode tables mark their bidirectional
+  // class as a whitespace-like separator, not because of Unicode's
+  // `White_Space` property (which excludes them). JS's `\s` follows
+  // `White_Space` exactly and treats all five as ordinary non-whitespace
+  // characters. `NON_BOM_WS` is therefore extended with an explicit
+  // `[-]` alternative so a query containing one of these
+  // (vanishingly rare in practice — they are non-printing control
+  // characters no user is likely to type — but reachable via paste or a
+  // scripted client) still collapses the same way on both sides of the
+  // wire, rather than silently being treated as literal, non-widening
+  // characters here while `expand_whitespace_query` (query.py) widens on
+  // them.
+  it("treats the C0 separators (U+001C-U+001F) and NEL (U+0085) as whitespace (matches Python's \\s)", () => {
+    for (const cp of [0x1c, 0x1d, 0x1e, 0x1f, 0x85]) {
+      const ch = String.fromCodePoint(cp);
+      expect(expandWhitespaceQuery(`icon${ch}copy`)).toBe("**icon**copy*");
+      expect(expandWhitespaceQuery(ch)).toBe("");
+    }
+  });
+
+  // Required behavior table — mirrors tests/test_index_query.py's
+  // test_expand_whitespace_query_required_behavior_table row for row.
+  it.each([
+    ["report", "report"],
+    ["icon ", "**icon**"],
+    [" icon", "**icon*"],
+    ["*.js ", "*.js**"],
+    ["icon*copy", "**icon*copy"],
+    ["*.pdf", "*.pdf"],
+    ["src/**/*.ts", "src/**/*.ts"],
+    ["icon copy", "**icon**copy*"],
+    ["hello  world", "**hello**world*"],
+    ["report *.pdf", "**report*.pdf"],
+    ["~/My Documents/report", "~/My**Documents/**report*"],
+    ["/*.pdf", "/*.pdf"],
+    ["   ", ""],
+    ["src ", "**src**"],
+  ])("required behavior: %j -> %j", (query, expected) => {
+    expect(expandWhitespaceQuery(query)).toBe(expected);
+  });
+
+  // Property (A4): the function may deliberately insert "**", so the old
+  // "never invents a double star" claim no longer holds — what survives is
+  // that it never manufactures a run of THREE OR MORE consecutive "*"
+  // unless the input already had one.
+  it.each([
+    "report", "icon ", " icon", "*.js ", "icon*copy", "*.pdf",
+    "src/**/*.ts", "icon copy", "hello  world", "report *.pdf",
+    "~/My Documents/report", "/*.pdf", "a * b", "*.pdf report",
+    "report*", "*.pdf*", " ", "", "*", "**", "a* *", "* *",
+  ])("never invents a run of three or more stars: %j", (query) => {
+    const out = expandWhitespaceQuery(query);
+    const maxRun = (s: string) => Math.max(0, ...(s.match(/\*+/g) ?? []).map((r) => r.length));
+    if (maxRun(query) < 3) {
+      expect(maxRun(out)).toBeLessThan(3);
+    }
+  });
+});
+
+// Mirrors tests/test_index_query.py's concrete-filename regression table for
+// the reversal, using globMatch (fuzzy.ts) as the match/no-match oracle
+// instead of Python's `_glob_to_regex` + `re.fullmatch`.
+describe("the icon*copy reversal, matched against concrete filenames", () => {
+  it.each([
+    ["icon copy.png", true],
+    ["my icon copy.png", true],
+    ["iconcopy.png", true],
+    ["icon.png", false],
+  ])("icon copy vs %j is unchanged by the reversal: %j", (name, expected) => {
+    const pattern = expandWhitespaceQuery("icon copy");
+    expect(globMatch(pattern, name as string) !== null).toBe(expected);
+  });
+
+  it.each([
+    ["icon copy", true],
+    ["iconcopy", true],
+    ["icon copy.png", false],
+    ["icon copy extra", false],
+  ])("icon*copy is now anchored (the reversal itself) vs %j: %j", (name, expected) => {
+    const pattern = expandWhitespaceQuery("icon*copy");
+    expect(pattern).toBe("**icon*copy");
+    expect(globMatch(pattern, name as string) !== null).toBe(expected);
+  });
+
+  it("icon*copy* (user-typed trailing *) reproduces pre-reversal loose matching", () => {
+    const pattern = expandWhitespaceQuery("icon*copy*");
+    expect(pattern).toBe("**icon*copy*");
+    expect(globMatch(pattern, "icon copy.png")).not.toBeNull();
+    expect(globMatch(pattern, "icon copy extra")).not.toBeNull();
+  });
+
+  it.each([
+    ["report.parquet", true],
+    ["report.parquet.bak", false],
+    ["my_report.parquet", true],
+    ["report.parquetx", false],
+  ])("*.parquet means exactly ends-with-.parquet vs %j: %j", (name, expected) => {
+    const pattern = expandWhitespaceQuery("*.parquet");
+    expect(pattern).toBe("*.parquet");
+    expect(globMatch(pattern, name as string) !== null).toBe(expected);
+  });
+
+  it("src/*/index still finds src/app/index.ts (GUARD: final-segment-only scoping)", () => {
+    // The `*` in `src/*/index` sits in the MIDDLE segment — a directory
+    // wildcard, not a statement about the filename — so it must not
+    // suppress `index`'s own trailing wrap. If this ever regresses to a
+    // whole-path "does this query contain a `*` anywhere" check, `index`
+    // would stop trailing-wrapping and this match would break.
+    const pattern = expandWhitespaceQuery("src/*/index");
+    expect(pattern).toBe("src/*/**index*");
+    expect(globMatch(pattern, "src/app/index.ts")).not.toBeNull();
+  });
+});
+
+describe("pathShortcut", () => {
+  it("expands ~ and ~/… against home", () => {
+    expect(pathShortcut("~", HOME)).toBe(HOME);
+    expect(pathShortcut("~/Downloads", HOME)).toBe(`${HOME}/Downloads`);
+  });
+
+  it("keeps absolute posix paths and normalizes trailing slashes", () => {
+    expect(pathShortcut("/etc", HOME)).toBe("/etc");
+    expect(pathShortcut("/etc/", HOME)).toBe("/etc");
+    // The root itself must survive being stripped.
+    expect(pathShortcut("/", HOME)).toBe("/");
+  });
+
+  it("normalizes drive-letter paths and keeps a drive root's slash", () => {
+    expect(pathShortcut("C:\\Users\\me", HOME)).toBe("C:/Users/me");
+    // Bare "C:" reads as cwd-relative, so a drive root keeps its slash.
+    expect(pathShortcut("C:/", HOME)).toBe("C:/");
+  });
+
+  it("is null for anything that is not a path — that is a search, not a jump", () => {
+    expect(pathShortcut("weather csv", HOME)).toBeNull();
+    expect(pathShortcut("Downloads", HOME)).toBeNull();
+    // A backslash is a legal POSIX filename char, so this is not a path.
+    expect(pathShortcut("a\\b", HOME)).toBeNull();
+    expect(pathShortcut("  ", HOME)).toBeNull();
+    // A RELATIVE query is a search, not an address, even one that looks
+    // file-shaped.
+    expect(pathShortcut("docs/readme.md", HOME)).toBeNull();
+  });
+
+  it("accepts a paste wrapped in matching quotes", () => {
+    expect(pathShortcut('"~/Downloads"', HOME)).toBe(`${HOME}/Downloads`);
+    expect(pathShortcut("'/etc/hosts'", HOME)).toBe("/etc/hosts");
+    // Mismatched quotes are not a wrapping pair — left as-is (and then not a
+    // path shape at all here).
+    expect(pathShortcut("'/etc/hosts\"", HOME)).toBeNull();
+  });
+
+  it("strips a file:// scheme, same as a terminal or Finder paste would carry", () => {
+    expect(pathShortcut("file:///etc/hosts", HOME)).toBe("/etc/hosts");
+  });
+
+  it("strips a Windows file:// URI's authority slash ahead of the drive letter", () => {
+    // file:///C:/Users/x is "C:/Users/x", not "/C:/Users/x" — the third slash
+    // is the URI's (empty) authority separator, not part of the path. Getting
+    // this wrong used to pass the leading-slash guard branch as if it were an
+    // absolute POSIX path, producing a confidently wrong address.
+    expect(pathShortcut("file:///C:/Users/x", HOME)).toBe("C:/Users/x");
+    // A bare POSIX file:// URL has no such extra slash to drop.
+    expect(pathShortcut("file:///home/x", HOME)).toBe("/home/x");
+  });
+
+  it("tolerates a trailing newline from a multi-line paste", () => {
+    expect(pathShortcut("/etc/hosts\n", HOME)).toBe("/etc/hosts");
+  });
+
+  it("unescapes a shell-escaped space, regardless of platform", () => {
+    expect(pathShortcut("/Users/me/My\\ Files", HOME)).toBe("/Users/me/My Files");
+  });
+});
+
+describe("answerFrom", () => {
+  it("absolutizes rel paths against home and carries the row's facts", () => {
+    const res = rankResult({ hits: [rankHit("Downloads/a.csv", { size: 42 })] });
+    expect(answerFrom(res, "a.csv", 0).hits).toEqual([
+      {
+        path: `${HOME}/Downloads/a.csv`,
+        rel: "Downloads/a.csv",
+        is_dir: false,
+        size: 42,
+        mtime: 1_800_000_000,
+        positions: [10, 11, 12, 13, 14],
+      },
+    ]);
+  });
+
+  it("re-runs the matcher for highlights rather than trusting the wire", () => {
+    // fuzzy.ts is the single source of truth for what highlights; the server
+    // deliberately does not send positions (index/query.py's `search_ranked`
+    // docstring).
+    const [row] = answerFrom(rankResult({ hits: [rankHit("docs/README.md")] }), "readme", 0).hits;
+    expect(row.positions!.map((i) => "docs/README.md"[i]).join("")).toBe("README");
+  });
+
+  it("caps the rendered rows but keeps the server's true total", () => {
+    const many = Array.from({ length: HOME_RESULT_CAP + 25 }, (_, i) => rankHit(`f${i}.txt`));
+    const out = answerFrom(rankResult({ hits: many, total: many.length }), "f", 0);
+    expect(out.hits).toHaveLength(HOME_RESULT_CAP);
+    expect(out.total).toBe(HOME_RESULT_CAP + 25);
+  });
+
+  it("carries the query it answers, which is what stops the list blanking", () => {
+    expect(answerFrom(rankResult(), "down", 0).query).toBe("down");
+  });
+
+  it("reports an uncovered root as such, never as zero matches", () => {
+    // The honest answer is "still building": the home page has no live walk to
+    // fall back on, so a miss here is the app's state, not the user's files.
+    const out = answerFrom(rankResult({ covered: false, hits: [], total: 0 }), "x", 0);
+    expect(out.covered).toBe(false);
+    expect(out.hits).toEqual([]);
+  });
+
+  it("carries the server's reason through, for the disabled-indexing message", () => {
+    const out = answerFrom(
+      rankResult({ covered: false, reason: "disabled", hits: [], total: 0 }),
+      "x",
+      0,
+    );
+    expect(out.reason).toBe("disabled");
+  });
+
+  it("carries the measured elapsed time through", () => {
+    expect(answerFrom(rankResult(), "down", 123).elapsedMs).toBe(123);
+  });
+
+  it("builds a hit's path from the server's resolved base, not the box's own root", () => {
+    // A `~`/`/`-leading query can walk the server's resolved base out past
+    // the box's own root (resolve_query, fused_render/index/query.py) — a
+    // hit's rel is relative to THAT, not to the box's own root.
+    const out = answerFrom(
+      rankResult({ base: "/Users/me/a/b", hits: [rankHit("c.csv")] }),
+      "~/a/b/*.c",
+      0,
+    );
+    expect(out.hits[0]!.path).toBe("/Users/me/a/b/c.csv");
+    expect(out.base).toBe("/Users/me/a/b");
+  });
+
+  it("does not re-run substringMatch on a glob hit, and never drops it", () => {
+    // A glob hit is not necessarily a substring of the typed query at all —
+    // "*.csv" matching "report.csv" has no literal "*.csv" anywhere in
+    // "report.csv" — so re-running substringMatch and dropping what fails
+    // would silently discard a real server hit. With no `pattern` supplied
+    // (the default in this file's `rankResult` helper), `globMatch` finds
+    // nothing to mark, which renders unhighlighted rather than dropped —
+    // the row itself is what this test actually pins.
+    const out = answerFrom(
+      rankResult({ mode: "glob", hits: [rankHit("report.csv")] }),
+      "*.csv",
+      0,
+    );
+    expect(out.hits).toEqual([
+      {
+        path: `${HOME}/report.csv`,
+        rel: "report.csv",
+        is_dir: false,
+        size: 10,
+        mtime: 1_800_000_000,
+        positions: [],
+      },
+    ]);
+    expect(out.mode).toBe("glob");
+  });
+
+  it("highlights a glob hit's literal pieces via the server's resolved pattern (§4)", () => {
+    // "hello world" -> "**/**hello**world**" (expand_whitespace_query,
+    // fused_render/index/query.py) — the resolved pattern the server sends
+    // back on `res.pattern`, NOT the raw typed query, is what `globMatch`
+    // needs to find the literal pieces.
+    const out = answerFrom(
+      rankResult({
+        mode: "glob",
+        pattern: "**/**hello**world**",
+        hits: [rankHit("my_hello_big_world.py")],
+      }),
+      "hello world",
+      0,
+    );
+    expect(out.hits[0]!.positions!.map((i) => "my_hello_big_world.py"[i]).join("")).toBe(
+      "helloworld",
+    );
+  });
+
+  it("does not throw when a glob-mode response somehow carries no pattern (finding 6)", () => {
+    // `IndexRankResult.pattern` is typed as an always-populated string, but
+    // `hitsFromRank` (listing/ranked-hits.ts) guards it defensively anyway
+    // (`mode === "glob" && pattern`) rather than trust the type at a wire
+    // boundary — this mirrors that same guard here, since an unguarded
+    // `globMatch(res.pattern, h.rel)` call throws a TypeError the instant
+    // `pattern` is undefined (`pattern.toLowerCase()` inside `globMatch`).
+    const out = answerFrom(
+      rankResult({ mode: "glob", pattern: undefined as unknown as string, hits: [rankHit("report.csv")] }),
+      "*.csv",
+      0,
+    );
+    expect(out.hits[0]!.positions).toEqual([]);
+  });
+
+  it("still highlights a substring-mode hit exactly as before", () => {
+    const out = answerFrom(rankResult({ mode: "substring", hits: [rankHit("a.csv")] }), "a.csv", 0);
+    expect(out.hits[0]!.positions).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("highlights against the trailing segment for a query that walked past the box root", () => {
+    // "/tmp/rep" resolves to base "/tmp", pattern "rep" — hits come back
+    // rel to "/tmp", so matching the raw "/tmp/rep" against "report.csv"
+    // would never find it.
+    const out = answerFrom(
+      rankResult({ base: "/tmp", hits: [rankHit("report.csv")] }),
+      "/tmp/rep",
+      0,
+    );
+    expect(out.hits[0]!.positions).toEqual([0, 1, 2]);
+  });
+});
+
+describe("patternTail", () => {
+  it("is the query itself when there is no \"/\" to walk past", () => {
+    expect(patternTail("readme")).toBe("readme");
+  });
+
+  it("is the segment after the last \"/\" for a path-shaped query", () => {
+    expect(patternTail("/tmp/rep")).toBe("rep");
+    expect(patternTail("~/a/b/rep")).toBe("rep");
+  });
+});
+
+describe("highlight rebasing", () => {
+  it("keeps only the positions that land in the cell, rebased to it", () => {
+    const rel = "docs/readme.md";
+    const positions = [0, 1, 5, 6, 7]; // "do" in docs, "rea" in readme.md
+    expect(nameStart(rel)).toBe(5);
+    expect(positionsWithin(positions, 5, rel.length - 5)).toEqual([0, 1, 2]);
+  });
+
+  it("drops out-of-range positions instead of clamping them", () => {
+    // A match entirely on the parent directory has nothing to mark in the name
+    // cell, and marking the wrong character is worse than marking none.
+    expect(positionsWithin([0, 1], 5, 9)).toEqual([]);
+  });
+
+  it("has nothing to rebase for a name-only rel", () => {
+    expect(nameStart("file.txt")).toBe(0);
+    expect(positionsWithin([0, 1], 0, 8)).toEqual([0, 1]);
+  });
+});
+
+describe("rankingSettled over a failure", () => {
+  it("is not settled while the rows on screen answer an older query", () => {
+    // The residual path the pending check cannot see. A CURRENT failure is
+    // reported correctly, and `settled` then licensed acting on rows that
+    // answer something else: type "read", get ten rows, type "readme", the
+    // request fails, press Enter — and submitRow opens "read"'s top hit.
+    expect(rankingSettled(answer({ query: "read" }), "readme", false, true)).toBe(false);
+  });
+
+  it("IS settled with nothing on screen, which is what arms the AI row", () => {
+    // Deliberate and unchanged: no answer is coming and the AI row really is
+    // the only content left.
+    expect(rankingSettled(null, "readme", false, true)).toBe(true);
+  });
+
+  it("IS settled when the failure is a refresh over the current query's rows", () => {
+    expect(rankingSettled(answer({ query: "readme" }), "readme", false, true)).toBe(true);
+  });
+
+  it("still checks pending first, whatever the rows say", () => {
+    expect(rankingSettled(answer({ query: "readme" }), "readme", true, true)).toBe(false);
+  });
+});
+
+function rowModel(over: Partial<RowModel> = {}): RowModel {
+  return { openRow: false, fileCount: 5, aiRow: true, ...over };
+}
+
+describe("submitRow over a failure with stale rows", () => {
+  it("commits nothing when Enter has no explicit choice", () => {
+    // The whole point of the rule above: with rows for a previous query on
+    // screen, the top-hit fallthrough opens a file the user did not ask for.
+    const settled = rankingSettled(answer({ query: "read" }), "readme", false, true);
+    expect(submitRow(null, rowModel({ fileCount: 10 }), settled)).toBeNull();
+  });
+
+  it("still commits a row the user pointed at", () => {
+    const settled = rankingSettled(answer({ query: "read" }), "readme", false, true);
+    expect(submitRow(3, rowModel({ fileCount: 10 }), settled)).toBe(3);
+  });
+});
+
+describe("homeCountNote", () => {
+  it("states the true total and owns up to the display cap", () => {
+    expect(homeCountNote(1, false)).toBe("1 match");
+    expect(homeCountNote(HOME_RESULT_CAP, false)).toBe(`${HOME_RESULT_CAP} matches`);
+    expect(homeCountNote(HOME_RESULT_CAP + 60, false)).toBe(
+      `Showing top ${HOME_RESULT_CAP} of ${HOME_RESULT_CAP + 60}`,
+    );
+    // Four figures read as a number, not a digit run.
+    expect(homeCountNote(4690, false)).toBe(`Showing top ${HOME_RESULT_CAP} of 4,690`);
+    // A truncated corpus is a second, independent "there was more than this".
+    expect(homeCountNote(3, true)).toBe("3+ matches");
+  });
+});
+
+describe("formatElapsed", () => {
+  it("renders sub-second durations as rounded milliseconds", () => {
+    expect(formatElapsed(0)).toBe("0 ms");
+    expect(formatElapsed(42)).toBe("42 ms");
+    expect(formatElapsed(42.6)).toBe("43 ms");
+    expect(formatElapsed(999)).toBe("999 ms");
+  });
+
+  it("switches to one-decimal seconds at the 1000ms boundary", () => {
+    expect(formatElapsed(1000)).toBe("1.0 s");
+    expect(formatElapsed(1234)).toBe("1.2 s");
+    expect(formatElapsed(12_345)).toBe("12.3 s");
+  });
+});
+
+describe("noteAnswer", () => {
+  const settledAnswer = answer({ query: "a", total: 3 });
+  const heldAnswer = answer({ query: "prev", total: 9 });
+
+  it("reads the live answer once ranking has settled", () => {
+    expect(noteAnswer(settledAnswer, true, heldAnswer)).toBe(settledAnswer);
+  });
+
+  it("holds the last settled answer while not settled, ignoring the live one", () => {
+    expect(noteAnswer(settledAnswer, false, heldAnswer)).toBe(heldAnswer);
+  });
+
+  it("is null when nothing has ever settled", () => {
+    expect(noteAnswer(settledAnswer, false, null)).toBeNull();
+  });
+
+  it("holds the last settled answer when a settled render's live answer is null", () => {
+    // Reachable via a failed request for a LATER query than the held answer,
+    // combined with the stale-clear effect nulling `answer` out from under a
+    // query that has since moved on (see FilesHome.tsx). The note must not
+    // flash "Searching…" over a result it already showed.
+    expect(noteAnswer(null, true, heldAnswer)).toBe(heldAnswer);
+  });
+});
+
+
+describe("keyboard rows — without an open row (the pre-section-7 shape)", () => {
+  // Rows are the file hits followed by ONE action row (Search with AI), so
+  // the AI row's index is always the file count.
+  it("steps down from nothing to the first row and wraps at both ends", () => {
+    const m = rowModel({ fileCount: 3 });
+    expect(stepHighlight(null, m, 1)).toBe(0);
+    expect(stepHighlight(2, m, 1)).toBe(3); // the AI row
+    expect(stepHighlight(3, m, 1)).toBe(0); // wrapped past the AI row
+    expect(stepHighlight(null, m, -1)).toBe(3); // up from nothing = the AI row
+    expect(stepHighlight(0, m, -1)).toBe(3);
+  });
+
+  it("walks only the AI row when there are no file hits", () => {
+    const m = rowModel({ fileCount: 0 });
+    expect(stepHighlight(null, m, 1)).toBe(0);
+    expect(stepHighlight(0, m, 1)).toBe(0);
+  });
+
+  it("pre-selects the top hit with file hits, the AI row with none", () => {
+    expect(activeRow(null, rowModel({ fileCount: 0 }), true)).toBe(0); // the AI row is the only content
+    // Previously null: an unhighlighted list that Enter still committed
+    // against (submitRow's old, separate fallthrough). One rule now — the row
+    // that visually pre-selects is the row Enter commits — so the top hit
+    // pre-selects rather than leaving the list looking unselected.
+    expect(activeRow(null, rowModel({ fileCount: 5 }), true)).toBe(0);
+    expect(activeRow(2, rowModel({ fileCount: 5 }), true)).toBe(2);
+    // A highlight past the end of a shrinking list clamps to the AI row rather
+    // than addressing a row that is no longer on screen.
+    expect(activeRow(9, rowModel({ fileCount: 3 }), true)).toBe(3);
+  });
+
+  it("does not pre-select anything until ranking has settled", () => {
+    // "Nothing scored yet" and "zero matches" look identical as a count, and
+    // pre-selecting on the first made Enter during the corpus load or the
+    // 120ms debounce spend a model call on a query with instant matches. The
+    // same gate applies to the top-hit pre-select: the list is never blanked,
+    // so unsettled rows on screen belong to a DIFFERENT (previous) query, and
+    // pre-selecting one of them would be exactly the stale-commit bug
+    // `rankingSettled`'s doc comment describes.
+    expect(activeRow(null, rowModel({ fileCount: 0 }), false)).toBeNull();
+    expect(activeRow(null, rowModel({ fileCount: 5 }), false)).toBeNull();
+    // An explicit arrow-key choice is the user's, settled or not.
+    expect(activeRow(1, rowModel({ fileCount: 0 }), false)).toBe(0);
+  });
+
+  it("activeRow and submitRow agree — Enter commits exactly what is highlighted", () => {
+    const settledHits = rowModel({ fileCount: 5 });
+    expect(activeRow(null, settledHits, true)).toBe(0);
+    expect(submitRow(null, settledHits, true)).toBe(activeRow(null, settledHits, true));
+    // Unsettled: still nothing to highlight and nothing for Enter to commit.
+    expect(activeRow(null, settledHits, false)).toBeNull();
+    expect(submitRow(null, settledHits, false)).toBeNull();
+  });
+
+  it("the first ArrowDown from an implicit pre-select lands on row 1, not row 0 again", () => {
+    // FilesHome steps from the RESOLVED row (`current`, i.e. activeRow's
+    // answer), not the raw highlight state — which is still null here even
+    // though row 0 is already visually selected. Stepping from null would
+    // land back on 0 (stepHighlight's own "enter from either end" rule) and
+    // the first press would look like it did nothing.
+    const m = rowModel({ fileCount: 5 });
+    const current = activeRow(null, m, true);
+    expect(current).toBe(0);
+    expect(stepHighlight(current, m, 1)).toBe(1);
+  });
+
+  it("the first ArrowUp from an implicit pre-select wraps to the last row", () => {
+    const m = rowModel({ fileCount: 5 }); // 5 file rows (0..4) + the AI row (5)
+    const current = activeRow(null, m, true);
+    expect(current).toBe(0);
+    expect(stepHighlight(current, m, -1)).toBe(5); // the AI row
+  });
+
+  it("isAiRow/isOpenRow agree with the wrap-around walk", () => {
+    const m = rowModel({ fileCount: 3 });
+    expect(isOpenRow(0, m)).toBe(false);
+    expect(isAiRow(3, m)).toBe(true);
+    expect(isAiRow(0, m)).toBe(false);
+  });
+
+  it("a genuinely empty model (no open row, no files, no AI row) has no row to move to or land on", () => {
+    // Reachable when a path-shaped query does not resolve (addr.status ===
+    // "missing"): ranking runs and comes back with zero hits, but the AI row
+    // stays suppressed because the query is still shaped like a path
+    // (rowModel.aiRow requires `address === null`). `stepHighlight` used to
+    // return 0 here — a row index into a list that has no row 0 — and
+    // `activeRow` used to clamp that into -1 (`Math.min(0, -1)`), which
+    // `activateRow` then dereferenced as `hits[-1]`.
+    const m = rowModel({ openRow: false, fileCount: 0, aiRow: false });
+    expect(stepHighlight(null, m, 1)).toBeNull();
+    expect(stepHighlight(null, m, -1)).toBeNull();
+    expect(stepHighlight(0, m, 1)).toBeNull();
+    expect(activeRow(null, m, true)).toBeNull();
+    expect(activeRow(null, m, false)).toBeNull();
+    expect(activeRow(0, m, true)).toBeNull();
+  });
+});
+
+describe("keyboard rows — WITH an open row (a resolving path address)", () => {
+  // An open row implies zero file rows and no AI row (FilesHome skips the
+  // rank request and suppresses the AI row entirely once an address
+  // resolves), so a RowModel with openRow:true is a single-row list in
+  // practice — but the functions here take whatever shape they are given.
+  it("is the only content, pre-selected unconditionally — no `settled` needed", () => {
+    const m = rowModel({ openRow: true, fileCount: 0, aiRow: false });
+    expect(activeRow(null, m, false)).toBe(0);
+    expect(activeRow(null, m, true)).toBe(0);
+  });
+
+  it("wraps as a one-row list", () => {
+    const m = rowModel({ openRow: true, fileCount: 0, aiRow: false });
+    expect(stepHighlight(null, m, 1)).toBe(0);
+    expect(stepHighlight(0, m, 1)).toBe(0);
+    expect(stepHighlight(null, m, -1)).toBe(0);
+  });
+
+  it("isOpenRow identifies row 0, and it is never also the AI row", () => {
+    const m = rowModel({ openRow: true, fileCount: 0, aiRow: false });
+    expect(isOpenRow(0, m)).toBe(true);
+    expect(isAiRow(0, m)).toBe(false);
+  });
+
+  it("submitRow commits the open row on a bare Enter", () => {
+    const m = rowModel({ openRow: true, fileCount: 0, aiRow: false });
+    expect(submitRow(null, m, false)).toBe(0);
+  });
+});
+
+describe("submitRow", () => {
+  it("opens the top hit when Enter is pressed with no highlight", () => {
+    // Previously a silent no-op: every other search box in the app commits on
+    // Enter, and the top hit is what the list is offering.
+    expect(submitRow(null, rowModel({ fileCount: 5 }), true)).toBe(0);
+  });
+
+  it("commits NOTHING while the rows on screen answer the previous query", () => {
+    // The list is never blanked, so hits are on screen for a query that has
+    // not been answered yet. Enter used to open the top one — type "read",
+    // then "readme", press Enter before the answer lands, and the app
+    // navigated to "read"'s best match. Opening a file is now gated on
+    // `settled` exactly as the AI row already was.
+    expect(submitRow(null, rowModel({ fileCount: 5 }), false)).toBeNull();
+    // An explicit arrow-key choice still commits: the user pointed at a row
+    // they can see.
+    expect(submitRow(2, rowModel({ fileCount: 5 }), false)).toBe(2);
+  });
+
+  it("runs the AI row only once ranking has settled on zero hits", () => {
+    expect(submitRow(null, rowModel({ fileCount: 0 }), true)).toBe(0); // fileCount 0 → the AI row
+    // Mid-scan: nothing to commit yet, and the AI row must not be armed.
+    expect(submitRow(null, rowModel({ fileCount: 0 }), false)).toBeNull();
+  });
+
+  it("honours an explicit highlight, including the AI row", () => {
+    expect(submitRow(2, rowModel({ fileCount: 5 }), true)).toBe(2);
+    expect(submitRow(5, rowModel({ fileCount: 5 }), true)).toBe(5);
+  });
+});
+
+describe("rankingSettled", () => {
+  it("is false while a request for this query is in flight", () => {
+    expect(rankingSettled(null, "read", true, false)).toBe(false);
+    expect(rankingSettled(answer({ query: "read" }), "read", true, false)).toBe(false);
+  });
+
+  it("is false while the rows on screen answer the PREVIOUS query", () => {
+    // The list is deliberately never blanked, so hits being present is not
+    // evidence that this query has been answered — and pre-arming the AI row
+    // here would spend a model call on a query that was about to answer itself.
+    expect(rankingSettled(answer({ query: "rea" }), "read", false, false)).toBe(false);
+    expect(rankingSettled(null, "read", false, false)).toBe(false);
+  });
+
+  it("is false while a request is in flight even after an EARLIER failure", () => {
+    // `failed` must not outrank `pending`. It did, and the consequence was a
+    // paid model call: after one transient failure every later keystroke read
+    // as settled while its request was still out, so the AI row pre-selected
+    // itself and Enter committed it for a query that was about to answer.
+    expect(rankingSettled(null, "read", true, true)).toBe(false);
+  });
+
+  it("is true for an answer to THIS query, and for one that will never come", () => {
+    expect(rankingSettled(answer({ query: "read" }), "read", false, false)).toBe(true);
+    // A failed request is settled: nothing further is coming, and the AI row is
+    // the only content left — so Enter must reach it.
+    expect(rankingSettled(null, "read", false, true)).toBe(true);
+  });
+});
+
+describe("narrowAnswer", () => {
+  function homeHit(rel: string, over: Partial<HomeHit> = {}): HomeHit {
+    return { path: `${HOME}/${rel}`, rel, is_dir: false, size: 1, mtime: 1, ...over };
+  }
+
+  it("keeps only the held hits that still match an EXTENDED query, no round trip", () => {
+    const held = answer({
+      query: "read",
+      hits: [homeHit("README.md"), homeHit("docs/readme.txt"), homeHit("other.txt")],
+    });
+    const narrowed = narrowAnswer(held, "readme");
+    expect(narrowed.map((h) => h.rel)).toEqual(["README.md", "docs/readme.txt"]);
+  });
+
+  it("recomputes positions for the NEW query, not the one the hits were fetched for", () => {
+    const held = answer({ query: "read", hits: [homeHit("README.md")] });
+    const [hit] = narrowAnswer(held, "readme");
+    expect(hit.positions!.map((i) => "README.md"[i]).join("").toLowerCase()).toBe("readme");
+  });
+
+  it("empties out for a query that is not an extension — a paste, not a keystroke", () => {
+    const held = answer({ query: "read", hits: [homeHit("README.md"), homeHit("other.txt")] });
+    expect(narrowAnswer(held, "zzz-nope")).toEqual([]);
+  });
+
+  it("never re-ranks or adds rows — it is a subset of what was held, in the same order", () => {
+    const held = answer({
+      query: "e",
+      hits: [homeHit("code-file.txt"), homeHit("readme.md"), homeHit("one-file.txt")],
+    });
+    const narrowed = narrowAnswer(held, "e-file");
+    // "readme.md" has no "e-file" subsequence and is dropped, but the
+    // surviving order is the HELD order, not a re-sort.
+    expect(narrowed.map((h) => h.rel)).toEqual(["code-file.txt", "one-file.txt"]);
+  });
+
+  it("drops a held hit that is only a SUBSEQUENCE match, not a substring one (D708 correction)", () => {
+    // The index-backed server is substring-only (D708) — `search_ranked`'s
+    // `_rank_sql` filters on `lower(rel) LIKE '%q%'`, nothing weaker. Narrowing
+    // with `fuzzyMatch` (subsequence-accepting) could KEEP a row the server
+    // would never return: "rdme" is a valid subsequence of "readme.md"
+    // (r-e-a-d-m-e, skipping the "e" and "a") but never a substring of it, so
+    // a held answer for "readme" narrowed to "rdme" must drop it, matching
+    // what a fresh /api/index/rank request for "rdme" would answer.
+    const held = answer({ query: "readme", hits: [homeHit("readme.md")] });
+    expect(narrowAnswer(held, "rdme")).toEqual([]);
+  });
+
+  it("never narrows a glob-mode held answer locally when the new query types a literal '*'", () => {
+    // Extending a glob pattern by a keystroke does not narrow the same way
+    // extending a substring does (one more "*" can match an entirely
+    // different set of paths), so substringMatch is not a safe stand-in and
+    // this bails to an empty result rather than risk dropping a hit a fresh
+    // server round trip would still return.
+    const held = answer({
+      query: "*.csv",
+      mode: "glob",
+      hits: [homeHit("report.csv"), homeHit("draft.csv")],
+    });
+    expect(narrowAnswer(held, "*.csv?")).toEqual([]);
+  });
+
+  it("never narrows a glob-mode held answer locally when the new query is path-shaped", () => {
+    // A "/"-containing query walks resolve_query's base off `q` itself —
+    // reproducing that walk locally is out of scope, so this bails too.
+    const held = answer({
+      query: "hello world",
+      mode: "glob",
+      hits: [homeHit("hello-world.txt")],
+    });
+    expect(narrowAnswer(held, "hello/world")).toEqual([]);
+  });
+
+  it("narrows a whitespace-derived glob-mode held answer locally, re-matching the rebuilt pattern (finding 5)", () => {
+    // No literal "*" and no "/" — expand_whitespace_query's own transform
+    // (trim, collapse whitespace to "*", wrap the segment) is fully
+    // reproducible client-side, so typing on inside a multi-word query no
+    // longer blanks the list between keystrokes.
+    const held = answer({
+      query: "hello wor",
+      mode: "glob",
+      hits: [
+        homeHit("hello-world.txt"),
+        homeHit("hello_world.py"),
+        homeHit("world-hello.txt"),
+      ],
+    });
+    const narrowed = narrowAnswer(held, "hello world");
+    expect(narrowed.map((h) => h.rel)).toEqual(["hello-world.txt", "hello_world.py"]);
+  });
+
+  it("recomputes positions for the rebuilt glob pattern, not the held query's", () => {
+    const held = answer({
+      query: "hello wor",
+      mode: "glob",
+      hits: [homeHit("hello-world.txt")],
+    });
+    const [hit] = narrowAnswer(held, "hello world");
+    expect(hit.positions!.map((i) => "hello-world.txt"[i]).join("").toLowerCase()).toBe(
+      "helloworld",
+    );
+  });
+
+  it("empties a whitespace-derived glob-mode held answer once the query stops being multi-word", () => {
+    // Trimmed down to a single word, the server would resolve this back to
+    // SUBSTRING mode, not glob — the rebuilt pattern above does not apply.
+    const held = answer({
+      query: "hello wor",
+      mode: "glob",
+      hits: [homeHit("hello-world.txt")],
+    });
+    expect(narrowAnswer(held, "hello")).toEqual([]);
+  });
+
+  it("does not blank on the keystroke that types the first space (substring -> glob transition)", () => {
+    // `behind` is true for "report" -> "report " (D-new: a trailing space is
+    // now meaningful, not trimmed), and the HELD answer's mode is still
+    // "substring" (that is what the server answered for "report"). Without
+    // special-casing this transition, `narrowAnswer` ran the substring
+    // branch against a query that now HAS a trailing space, matched
+    // nothing, and blanked the list for a full debounce + round trip —
+    // exactly the failure mode `narrowAnswer`'s own doc comment says it
+    // exists to prevent (code review finding).
+    const held = answer({
+      query: "report",
+      mode: "substring",
+      hits: [homeHit("report.csv"), homeHit("other.txt")],
+    });
+    const narrowed = narrowAnswer(held, "report ");
+    expect(narrowed.map((h) => h.rel)).toEqual(["report.csv"]);
+  });
+
+  it("narrows against the trailing segment for a query that walked past the box root", () => {
+    const held = answer({
+      query: "/tmp/rep",
+      base: "/tmp",
+      hits: [homeHit("report.csv", { path: "/tmp/report.csv" }), homeHit("other.txt", { path: "/tmp/other.txt" })],
+    });
+    const narrowed = narrowAnswer(held, "/tmp/repo");
+    expect(narrowed.map((h) => h.rel)).toEqual(["report.csv"]);
+  });
+});
+
+describe("redirectsToSearch", () => {
+  const key = (over: Partial<Parameters<typeof redirectsToSearch>[0]> = {}) => ({
+    key: "a",
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    tagName: "DIV",
+    isContentEditable: false,
+    isSearchInput: false,
+    ...over,
+  });
+
+  it("claims a printable keystroke aimed at the page", () => {
+    expect(redirectsToSearch(key())).toBe(true);
+    expect(redirectsToSearch(key({ key: "7" }))).toBe(true);
+    expect(redirectsToSearch(key({ key: "~" }))).toBe(true);
+    expect(redirectsToSearch(key({ key: "/" }))).toBe(true);
+    // Shift is part of typing, not a command.
+    expect(redirectsToSearch(key({ key: "A" }))).toBe(true);
+    // Correcting a query has to reach the box too.
+    expect(redirectsToSearch(key({ key: "Backspace" }))).toBe(true);
+  });
+
+  it("leaves shortcuts alone", () => {
+    expect(redirectsToSearch(key({ ctrlKey: true }))).toBe(false);
+    expect(redirectsToSearch(key({ metaKey: true }))).toBe(false);
+    expect(redirectsToSearch(key({ altKey: true }))).toBe(false);
+  });
+
+  it("leaves navigation and other non-printable keys alone", () => {
+    for (const k of ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp", "F5", "Shift"])
+      expect(redirectsToSearch(key({ key: k }))).toBe(false);
+  });
+
+  it("never steals from another field", () => {
+    expect(redirectsToSearch(key({ tagName: "INPUT" }))).toBe(false);
+    expect(redirectsToSearch(key({ tagName: "TEXTAREA" }))).toBe(false);
+    expect(redirectsToSearch(key({ tagName: "SELECT" }))).toBe(false);
+    expect(redirectsToSearch(key({ isContentEditable: true }))).toBe(false);
+  });
+
+  it("is a no-op when the search box already has the caret", () => {
+    // Not merely redundant: focusing on every keystroke would reset the caret
+    // to the end, so editing the middle of a query would be impossible.
+    expect(redirectsToSearch(key({ tagName: "INPUT", isSearchInput: true }))).toBe(false);
+  });
+});
+
+describe("aiSearchUsable", () => {
+  it("offers AI search before the poll has answered", () => {
+    // `null` is "no status yet"; hiding the row for the first second of every
+    // page load would be its own wrong answer.
+    expect(aiSearchUsable(null)).toBe(true);
+  });
+
+  it("withholds the offer with no index built", () => {
+    // AI search executes its spec against the same file index
+    // (routers/search._search_index) — with nothing built it raises
+    // IndexUnavailable, so offering the row is a click into a wall.
+    expect(aiSearchUsable({ has_index: false })).toBe(false);
+  });
+
+  it("offers it once the index exists", () => {
+    expect(aiSearchUsable({ has_index: true })).toBe(true);
+  });
+});
+
+describe("indexGap", () => {
+  it("separates a scan that is running from one that is not", () => {
+    // The distinction the page did not make, and the whole of the
+    // sit-on-"indexing"-for-20-minutes report: `uncovered` with nothing
+    // running is not a build in progress, it is a build that has to be asked
+    // for.
+    expect(indexGap("scanning", true)).toBe("scanning");
+    expect(indexGap("uncovered", false)).toBe("buildable");
+  });
+
+  it("takes the live poll's word for a scan the answer predates", () => {
+    // `reason` was fixed when the answer was ranked, so the scan the user
+    // just started is only visible in the status poll until the next query.
+    expect(indexGap("uncovered", true)).toBe("scanning");
+  });
+
+  it("demotes a stale `scanning` once the poll says nothing is running", () => {
+    // The other way into the same wedge: the rank landed while the startup
+    // scan was alive, then that worker was killed. Status goes idle,
+    // `last_completed_at` never moves so nothing re-ranks, and a `reason`
+    // frozen at "scanning" would keep promising a build (with a frozen file
+    // count for evidence) until the user gave up.
+    expect(indexGap("scanning", false)).toBe("buildable");
+  });
+
+  it("trusts `reason` while the poll has not answered", () => {
+    // `null` is "no status yet", not "idle" — demoting on it would flash
+    // "your files aren't indexed" over a scan that is genuinely running, on
+    // every first paint.
+    expect(indexGap("scanning", null)).toBe("scanning");
+    expect(indexGap("uncovered", null)).toBe("buildable");
+  });
+
+  it("never claims a scan while indexing is off", () => {
+    // Nothing can be in flight with the pref off — every trigger is gated and
+    // a running scan is cancelled at toggle-off — so a lagging `scanning`
+    // from the poll must not out-vote it, or the note promises a build that
+    // cannot start.
+    expect(indexGap("disabled", true)).toBe("disabled");
+    expect(indexGap("disabled", false)).toBe("disabled");
+  });
+
+  it("never claims a scan without Full Disk Access either", () => {
+    // Every trigger is gated on the grant (shell/index_gate.py), and the
+    // grant applies to the next launch, so nothing this process reports as
+    // scanning can be a scan that finishes.
+    expect(indexGap("fda", true)).toBe("fda");
+    expect(indexGap("fda", false)).toBe("fda");
+    expect(indexGap("fda", null)).toBe("fda");
+  });
+
+  it("calls the permanently uncoverable reasons what they are", () => {
+    // Offering "index it now" for these would be a button that cannot work.
+    for (const r of ["mount", "package", "ignored"] as const)
+      expect(indexGap(r, false)).toBe("unavailable");
+  });
+
+  it("treats an unnamed miss as buildable", () => {
+    // `""` only reaches here if a not-covered answer arrived without a
+    // reason; a scan is the one thing that could fix it, so offer that
+    // rather than a dead end.
+    expect(indexGap("", false)).toBe("buildable");
+  });
+});
+
+describe("scanStarting", () => {
+  const at = 1_000_000;
+  const pending = { at, completedAt: 500 };
+
+  it("is false with nothing requested", () => {
+    expect(scanStarting(null, false, 500, at)).toBe(false);
+  });
+
+  it("holds the claim across the gap between the POST and the poll", () => {
+    // The window the button was previously re-offered in: the request has
+    // returned, the idle poll is up to ten seconds from its next look, and
+    // status still says idle with the same completion stamp.
+    expect(scanStarting(pending, false, 500, at + 900)).toBe(true);
+    // No status at all yet counts the same way.
+    expect(scanStarting(pending, null, null, at + 900)).toBe(true);
+  });
+
+  it("hands off as soon as the poll sees the run", () => {
+    // From here `indexGap` says "scanning" and the note has a live file count
+    // to show, which is a better claim than this one.
+    expect(scanStarting(pending, true, 500, at + 900)).toBe(false);
+  });
+
+  it("hands off to a scan that finished before the poll looked", () => {
+    // A small root can be scanned and done inside one poll interval, so
+    // "starting" must also end on a MOVED completion stamp — otherwise a
+    // finished scan keeps the button disabled.
+    expect(scanStarting(pending, false, 900, at + 900)).toBe(false);
+  });
+
+  it("gives up rather than claim a start forever", () => {
+    // A scan that died between two polls without writing a completion stamp
+    // leaves status idle and the stamp frozen — indistinguishable, from here,
+    // from a request the poll simply has not caught up with. After the grace
+    // window the button comes back, because clicking again is the one thing
+    // that can help and staring at "Starting the scan…" is the bug this file
+    // exists to fix.
+    expect(scanStarting(pending, false, 500, at + SCAN_START_GRACE_MS)).toBe(false);
+  });
+});

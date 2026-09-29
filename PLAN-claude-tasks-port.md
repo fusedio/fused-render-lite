@@ -51,8 +51,19 @@ What is in:
 
 Decisions taken (defaults, revisit if wrong): D-A extract dir, no relocate
 yet; D-B separate state under `~/.fused-render-app` (task numbers etc.);
-D-C legacy `template.html` as the basic chat UI; D-D unchanged from D890
-(scheduler-backed create, `pending:` keys exist).
+D-C — SUPERSEDED the same evening by the owner ("make sure you have copied
+everything 1:1"): option (a) after all. `frontend/` is fused-render's
+frontend copied verbatim, built by bun (`scripts/build_shell.sh`, called
+from `dev.sh` and `build_dmg.sh`; `oven-sh/setup-bun` in CI) into the
+gitignored `static/shell-dist/` (a hatch `artifacts` entry ships it in the
+wheel). Render App adds only `frontend/lite.html`, `src/lite.tsx`,
+`src/LiteApp.tsx` (routes `/tasks` → `Scheduled`, `/chat` and
+`/explorer/view/<path>` → `ChatMount`) and patches `vite.config.js`. The
+server gained `/api/config`, `/api/current-apps`, the stat `templates`
+entry and the pref switches (`chat.native`, `task_peek.enabled`) the React
+code reads. The hand-written `tasks.html` / `chat.html` are gone; the
+legacy `template.html` stays only as the flag-off iframe. D-D unchanged
+from D890 (scheduler-backed create, `pending:` keys exist).
 
 Re-sync after fused-render's `fused-tasks-api` merge:
 `python scripts/sync_claude_tasks.py <fused-render checkout> --runtime`, then

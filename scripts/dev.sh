@@ -120,6 +120,16 @@ fi
   exit 1
 }
 
+# ------------------------------------------------------------ react shell
+# The Tasks page and the Claude chat are fused-render's React shell
+# (frontend/, built into fused_render_app/static/shell-dist/). Built once
+# when missing; `cd frontend && bun run build` (or `bun run watch`) after
+# editing it — the server serves the files per request, no restart needed.
+if [[ ! -f "$REPO_ROOT/fused_render_app/static/shell-dist/lite.html" ]]; then
+  echo "==> building the React shell (frontend/ -> static/shell-dist/)"
+  bash "$REPO_ROOT/scripts/build_shell.sh" || echo "==> WARNING: shell build failed; /tasks and /chat answer 503"
+fi
+
 # ------------------------------------------------------------------- reload
 RELOAD=1
 [[ -n "${FUSED_RENDER_NO_RELOAD:-}" ]] && RELOAD=0

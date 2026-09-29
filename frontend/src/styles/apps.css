@@ -1,0 +1,415 @@
+/* -- Apps hub (/apps) -------------------------------------------------------
+   Chrome-free page like Home: scrolling column, centered inner. The cards are
+   .app-pcard, defined below and shared with Home's grid; the page adds its own
+   header, search, and tag chips. All colors via tokens so both themes hold. */
+.apps-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.apps-inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 36px 28px 72px;
+}
+
+/* Facet selector at the left edge (its own `margin-right: auto`), then the
+   chips and the search box together at the right. Previously the search alone
+   sat right (`margin-left: auto` on it) with the chips stranded next to the
+   selector on the left, so the two halves of one filter row read as unrelated
+   clusters. `flex-end` here is what gathers chips + search into a single group
+   and puts every wrapped line against the same edge — an auto margin on one
+   child cannot do that. */
+.apps-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+/* Search is the last item in the toolbar's right-aligned group (see
+   .apps-toolbar). It no longer carries `margin-left: auto`: that pinned the
+   search alone to the far edge and left the facet selector and chips stranded
+   on the left with a gap between. The whole row is justified to the end
+   instead, so `flex-grow: 0` here — the box keeps its own width rather than
+   stretching to swallow the space the auto margin used to hold. */
+.apps-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 240px;
+  max-width: 340px;
+  padding: 0 12px;
+  height: 34px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-muted);
+}
+
+.apps-search:focus-within {
+  border-color: color-mix(in srgb, var(--fg-muted) 45%, var(--border));
+}
+
+.apps-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  font-size: 13px;
+  color: var(--fg);
+  background: none;
+  border: none;
+  outline: none;
+}
+
+.apps-search input::placeholder {
+  color: var(--fg-muted);
+}
+
+/* Chips wrap within their own box, so they need the same end-justification as
+   the toolbar row: without it a second line of chips would start at this box's
+   left edge and break the right margin the row is aligned on. */
+.apps-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.apps-tag-chip {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: var(--fg-muted);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.apps-tag-chip:hover {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--fg-muted) 35%, var(--border));
+}
+
+/* Selected chip: a GREY plate, not a white one. --fg is the page's ink, so a
+   filled --fg pill is the brightest thing on the toolbar — the filter row was
+   out-shouting the app cards it filters. A step off --fg keeps the "one of
+   these is on" read (still a filled pill against the unfilled ones, still well
+   clear of :hover, which only moves the border) at the weight of chrome.
+
+   The step is a MIX of --fg toward --bg rather than --fg-muted, because the
+   plate carries --bg as its label: --fg-muted is only ~4:1 off --bg, which at
+   this 12px mono size read as a chip with the text sunk into it. Mixing keeps
+   the label's contrast where it needs to be in BOTH themes, which one flat
+   grey cannot — the same "lighter" that fixes dark would push the light plate
+   toward white and swallow its white text, whereas this expression moves each
+   theme's plate away from that theme's own ground.
+
+   Shared with .apps-filter-mode-btn.is-active below so the row's two
+   selections match. */
+.apps-tag-chip.is-active {
+  color: var(--bg);
+  background: color-mix(in srgb, var(--fg) 78%, var(--bg));
+  border-color: color-mix(in srgb, var(--fg) 78%, var(--bg));
+}
+
+.apps-count {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* The showcase clone refused (no usable git, no network). A notice, not the
+   page's error banner: the local apps in the grid below loaded fine, so this
+   states what is missing without claiming the page failed. */
+.apps-showcase-note {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Filter facet selector (Category | Folders): a small segmented control that
+   decides which chip set shows. Neutral fill on the active segment (accent
+   stays reserved for focus/selection).
+
+   `margin-right: auto` holds it at the row's LEFT edge while the toolbar's
+   `justify-content: flex-end` keeps the chips and search at the right — the
+   selector picks WHICH filters exist, so it reads as the row's label rather
+   than as the first of the things it governs. */
+.apps-filter-mode {
+  display: inline-flex;
+  margin-right: auto;
+  padding: 2px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.apps-filter-mode-btn {
+  padding: 4px 12px;
+  font-size: 12.5px;
+  color: var(--fg-muted);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.apps-filter-mode-btn:hover {
+  color: var(--fg);
+}
+
+/* Grey fill, matching the selected chip above — see the note there. */
+.apps-filter-mode-btn.is-active {
+  color: var(--bg);
+  background: color-mix(in srgb, var(--fg) 78%, var(--bg));
+}
+
+/* -- Preview cards ------------------------------------------------------------
+   Big cards whose thumbnail IS the app: entry HTML in a lazily-loaded iframe
+   rendered at 4x the box and scaled down (see AppPreviewCard.tsx), with a
+   transparent shield on top so the preview never swallows a click. Grid
+   auto-fills; each card is roughly 340px wide with a 16:10 thumbnail. */
+.apps-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+/* An <a>, not a button: middle-click / Cmd-click / "Open in new tab" have to
+   work on a card, and the open rule itself lives in appEntry. */
+.app-pcard {
+  /* Positioning context for the hover share chip, which lives OUTSIDE the
+     aria-hidden thumb (assistive tech skips that subtree) but paints over it. */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: var(--fg);
+  text-decoration: none;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    box-shadow 0.12s ease,
+    transform 0.12s ease;
+}
+
+.app-pcard:hover {
+  border-color: color-mix(in srgb, var(--fg-muted) 40%, var(--border));
+  box-shadow: 0 4px 18px var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.app-pcard-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 10;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Shimmer while the thumb has something coming (an undecoded still, or a live
+   iframe not yet painted) — see the condition in AppPreviewCard.tsx. Same
+   `@keyframes skel-shimmer` as `.skel-bar` (explorer.css) — keyframe names are
+   global, so referencing it by name carries no cross-file dependency. Only
+   the gradient/size PROPERTIES are restated here rather than factored into a
+   shared class, because BOTH selectors below are compounded onto a box class
+   that already declares its own `background` (`.app-pcard-thumb`) — a shared
+   single-class rule would tie that class's specificity and the winner would
+   come down to stylesheet order. `.app-pcard-thumb.home-skel-body` is the
+   OTHER consumer: Home's Fused-Apps skeleton row (Home.tsx SkeletonCard)
+   reuses `.app-pcard-thumb` itself as its thumb well, not a separate overlay
+   like `.app-pcard-skel` — it has nothing layered on top of it, so it only
+   needs the background, not the `position`/`pointer-events` below. */
+.app-pcard-skel,
+.app-pcard-thumb.home-skel-body {
+  background: linear-gradient(90deg, var(--bg-alt) 25%, var(--border) 50%, var(--bg-alt) 75%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.2s ease-in-out infinite;
+}
+
+.app-pcard-skel {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.app-pcard-thumb iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border: none;
+  background: var(--bg-panel);
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+/* The authored `preview.png`, in the same 16/10 box the live iframe fills.
+   `cover` rather than `contain`: a thumbnail crops, it does not letterbox — a
+   screenshot at the wrong aspect ratio should still fill the card. Community
+   catalog cards reuse it for their cached preview.png. */
+.app-pcard-shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--bg-panel);
+  /* Hover live preview: the fade-OUT transition rides in AppPreviewCard's
+     inline style together with the opacity, so hover-end (which removes the
+     whole style) restores the still instantly — a transition here would fade
+     it back in over the just-unmounted iframe's blank thumb. */
+}
+
+.app-pcard-shield {
+  position: absolute;
+  inset: 0;
+}
+
+/* Hover-revealed Share button (SPEC §43 AF-4, D391): hidden until the CARD
+   is hovered so the grid stays quiet, revealed as a small bordered chip in
+   the thumb's bottom-right corner. The one chip on the card — the sheet
+   behind it holds both the public link and the .fused download. A sibling of
+   the (aria-hidden) thumb, positioned against the CARD, so assistive tech
+   announces it; z-index lifts it over the thumb and its pointer shield.
+   Keyboard users get it without hover via :focus-visible. */
+.app-pcard-share {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.app-pcard:hover .app-pcard-share,
+.app-pcard-share:focus-visible {
+  opacity: 1;
+}
+.app-pcard-share:hover {
+  color: var(--fg);
+  box-shadow: 0 2px 8px var(--shadow-sm);
+}
+/* A ROW: the app's mark as a column of its own, then the two text lines
+   stacked beside it (`.app-pcard-lines`). The head's height is still the
+   lines' — the icon is sized to span them, never to set the height — so a
+   card is as tall as it was before icons and Home's skeleton, which reuses
+   these classes to track that height, stays honest (Home.tsx SkeletonCard). */
+.app-pcard-body {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px 9px;
+  min-width: 0;
+}
+
+.app-pcard-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* The load-bearing one: a flex item's automatic minimum size is its content,
+     so without this a long app name refuses to shrink and pushes the mark out
+     of the card instead of ellipsising (the title's own overflow rules only
+     get to act once this box can be narrower than its text). */
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 32px, deliberately under the two lines it spans: the name's line box is
+   ~16px (13.5px at the default `normal` line-height) and the meta row's about
+   the same, plus the 4px gap — ~36px, so the mark is the head's tallest thing
+   in neither theme nor font. That's what keeps a card the height it was before
+   icons, and Home's skeleton (which reuses these classes to track that height)
+   honest. */
+.app-pcard-icon,
+.app-pcard-star,
+.app-pcard-body .app-pcard-icon-skel {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+}
+
+/* Home's skeleton square, in the mark's slot (Home.tsx SkeletonCard). Selector
+   compounded with the body so it beats `.skel-bar`'s own 10px height whatever
+   order the two stylesheets land in. */
+.app-pcard-body .app-pcard-icon-skel {
+  border-radius: 8px;
+}
+
+/* An author's svg can declare any intrinsic size; contain keeps a wide or
+   tall one inside the square instead of stretching it. */
+.app-pcard-icon {
+  object-fit: contain;
+}
+
+/* The icon.png fallback: fitted to the slot's rounded square (the skeleton's
+   8px), cover so it fills it — an svg owns its plate, a raster gets one here. */
+.app-pcard-icon.is-raster {
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+/* The generic mark for an app with no icon.svg: muted, so it reads as the
+   slot being filled rather than as a badge on the name, and inset inside that
+   slot — an authored icon is a whole tile of artwork, a bare sparkle drawn to
+   the same 32px would shout louder than the name next to it. */
+.app-pcard-star {
+  box-sizing: border-box;
+  padding: 7px;
+  color: var(--fg-muted);
+}
+
+.app-pcard-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-pcard-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.app-pcard-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-pcard-ago {
+  flex: 0 0 auto;
+  margin-left: auto;
+}

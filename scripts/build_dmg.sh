@@ -102,6 +102,11 @@ if [[ ! -x "$BUILD_VENV/bin/python" ]]; then
   "$FRAMEWORK_PYTHON" -m venv "$BUILD_VENV"
 fi
 "$BUILD_VENV/bin/pip" install --quiet --upgrade pip
+# The React shell (Tasks page + Claude chat) is built into static/shell-dist/
+# BEFORE the wheel: hatch ships it as a declared artifact (pyproject) and
+# py2app copies static/ whole. Needs bun on the build machine.
+echo "==> building the React shell"
+bash "$REPO_ROOT/scripts/build_shell.sh"
 echo "==> building wheel"
 rm -f "$DIST_DIR"/*.whl
 "$BUILD_VENV/bin/pip" install --quiet --upgrade build

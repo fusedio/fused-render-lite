@@ -1,0 +1,472 @@
+// Shared modal chassis for every dialog in the app (SPEC: modal/form design
+// system). Renders overlay > dialog with the a11y contract every modal needs:
+//   • role="dialog" + aria-modal + aria-labelledby → the h2 (stable useId)
+//   • focus trap: Tab/Shift+Tab cycle within the dialog; on mount focus
+//     `initialFocus` (or the first focusable), on unmount restore the element
+//     that was focused when the modal opened.
+//   • Esc / backdrop / ✕ close, gated by `busy`; ✕ disabled while busy.
+//   • optional `dirty` guard: the first close attempt arms the ✕ and shows an
+//     inline "close again to discard" hint; the NEXT close attempt discards,
+//     however long the user takes over it. Arming is cleared by going back to
+//     the form (typing/clicking inside the dialog), not by a clock — see
+//     `attemptClose` and the disarm effect below for why.
+//     BOTH halves matter — the hint says it in words, the button says it where
+//     the press happened. See the ✕ below.
+// Chrome reuses the existing .deploy-* CSS (the body carries both `modal-body`
+// and `deploy-body` so descendant skins that key off .deploy-body keep working,
+// e.g. RowEditorModal).
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
+import { useDeferredClose } from "@platform/lib/hooks";
+import { isTopmost, popModal, pushModal } from "./esc-stack";
+import { OVERLAY_EXIT_MS } from "@platform/lib/exit-animation";
+import {
+  CLOSE_CONTROL_SELECTOR,
+  backdropPressCloses,
+  decideClose,
+  isDisarmingInteraction,
+} from "./dirty-guard";
+
+// `iframe` is in the list because a framed document IS a focusable stop — the
+// Tasks page's card popup is a chat in a frame, and a trap that skipped it would
+// cycle the head's two buttons forever while the thing the dialog exists for
+// sat one Tab away and unreachable (Bugbot, #1009).
+const FOCUSABLE =
+  'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),iframe,[tabindex]:not([tabindex="-1"])';
+
+export interface ModalProps {
+  title: ReactNode;
+  /**
+   * The dialog's ACCESSIBLE NAME, when it is not the visible title.
+   *
+   * The visible bar is often the short form — a heading has the surrounding
+   * page for context, while a spoken dialog name has nothing. T:4405 is the
+   * case this exists for: the record's bar says "What was sent" and its
+   * `aria-label` says "What was sent to the agent", which is the half that says
+   * WHOSE record it is.
+   *
+   * OPTIONAL AND OFF BY DEFAULT: with it absent the dialog keeps
+   * `aria-labelledby` pointing at the `h2`, so every existing caller — and the
+   * whole flag-off shell — renders byte-identical markup. Only a caller that
+   * passes it gets `aria-label` instead, which is the correct precedence (an
+   * explicit `aria-label` wins over `aria-labelledby`, so setting both would
+   * leave the weaker one dead in the tree).
+   */
+  ariaLabel?: string;
+  /**
+   * ONE MARK BESIDE THE HEADING, on the same row and at the heading's left —
+   * the New task card's `from TASK-003` chip (NewJobModal, design.md B).
+   *
+   * It looks like part of the title and it is not allowed to BE part of one: the
+   * `h2` is what `aria-labelledby` points at, so a control rendered inside it
+   * would make the dialog's own name "New task from TASK-003" and would put an
+   * interactive element inside a heading — a thing a screen reader's heading
+   * walk reads out and cannot press.
+   *
+   * OPTIONAL AND OFF BY DEFAULT, like `ariaLabel` above: with it absent the head
+   * renders the bare `h2` it always has, so every existing caller's markup is
+   * byte-identical. A caller that passes it gets the two wrapped in
+   * `.modal-head-title`, which is the flex row that keeps the old placement.
+   *
+   * NOT `headActions`, which is the other end of the same row: those sit against
+   * the ✕ (`margin-left: auto`) because they are controls that act on the
+   * dialog. This is a caption on the title.
+   */
+  titleAside?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  // When true, Esc / backdrop / ✕ do NOT close (an action is running that must
+  // not be abandoned). A modal whose action continues server-side regardless of
+  // whether the dialog is open can instead pass false and stay closeable (#12).
+  busy?: boolean;
+  width?: number | string;
+  footer?: ReactNode;
+  initialFocus?: RefObject<HTMLElement | null>;
+  // RE-RUN `initialFocus` WHEN THE REF FILLS LATE. The mount effect below reads
+  // `initialFocus.current` once, during the dialog's own commit — which is the
+  // right moment for a render-time ref (an iframe element) and too early for one
+  // an effect inside a LAZY child fills (TaskPeek's native chat: the composer's
+  // textarea does not exist until the chat chunk resolves, so focus fell back to
+  // the head's ✕). A caller that knows when its ref is ready bumps this, and the
+  // focus is taken then — but only if nothing in the body has the caret yet, so
+  // a reader who has already clicked or typed somewhere is never yanked away.
+  focusSignal?: number;
+  // When dirty, the first close attempt is intercepted with an inline hint and
+  // the next one actually closes (RowEditorModal). Arming is cleared by
+  // interacting with the form again, not by a timeout.
+  dirty?: boolean;
+  // Extra class on the dialog for per-modal width/padding tweaks
+  // (e.g. "templates-editor", "templates-import").
+  dialogClassName?: string;
+  // Tooltip for the ✕ button (e.g. "the action keeps running" for a busy={false} modal).
+  closeTitle?: string;
+  // Controls that sit in the head BESIDE the ✕ — the same row, the same weight
+  // (`.deploy-close`), to its left. For a dialog whose actions are about the
+  // thing it shows rather than about the form in it (the Tasks page's card
+  // popup: open in List, open in Explorer, archive), where a footer row of
+  // buttons under a live chat read as a form's Save/Cancel.
+  headActions?: ReactNode;
+  // Drop the `deploy-body` form vocabulary from the body — its descendant
+  // `button`/`p` rules (fields.css) out-specify a component's own classes and
+  // would re-skin a surface that arrives already designed. For hosting a
+  // component lifted verbatim from a page (the /apps composer in the sidebar's
+  // New app modal, D489); every FORM modal keeps the default.
+  plainBody?: boolean;
+}
+
+export function Modal({
+  title,
+  ariaLabel,
+  titleAside,
+  onClose,
+  children,
+  busy = false,
+  width,
+  footer,
+  initialFocus,
+  focusSignal = 0,
+  dirty = false,
+  dialogClassName,
+  closeTitle,
+  plainBody = false,
+  headActions,
+}: ModalProps) {
+  const titleId = useId();
+  // Exit animation. Callers render this as `{open && <Modal …/>}`, so the modal
+  // cannot keep itself mounted — it defers the onClose that makes the caller
+  // unmount it, and paints `.closing` in the meantime (lib/exit-animation).
+  // Consequences worth knowing: the caller's state (and therefore the
+  // overlay-lock count in lib/ui-overlay, which is keyed on that state) stays
+  // held for the whole exit, and focus restore still runs on the real unmount.
+  // Only the chassis' own close paths (Esc / backdrop / ✕) animate; a caller
+  // that calls its own onClose from a footer action closes immediately.
+  const { closing, requestClose } = useDeferredClose(onClose, OVERLAY_EXIT_MS);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const restoreRef = useRef<Element | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
+
+  // Store the previously-focused element, move focus into the dialog on mount,
+  // and restore it on unmount. Callers win: an `initialFocus` ref takes
+  // precedence, and a field that already grabbed focus via `autoFocus` (React
+  // focuses those during commit, before this effect) is left alone. Otherwise
+  // prefer the first focusable in the body/footer so focus doesn't land on the
+  // header ✕.
+  useEffect(() => {
+    restoreRef.current = document.activeElement;
+    const dialog = dialogRef.current;
+    if (initialFocus?.current) {
+      initialFocus.current.focus();
+    } else if (!(dialog && dialog.contains(document.activeElement))) {
+      const focusables = Array.from(
+        dialog?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [],
+      );
+      const target =
+        dialog?.querySelector<HTMLElement>("[autofocus]") ??
+        focusables.find((el) => !el.closest(".modal-head")) ??
+        focusables[0] ??
+        dialog;
+      target?.focus();
+    }
+    return () => {
+      const el = restoreRef.current as HTMLElement | null;
+      el?.focus?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The late half of the above: `focusSignal` changed, so the ref the caller
+  // handed us may have filled since the mount effect read it. Skipped while the
+  // caret is already on something in the BODY (the reader got there first, or
+  // the ref was live at mount and this is the same element); taken when focus
+  // sits on the chassis' own head — the ✕ the fallback lands on — or nowhere.
+  useEffect(() => {
+    if (!focusSignal) return;
+    const el = initialFocus?.current;
+    if (!el) return;
+    const active = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    if (active && dialog?.contains(active) && !active.closest(".modal-head")) return;
+    el.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSignal]);
+
+  // DISARM ON RETURNING TO THE FORM — the other half of the guard.
+  //
+  // Arming used to lapse on a 2s timer, which made the guard unescapable rather
+  // than safe: a press at t=0 armed, the timer disarmed at t=2s, and a press at
+  // t=2.6s armed *again*. Anyone pressing ✕ slower than every two seconds — i.e.
+  // anyone who stops to read the hint the first press just showed them — looped
+  // forever, and a modal with no Cancel button had no way out but Save (QA,
+  // 2026-08-18: presses at 2.6/5.2/7.8/10.4s all left the dialog open).
+  //
+  // So the clock is gone. Once armed, the next ✕/Esc/backdrop press discards,
+  // however long the user takes over the decision. What ends the armed state is
+  // the user answering the question the other way: going back to the form. Any
+  // real interaction inside the dialog — typing, changing a field, pointing at
+  // something — means "no, I'm still editing", and the guard resets so the form
+  // is never left one stray click from being discarded.
+  //
+  // Deliberately NOT disarming: presses on the ✕ itself (that IS the second
+  // press), Escape (same), and Tab/Shift (navigating back to the ✕ to press it
+  // with the keyboard must not undo the arming en route).
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || !confirmClose) return;
+    const handle = (key: string | null) => (e: Event) => {
+      const target = e.target as Element | null;
+      const inClose = !!target?.closest?.(CLOSE_CONTROL_SELECTOR);
+      if (isDisarmingInteraction(key, inClose)) setConfirmClose(false);
+    };
+    const disarm = handle(null);
+    const onKey = (e: Event) => handle((e as KeyboardEvent).key)(e);
+    dialog.addEventListener("pointerdown", disarm);
+    dialog.addEventListener("input", disarm);
+    dialog.addEventListener("change", disarm);
+    dialog.addEventListener("keydown", onKey);
+    return () => {
+      dialog.removeEventListener("pointerdown", disarm);
+      dialog.removeEventListener("input", disarm);
+      dialog.removeEventListener("change", disarm);
+      dialog.removeEventListener("keydown", onKey);
+    };
+  }, [confirmClose]);
+
+  // Reclaim focus when it would escape the dialog while the modal is mounted —
+  // e.g. a focused chip-✕ removes its own chip, or a nested popover's focused
+  // element unmounts, dropping activeElement to <body>. Without this, Esc/Tab
+  // handling (attached to the dialog subtree) goes dead. Reclaim on the next
+  // frame and only when focus really ended up on body/outside — never fight a
+  // nested [role="dialog"] (a popover) that legitimately holds focus.
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const onFocusOut = (e: FocusEvent) => {
+      const next = e.relatedTarget as Node | null;
+      if (next && dialog.contains(next)) return;
+      requestAnimationFrame(() => {
+        if (!dialog.isConnected) return; // modal already unmounted
+        const active = document.activeElement;
+        if (active && active !== document.body) {
+          if (dialog.contains(active)) return;
+          // Focus moved into some other open dialog/popover — leave it alone.
+          if ((active as Element).closest?.('[role="dialog"]')) return;
+          return;
+        }
+        (dialog.querySelector<HTMLElement>(FOCUSABLE) ?? dialog).focus();
+      });
+    };
+    dialog.addEventListener("focusout", onFocusOut);
+    return () => dialog.removeEventListener("focusout", onFocusOut);
+  }, []);
+
+  const attemptClose = useCallback(() => {
+    // Armed is a latch, not a countdown: no timer re-clears it, so a press that
+    // finds the guard already armed always closes. Rules live in dirty-guard.ts.
+    const decision = decideClose({ busy, dirty, armed: confirmClose });
+    if (decision === "block") return;
+    if (decision === "arm") {
+      setConfirmClose(true);
+      return;
+    }
+    requestClose();
+  }, [busy, dirty, confirmClose, requestClose]);
+
+  // Esc is handled at the document level (bubble phase), not on the dialog
+  // subtree — so it keeps working even if focus momentarily escapes to <body>.
+  // Nested popovers (TemplatePicker, chip-draft inputs) stopPropagation on
+  // their own Esc, which also stops the native event before it reaches this
+  // document listener, so they close themselves without closing the modal.
+  //
+  // ONLY THE TOPMOST MODAL REACTS, which is what makes one press peel one
+  // layer when a dialog is nested inside another (see `openModals`). The token
+  // is this instance's own identity, registered for the life of the mount — the
+  // exit animation included, since a dialog still on screen is still a layer.
+  // When this dialog opened, for the scrim's grace period. A ref, not state:
+  // read at press time, never rendered.
+  const openedAt = useRef(performance.now());
+  const token = useRef({});
+  useEffect(() => {
+    const mine = token.current;
+    pushModal(mine);
+    return () => popModal(mine);
+  }, []);
+  useEffect(() => {
+    const onDocKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (!isTopmost(token.current)) return;
+      attemptClose();
+    };
+    document.addEventListener("keydown", onDocKey);
+    return () => document.removeEventListener("keydown", onDocKey);
+  }, [attemptClose]);
+
+  const onKeyDown = (e: ReactKeyboardEvent) => {
+    if (e.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const nodes = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+      (el) => el.offsetParent !== null || el === document.activeElement,
+    );
+    if (nodes.length === 0) {
+      e.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !dialog.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !dialog.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
+  const dialogStyle: CSSProperties | undefined = width !== undefined ? { width } : undefined;
+
+  // Portal to <body>: modals mount from arbitrary spots (e.g. AI Models'
+  // NewJobModal inside a page's toolbar), and ancestor-scoped `button` rules
+  // were leaking into the dialog chrome (a boxed ✕ from just one caller's styles).
+  return createPortal(
+    <div
+      className={"modal-overlay deploy-overlay" + (closing ? " closing" : "")}
+      onMouseDown={(e) => {
+        // Only the scrim itself, and not in its first moments: the second press
+        // of a double-click on whatever opened this dialog lands here, on the
+        // spot the pointer never left (dirty-guard `backdropPressCloses`).
+        if (e.target !== e.currentTarget) return;
+        if (!backdropPressCloses(openedAt.current, performance.now())) return;
+        attemptClose();
+      }}
+      onKeyDown={onKeyDown}
+    >
+      <div
+        ref={dialogRef}
+        className={"modal-dialog deploy-dialog" + (dialogClassName ? " " + dialogClassName : "")}
+        style={dialogStyle}
+        role="dialog"
+        aria-modal="true"
+        {...(ariaLabel
+          ? // An explicit name WINS over `aria-labelledby`, so the two are
+            // mutually exclusive rather than both set — leaving the heading
+            // reference in place beside an `aria-label` would put a dead
+            // attribute in the tree for the next reader to puzzle over.
+            { "aria-label": ariaLabel }
+          : { "aria-labelledby": titleId })}
+        tabIndex={-1}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="modal-head deploy-head">
+          {titleAside ? (
+            // The heading and its caption as ONE flex child of the head, so the
+            // head is still `[ title | ✕ ]` and `justify-content: space-between`
+            // does not push the caption into the middle of the bar.
+            <div className="modal-head-title">
+              <h2 id={titleId}>{title}</h2>
+              {titleAside}
+            </div>
+          ) : (
+            <h2 id={titleId}>{title}</h2>
+          )}
+          {/* ARMED, ON THE BUTTON ITSELF. The footer hint below says the same
+              thing, and on its own it was not enough: the press happens at the
+              top-right corner of the card and the hint appears at the bottom-left
+              of the footer — 12px, muted, up to 500px away, and gone again in two
+              seconds. A user watching their own cursor saw a click that did
+              nothing (QA, 2026-08-18).
+
+              So the control that was pressed changes too. Same two-step guard,
+              same second press to discard — this only makes the first press
+              visible where the user is already looking. The amber now lasts as
+              long as the armed state itself does (no 2s fade), so what the user
+              sees and what the next press will do can never disagree. `is-armed`
+              is the vocabulary the New task card's Delete button already uses for
+              exactly this "the next press does it" state. */}
+          {/* NOT RENDERED WHILE BUSY (2026-08-24). It used to be drawn and
+              `disabled={busy}`, which is this app's usual posture — a control
+              that vanishes teaches nothing, and a disabled one with a reason in
+              its `title` teaches where the door is and why it is shut.
+
+              That argument needs the reason to be REACHABLE, and here it is
+              not: a disabled button takes no pointer events, so its title never
+              appears, and a busy modal is exactly the moment a user reaches for
+              the corner. Akshil, on the mount sign-in: "when mounting we have a
+              X button, i don't think that works". It worked as specified and
+              was indistinguishable from broken.
+
+              Every busy modal that must not be abandoned has a real way out in
+              its own footer (the mount flow's Cancel stands the sign-in down and
+              frees rclone's callback port, which is what closing out from under
+              it would strand). So the corner is empty for those seconds rather
+              than occupied by something inert. */}
+          {headActions && <div className="modal-head-actions">{headActions}</div>}
+          {!busy && (
+            <button
+              type="button"
+              className={"modal-close deploy-close" + (confirmClose ? " is-armed" : "")}
+              // The label carries the state for a screen reader, which has no
+              // corner to look at. The footer hint is `role="status"` and is
+              // announced too; this is what the button itself answers to when the
+              // user tabs back to it.
+              aria-label={confirmClose ? "Close and discard changes" : "Close"}
+              title={confirmClose ? "Press again to discard" : (closeTitle ?? "Close")}
+              onClick={attemptClose}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        <div className={"modal-body " + (plainBody ? "modal-body-plain" : "deploy-body")}>{children}</div>
+        {(footer || confirmClose) && (
+          <div
+            className="modal-footer"
+            // ARROW KEYS WALK THE FOOTER (Akshil, 2026-09-21). Tab already does,
+            // but a reader looking at two buttons side by side reaches for ←/→
+            // first — and with focus parked on Cancel, ← → Enter is the
+            // keyboard spelling of "Delete forever" that never mis-fires the
+            // way an unringed Enter did. Only footer buttons take part; a key
+            // typed into a footer input (the New task form has none, but the
+            // chassis is shared) is left alone, and the walk wraps.
+            onKeyDown={(e) => {
+              if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+              const target = e.target as HTMLElement;
+              if (target.tagName !== "BUTTON") return;
+              const buttons = Array.from(
+                e.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"),
+              );
+              const at = buttons.indexOf(target as HTMLButtonElement);
+              if (at < 0 || buttons.length < 2) return;
+              e.preventDefault();
+              const step = e.key === "ArrowRight" ? 1 : -1;
+              buttons[(at + step + buttons.length) % buttons.length].focus();
+            }}
+          >
+            {confirmClose && (
+              <span className="modal-dirty-hint" role="status">
+                Unsaved changes — close again to discard
+              </span>
+            )}
+            {footer}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+export default Modal;

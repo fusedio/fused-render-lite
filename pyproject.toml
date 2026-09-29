@@ -38,3 +38,6 @@ path = "fused_render_app/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fused_render_app"]
+# The built React shell (scripts/build_shell.sh -> static/shell-dist/) is
+# gitignored, which hatch would otherwise honour and leave out of the wheel.
+artifacts = ["fused_render_app/static/shell-dist/**"]

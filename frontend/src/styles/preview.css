@@ -1,0 +1,1077 @@
+/* Preview view */
+.preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.preview-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  /* Pin the height to the tallest state (28px mode control + 10px×2
+     padding + 1px border) so the header can't grow when the loading spinner is
+     replaced by the real switcher on stat resolve — otherwise the name and the
+     whole body below shift down on every navigation. */
+  min-height: 49px;
+}
+
+/* Groups the name with whatever renders right after it (e.g. the directory
+   D81's `_listing` header) — min-width:0 so
+   the group (and h1's own ellipsis) can still shrink to make room for
+   .preview-actions on narrow windows. */
+.preview-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.preview-header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Generic chrome for a button that portals into the slot WITHOUT bringing its
+   own. Everything that does bring its own opts out by name, and the opt-out
+   list is the whole mechanism — a control that carries a class but is not
+   named here silently loses to this rule:
+     * `.bar-ctl` — the shared bar recipe (explorer.css), the buttons in the bar;
+     * `.bar-menu-item` — the rows of a dropdown OPENED from the bar, which are
+       descendants of the slot too, and which the `.active` rule below painted
+       solid lime (a menu's active row and a toggle's active state share the
+       class name).
+   A third name sat here — the "Open as app" pill, whose own chrome this rule
+   outranked (0,3,1 against its 0,2,0) until the `:not()` stopped it MATCHING
+   rather than trying to outrank it. That button is gone (D264); the mechanism
+   it taught is why the two above are named and not re-asserted. */
+.preview-actions button:not(.bar-ctl):not(.bar-menu-item),
+.preview-actions a {
+  font: inherit;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.preview-actions button:not(.bar-ctl):not(.bar-menu-item).active {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+
+.preview-actions button:not(.bar-ctl):not(.bar-menu-item):hover,
+.preview-actions a:hover {
+  background: var(--bg-alt);
+}
+
+/* Loading placeholder in the header actions slot (App.tsx LoadingScaffold):
+   a borderless box the size of the mode control so the header holds its
+   height while stat is in flight — no growth/shift when the real control
+   lands. */
+.preview-actions .mode-switcher-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 92px;
+  height: 28px;
+}
+
+/* Template-mode icon: monochrome SVG tinted via mask-image + currentColor
+   (mask-image url set inline per icon, PT-11). */
+.mode-icon-mask {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+}
+
+/* Placeholder for a mode with no icon.svg: first letter in a small rounded box. */
+.mode-icon-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid currentColor;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Conditional template whose gate is still resolving (CT-12): a small
+   currentColor ring spinner in place of the mode icon. */
+.mode-icon-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  opacity: 0.6;
+  animation: mode-spin 0.8s linear infinite;
+}
+
+@keyframes mode-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
+
+.pane-mode-item.pending {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Body placeholder while a URL-requested gated mode (or an all-conditional
+   list) is still resolving. */
+.preview-resolving {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+
+.preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  /* Positioning context for the embed-only .preview-browse-chip pinned over
+     the iframe. */
+  position: relative;
+}
+
+/* Held-frame mode swap (views/Preview.tsx): during a switch the outgoing frame
+   and the incoming one are BOTH mounted, so they stack absolutely inside this
+   wrapper instead of sharing the flex row. The visible one is `.is-shown`
+   (z-index above the frame it replaces); the other fades to nothing and is
+   unmounted a beat later. `background: var(--bg)` is what kills the white flash
+   an unpainted iframe shows on its own. */
+.preview-frames {
+  flex: 1 1 auto;
+  position: relative;
+  min-width: 0;
+}
+
+/* Preview.tsx's content-pane counterpart to Listing.tsx's own
+   ".listing-snapshot-banner" wrapper. `.preview-body` above is a flex ROW
+   (it also hosts the mode iframe as a sibling), so the banner and
+   `.preview-frames` need their own flex-COLUMN wrapper here to stack
+   vertically — without it the banner rendered as a squeezed vertical strip
+   to the LEFT of the frames instead of a bar above them, which is the trap
+   `.metadata-stack`'s own comment above already documents for the fallback
+   card. `.listing-main` (explorer.css) is already a column, which is why
+   Listing.tsx's identical banner never needed this wrapper of its own. */
+.preview-content-stack {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-body iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--bg);
+}
+
+.preview-frames iframe.preview-frame {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  z-index: 0;
+  transition: opacity var(--dur-med) var(--ease-out);
+}
+
+.preview-frames iframe.preview-frame.is-shown {
+  opacity: 1;
+  z-index: 1;
+}
+
+/* ---- the preview SIDEBAR (`_side`) ---------------------------------------
+   A file preview's right-hand column: the companion modes (`claude`,
+   `git`) beside the content pane instead of in place of it
+   (apps/explorer/PreviewSidebar.tsx).
+
+   PAGE-LEVEL, and that is the layout: both items below are flex children of
+   `.stat-split` (explorer.css), the row that holds this view's whole left column
+   — crumb bar AND content — as its other child. So the divider runs the full
+   height of the window, the crumb bar stops at it, and this column's header row
+   is the top of the window on its side. Rendered here by a portal from Preview
+   into StatView's slot (preview-side-slot.ts), which also means nothing above
+   `.preview-body` is restructured when the sidebar opens — the content iframe is
+   never re-parented, and so never reloaded.
+
+   The divider is the listing's in size and gesture (.listing-divider): a 5px
+   transparent strip with negative margins so the handle overhangs both
+   neighbours. Two draggable seams in one app must not feel like two different
+   controls. Where the two now part company — this one is POSITIONED and draws
+   the seam itself; the listing's recolours the pane slot's — is written out
+   below. */
+.preview-side-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: transparent;
+  margin: 0 -2px;
+  /* 3, NOT 2 (review, 2026-09-10): the chat's pinned tail card
+     (`.chat-tailpin.is-pinned`, apps/claude/styles/transcript.css) is sticky at
+     z-index 2 with an opaque ground, and nothing between it and the root is a
+     stacking context — so at 2 the two tie and tree order hands the pixel to the
+     column, which is DOM-later. The seam lost its bottom segment whenever a
+     permission ask was pinned. 3 clears that and stays under the chat's
+     transient popovers (`.annbar .tip` at 4, `#annpop` at 5), which are the
+     things that SHOULD pass over a 1px line. */
+  z-index: 3;
+  /* Anchors the seam below — the hairline is drawn from here, not from the
+     column, so nothing rendered inside the column can paint over it.
+
+     THIS ALSO CHANGES WHO IS HIT, not only who paints: unpositioned, this box
+     lost its right-hand 2px overhang to the positioned, DOM-later column, so the
+     drag target was really 3px. Positioned, it wins all 5 — the column's
+     leftmost 2px now show `col-resize` and take a wheel to the nearest scroller
+     rather than to the chat log. That is the overhang the negative margins were
+     written for in the first place; the header's 10px padding keeps every
+     control clear of it. */
+  position: relative;
+  /* The drag is pointer-captured; without this, touch scrolling fights it. */
+  touch-action: none;
+}
+
+/* THE SEAM ITSELF, and it lives here rather than on the column (2026-09-10).
+   It used to be `.preview-side::before`, a pseudo *inside* the column, and the
+   native chat then covered it: `.chat-root` and `.c-chat` are `position:
+   relative` with an opaque `--c-panel` ground, so they paint after a z-index:auto
+   pseudo that comes earlier in the DOM and the panel lost its left border on the
+   flag-on path only (the legacy iframe is a static box, so it painted *under*
+   the line and the border showed). Drawn from the divider, the line is outside
+   the column entirely and sits at z-index 3 (the divider's; see that rule for
+   why 3), above every z-index:auto box the column paints and above its pinned
+   tail card — so no ground inside it can cover the seam again.
+
+   3px IN: the divider's negative margins pull the column 2px back over this
+   element, so the column's left edge is at this box's left + 3, which is where
+   the border has always been drawn.
+
+   ACCENT ON HOVER/DRAG, and only on this 1px (Akshil, 2026-09-10 — the seams
+   read "a bit thick"). The rule used to paint the divider's whole 5px hit box,
+   so the seam ballooned from a hairline to a 5px accent bar under the cursor.
+   One line, two colours — the same arrangement .listing-divider now has. */
+.preview-side-divider::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  pointer-events: none;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.preview-side-divider:hover::before,
+.preview-side-divider.dragging::before {
+  background: var(--seam-hot);
+  /* A breath of glow, so a 1px line stays findable without becoming a second,
+     wider one — 3px, the same figure as the other seams (sidebar.css says why). */
+  box-shadow: 0 0 3px color-mix(in srgb, var(--seam-hot) 35%, transparent);
+}
+
+/* An iframe is a separate document and would swallow the captured pointer
+   stream — inert BOTH sides for the drag's duration. */
+.stat-split:has(.preview-side-divider.dragging) iframe {
+  pointer-events: none;
+}
+
+/* ---- the seam a SHUT sidebar leaves behind (SideChrome's SideReopenEdge) ----
+   Drag the split's right edge and the column comes back. Zero-width in the flex
+   row — it must cost the layout nothing, since it is present on every file that
+   merely COULD have a companion — with the hit strip hung off its right edge as
+   a ::before. Hit-testing a pseudo-element dispatches to its host, so the host's
+   onPointerDown is what catches it. */
+.preview-side-reopen {
+  flex: 0 0 0;
+  align-self: stretch;
+  position: relative;
+  z-index: 3;
+}
+
+.preview-side-reopen::before {
+  content: "";
+  position: absolute;
+  /* Starts BELOW the crumb bar: the bar's own trailing controls (the mode
+     switcher, and this column's opener) end at this same right edge, and a strip
+     over them would eat the outer pixels of their hit area for a gesture nobody
+     has begun yet. The seam belongs beside the content it resizes. */
+  top: var(--topbar-h);
+  bottom: 0;
+  right: 0;
+  /* The 6px of .sidebar-resize-handle rather than the divider's 5px: an edge with
+     no column behind it has only its own width to be found by. */
+  width: 6px;
+  cursor: col-resize;
+  /* Capture is taken on documentElement, but the browser still claims a touch
+     drag as a pan before the first pointermove without this. */
+  touch-action: none;
+}
+
+/* The same announcement every other draggable seam makes on hover
+   (.sidebar-resize-handle, .listing-divider, .preview-side-divider): a 1px
+   accent line, drawn on a SECOND pseudo because ::before above is the 6px hit
+   strip and painting it was what made the seam read thick (Akshil,
+   2026-09-10). This edge has no hairline at rest — there is no column behind it
+   yet — so the line is the whole of the hover state, at the right edge where
+   the column will come back from. */
+.preview-side-reopen::after {
+  content: "";
+  position: absolute;
+  top: var(--topbar-h);
+  bottom: 0;
+  right: 0;
+  width: 1px;
+  background: transparent;
+  pointer-events: none;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.preview-side-reopen:hover::after {
+  background: var(--seam-hot);
+  box-shadow: 0 0 3px color-mix(in srgb, var(--seam-hot) 35%, transparent);
+}
+
+/* WHILE A REOPEN DRAG RUNS. On the root element and not on the strip, because
+   the strip is unmounted the instant the column opens and the drag continues
+   past that (SideChrome's SideReopenEdge) — a `:has()` rule keyed to the strip
+   would switch off halfway through the gesture, taking the stable cursor and the
+   iframe guard with it. */
+html.side-reopening {
+  cursor: col-resize;
+}
+
+html.side-reopening body {
+  user-select: none;
+}
+
+html.side-reopening iframe {
+  pointer-events: none;
+}
+
+/* The column, full height of the window. Its flex-basis is set inline in pixels
+   (PreviewSidebar): a sidebar's job is to hold a chat composer and a message
+   column legibly, which is a width, not a share of the window — hence px here
+   where the listing's pane is a fraction. The min-width is the same floor the
+   drag clamps to, and backstops a window resize that narrows the row under an
+   already-sized column.
+   `position: relative` used to anchor the column's own seam; the seam moved to
+   the divider (below) and nothing in this file positions against the column any
+   more. Kept anyway: what the column frames (the chat, a template) may, and
+   taking a containing block away from content this file does not own is not a
+   change to make from here. */
+.preview-side {
+  flex: 0 0 auto;
+  min-width: 380px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-alt);
+  position: relative;
+}
+
+/* NO `isolation: isolate` HERE, considered and rejected (2026-09-10). A stacking
+   context keeps the geometry of the chat's `position: fixed` overlays — that is
+   not what it changes. What it changes is RANK: `#annpop.sidebar` (ann.css,
+   z-index 40, fixed, spanning nearly the window in the narrow layout) would have
+   its 40 scoped to this column, and the column as a whole — z-index auto, so 0
+   in .stat-split — would then lose to the middle pane's shown frame
+   (`.preview-frames iframe.is-shown`, z-index 1 further up this file). The
+   popover would paint behind the pane it is meant to cover. The seam does not
+   need isolation: it is drawn from the divider at z-index 3, above every
+   z-index:auto box inside this column (`.chat-root`, `.c-chat`) — the boxes
+   whose opaque ground was covering the old pseudo — and above the pinned tail
+   card at 2. A transient popover passing over a 1px line is not the bug that was
+   reported. */
+
+/* THE SEAM IS THE DIVIDER'S (2026-09-10), see .preview-side-divider::before.
+   It was drawn here — `.preview-side::before`, a hairline inside the column —
+   and the native chat's own `position: relative` boxes painted over it, so the
+   flag-on path had no left border at all (Akshil: "the right side panel border
+   with new native beta chat is missing border on left like other panels have").
+   A line owned by the element that also owns the drag is one thing to reason
+   about: at z-index 3 it outranks anything the column paints from a
+   z-index:auto box, which is what the chat's grounds are, and the one sticky
+   card the chat pins at 2.
+
+   It is still a single continuous hairline, header row included, for the reason
+   the listing pane writes out (.listing-pane-slot::before): a seam that stops at
+   the header leaves its top segment a different colour from the run below it,
+   and the line reads broken. */
+
+/* The column's own top strip, and it must match the crumb bar across the seam
+   the way the listing pane's header does (.pane-header, explorer.css): same
+   --topbar-h, same vertical padding, same hairline. The two are one bar across
+   the window, split by the divider.
+
+   Two items, at opposite ends: the close button leads, on the seam the column
+   collapses toward, and the mode control is packed to the far end the way the crumb
+   bar's own controls are. That far end is `.side-header-tail` (explorer.css), the
+   ONE auto margin the two side-column headers share — so the right-hand end holds
+   whatever renders there without needing a rule of its own, and the strip cannot be
+   thrown off by what does or does not render at its left end. The explicit `height`
+   is what stands the bar up; same dependency, same reason, as .pane-header. */
+.preview-side-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: var(--topbar-pad-y) 10px;
+  height: var(--topbar-h);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+/* Fills what the header leaves. flex, not height:100%, so the header can't push
+   it past the column's bottom edge (same as .listing-pane .pane-frame). */
+.preview-side-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: auto;
+  border: 0;
+  display: block;
+  background: var(--bg);
+}
+
+.metadata-card {
+  margin: 24px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-alt);
+  max-width: 480px;
+}
+
+.metadata-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 16px;
+  margin: 0 0 16px 0;
+}
+
+.metadata-card dt {
+  color: var(--fg-muted);
+}
+
+.metadata-card dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+/* .preview-body is a flex ROW (it also hosts the mode iframe), so the
+   fallback's card(s) need their own flex-COLUMN wrapper to stack vertically
+   instead of sitting side by side. Holds either one card (no registry issue
+   to flag) or two (RegistryFixNotice above the metadata card); the gap only
+   costs space when there's a second card, since flexbox gap doesn't apply
+   around a lone child. */
+.metadata-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* The "get me out of this" panel FallbackPreview shows above the plain
+   metadata card when the reason nothing renders is a fixable Template
+   Registry state (Preview.tsx's RegistryFixNotice) — a disabling user
+   override or a corrupt registry.json. Same card chassis as .metadata-card,
+   own class so it can sit as a sibling above it without doubling the margin. */
+.registry-fix-notice {
+  margin-bottom: 0;
+}
+
+.registry-fix-notice p {
+  margin: 0 0 10px 0;
+}
+
+.registry-fix-notice code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.registry-fix-hint {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.registry-fix-error {
+  color: var(--error);
+  font-size: 12px;
+}
+
+.status-message {
+  padding: 24px;
+  color: var(--fg-muted);
+}
+
+/* Partial-listing banner: a slim, muted row after the entries of a directory
+   whose listing hit the server cap. Its Load more button fetches the next
+   page (resumable S3-direct route only). */
+.listing-truncated .status-message {
+  padding: 10px 16px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+.listing-load-more {
+  margin-left: 10px;
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* Git-snapshot banner: the one piece of chrome the `_snapshot` param adds —
+   everywhere else the state is invisible by design (see the plan's decisions
+   log). Sits ABOVE the table, same slim treatment as the truncated-listing
+   banner, so a folder browsed under a commit reads as a distinct mode rather
+   than a normal listing with no explanation for why nothing here is editable. */
+.listing-snapshot-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  /* Every colour here must come from a palette token (tests/test_theme.py) so
+     light mode can repaint it — no raw rgba() literal. */
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+.listing-snapshot-banner .listing-snapshot-sha {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--fg);
+}
+.listing-snapshot-back {
+  margin-left: auto;
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.listing-load-more:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.listing-load-more:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Error panel: dark maroon card + red border + mono red text, matching the
+   fused_render/static/runtime.js overlay reference. Canonical error style —
+   every error rendered in the shell (stat/preview failures, listing/search
+   failures, config-load failures) uses this class so the visual language
+   stays consistent. */
+.status-message.error {
+  background: var(--error-page-bg);
+  border: 2px solid var(--error-page-border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: var(--error-page-fg);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* Embed mode (/embed/<path>): content only — all shell chrome hidden.
+   Views still render breadcrumb/header into the DOM; hiding here keeps
+   view modules embed-unaware.
+
+   The two SEAMS are named alongside the chrome they belong to, and neither is
+   reachable through its panel's own selector: the sidebar's handle is a sibling
+   of #sidebar (SidebarFrame), and the companion column's reopen strip is all
+   that is left of a column that is shut. Both would otherwise survive as bare
+   col-resize strips down the edges of an embed that has no shell to resize. */
+body.embed #sidebar,
+body.embed .sidebar-resize-handle,
+body.embed #breadcrumb,
+body.embed .preview-side-reopen,
+body.embed .preview-header {
+  display: none;
+}
+
+/* ── Frozen-tree framing (`?snapshot=1`, router.ts IS_SNAPSHOT) ─────────────
+   A materialised historical snapshot embedded by a view — a commit extracted
+   into ~/.fused-render/app-versions/<key>/<sha>/ with THAT directory framed, so
+   the listing is a frozen copy rather than a live folder. The mode that produced
+   these is gone (the git view resolves a revision on read instead); the rules
+   stay for trees an older version left on disk.
+
+   Everything hidden here is chrome that acts on it as a live folder:
+
+     * the BREADCRUMB, whose crumbs walk above the framed directory and straight
+       into the snapshot cache's internals — a path the user never chose, cannot
+       act on, and should not be able to wander into. (`body.embed` hides it
+       already; this stands on its own so the framing does not depend on which
+       route it was reached by.)
+     * the two corner chips, below — the mode chip would offer this frozen tree's
+       "counterpart mode" (a Claude chat ON THE EXTRACTED COPY), and "Open as
+       app" would run one.
+
+   The listing itself stays fully browsable, and its file operations are refused
+   at the mutation boundary rather than here (`server/mount.py::
+   _is_under_snapshot_root`, PT-14) — read-only, not sealed. */
+body.snapshot #breadcrumb {
+  display: none;
+}
+
+/* Directory templates (.zarr etc.) surface their member listing through the
+   "Browse contents" chip pinned over the preview. Hidden by default and
+   revealed by ONE state: `body.embed`, which hides .preview-header entirely,
+   so the chip is how the action reaches the user at all (PT-13/D65 — the
+   chip's original job, and now its only one).
+
+   There was briefly a second reveal, `.is-exit`, for an explorer directory
+   showing a non-listing mode: the explorer's folder views carry no top-bar
+   mode control (PT-13b), and the chip was offered as the way back to the
+   listing. Removed by owner call. Pinned absolutely over the iframe it landed
+   on whatever the template drew in its own top-right — the full-width timeline
+   view since removed wore it across its own header and the newest commit — so it
+   read as a stray tooltip rather than as chrome, in the folder modes people
+   actually open. The explorer's answer for that state is
+   the browser's Back button (PT-13b): the mode was reached by navigating, so
+   the navigation is what undoes it.
+
+   File (non-directory) previews render no chip at all, so embed chrome stays
+   empty for them. And an embed under the frozen-tree framing above renders none
+   either — `:not(.snapshot)` on the reveal, so the chip stays at its default
+   `display: none` rather than being un-hidden and re-hidden. */
+.preview-browse-chip {
+  display: none;
+}
+
+body.embed:not(.snapshot) .preview-browse-chip {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+body.embed:not(.snapshot) .preview-browse-chip:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+
+/* Panel mode (/view/_panel, /embed/_panel): a split-pane grid of /embed iframes (SPEC §14).
+   Modeled on the reference grid-viewer's pane styles, using our palette. The
+   root is position:relative so a maximized pane fills the panel area (inside
+   #content) without covering the sidebar or breadcrumb. */
+.panel-root {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px;
+}
+
+.panel-root > * {
+  width: 100%;
+  height: 100%;
+}
+
+.panel-split {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+}
+
+.panel-split.row {
+  flex-direction: row;
+}
+
+.panel-split.col {
+  flex-direction: column;
+}
+
+.panel-split > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-pane {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.panel-pane.maximized {
+  position: absolute;
+  inset: 6px;
+  z-index: 50;
+}
+
+.panel-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* Pins to the tallest state (24px control + 4px x 2 padding) so the bar
+     can't grow when the mode control lands after the pane's stat resolves. */
+  min-height: 32px;
+  padding: 4px 6px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+/* Base layout/color rules for .panel-crumbs/.panel-crumb/.panel-crumb-sep/
+   .panel-crumb.last are shared with the main breadcrumb above (search
+   "Shared with the panel path bar"), hover included — the pane bar used to
+   hover accent-yellow and now speaks the same dialect as every other bar.
+   Only what's genuinely panel-specific lives here: pane-local flex sizing, a
+   tighter font-size, hidden scrollbar. */
+.panel-crumbs {
+  flex: 1 1 auto;
+  scrollbar-width: none;
+  font-size: 11px;
+}
+
+.panel-crumbs::-webkit-scrollbar {
+  display: none;
+}
+
+/* The shared bar recipe (explorer.css) at pane scale: 24px controls, 14px
+   icons. Same grammar as the title bar, one size down — panel mode used to
+   feel like a different app, and the size was most of the reason. */
+.panel-bar .bar-ctl {
+  height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.panel-bar .bar-ctl-icon {
+  width: 24px;
+  padding: 0;
+}
+
+/* :not(.bar-caret) because the caret has its own smaller size below, and a
+   bare `.panel-bar .bar-ctl > svg` outweighed `.panel-bar .bar-caret` on
+   specificity — the mode menu's caret silently kept the 14px icon size it was
+   explicitly excluded from. */
+.panel-bar .bar-ctl > svg:not(.bar-caret) {
+  width: 14px;
+  height: 14px;
+}
+
+.panel-bar .mode-menu-icon,
+.panel-bar .mode-menu-icon svg,
+.panel-bar .mode-menu-icon .mode-icon-mask,
+.panel-bar .mode-menu-icon .mode-icon-placeholder {
+  width: 14px;
+  height: 14px;
+}
+
+.panel-bar .bar-caret {
+  width: 11px;
+  height: 11px;
+}
+
+.panel-bar .bar-rule {
+  margin: 0 6px;
+}
+
+/* The layout bookmark's ★, at the pane bar's left edge — pane scale, and it
+   must not be squeezed by the flex:1 crumbs beside it. */
+.panel-bar .bookmark-star-btn {
+  padding: 3px;
+}
+
+.panel-bar .bookmark-star-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.panel-bar .star-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* Close keeps the right-most slot and its error-red hover. */
+.panel-bar .bar-ctl.close:hover:not(:disabled) {
+  color: var(--error);
+}
+
+.panel-pane iframe {
+  flex: 1 1 auto;
+  width: 100%;
+  border: none;
+  background: var(--bg);
+  /* Fade in on load; views/Panel.tsx arms/clears `.is-loaded` around every
+     (imperative) src write. */
+  opacity: 0;
+  transition: opacity var(--dur-med) var(--ease-out);
+}
+
+.panel-pane iframe.is-loaded {
+  opacity: 1;
+}
+
+/* Tab mode (/view/_tab, /embed/_tab): a tabbed set of /embed iframes, one
+   visible at a time (SPEC §15). Bar of tab buttons on top, iframes fill the
+   rest; the active tab's iframe is shown, the others display:none. */
+.tabs-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tabs-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-height: 30px;
+  padding: 3px 6px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.tabs-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 200px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 5px 8px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.tab:hover {
+  color: var(--fg);
+}
+
+.tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+  background: var(--bg-alt);
+}
+
+.tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-open-plain {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  color: var(--fg-muted);
+}
+
+.tab-open-plain:hover {
+  color: var(--fg);
+  background: rgba(var(--tint), 0.08);
+}
+
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tab-close:hover {
+  color: var(--error);
+  background: rgba(var(--tint), 0.08);
+}
+
+/* Pane/tab template-mode menu: the trigger shows the active mode's icon; the
+   dropdown lists icon + name per mode. Dropdown is position:fixed (inline
+   top/left from the trigger's rect) — .panel-pane clips overflow, and the tab
+   bar would too. */
+.pane-mode-menu {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.pane-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 4px 5px;
+  border-radius: 4px;
+}
+
+.pane-mode-btn:hover {
+  background: rgba(var(--tint), 0.08);
+  color: var(--fg);
+}
+
+/* Inside a tab button: match the tab-open-plain / tab-close chrome sizing. */
+.tab .pane-mode-btn {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+}
+
+.tab .pane-mode-btn .mode-icon-mask,
+.tab .pane-mode-btn .mode-icon-placeholder,
+.tab .pane-mode-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.pane-mode-dropdown {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 120px;
+  padding: 4px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--shadow-md);
+}
+
+.pane-mode-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pane-mode-item:hover {
+  background: rgba(var(--tint), 0.08);
+  color: var(--fg);
+}
+
+.pane-mode-item.active {
+  color: var(--fg);
+}
+
+
+/* Refused read (explorer/AccessDenied.tsx): one plain sentence over the Full
+   Disk Access strip. Lives in the muted .status-message cell, never the red
+   .error plate — a permission gap is a setup step, not an outage. The strip's
+   own bottom margin is for sitting above a grid; here it is the last thing. */
+.access-denied {
+  /* Full width of the listing like the strip is on Home (a band, not a
+     floating plate). Side gutters: the cell's own 24px of padding plus 40px
+     here — wider than Home's 28px on purpose, the listing is a wider column. */
+  margin: 8px 40px 16px;
+  /* The listing's td is `white-space: nowrap` (one entry per line); this cell
+     holds prose and a card, both of which must wrap inside the 640px. */
+  white-space: normal;
+}
+.access-denied-text {
+  margin: 0 0 12px;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.access-denied-text code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.access-denied .claude-health {
+  margin-bottom: 0;
+}

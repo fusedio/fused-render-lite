@@ -1,0 +1,251 @@
+// The preview pane (right-hand split): the usePreviewPane hook that owns the
+// pane's width and its divider drag.
+//
+// **NO CONDITIONAL LAYOUT LOGIC LIVES HERE ANY MORE** (D282, the owner's "remove
+// any complicated breakpoint logic"). Two generations of that are gone. First a
+// user-facing on/off — a toggle button, a `?preview=true|false` URL param that
+// rode along on directory navigation, and a `pane=0` viewstate key so a folder
+// remembered being closed: three places to keep in agreement for one bit. Then the
+// thing that replaced it, a **700px width gate** on the split container measured
+// with a `ResizeObserver`, which decided whether there was a pane at all, plus
+// 30/50/70 width tiers stepping on two more breakpoints.
+//
+// Now: the pane is there whenever this Listing is one that has a pane (the
+// caller's `enabled` — not embedded, not a snapshot, not a panel pane), and it
+// takes 30% of its container, the same share the file view's sidebar takes. There
+// is no measurement, no threshold and no tier; a narrow window gets a narrow
+// listing beside a floored pane, and `_side=off` is the way out of it, exactly as
+// on a wide one.
+//
+// What SURVIVES from the old model is the width, and only the width: a dragged
+// split is a real preference, unlike an on/off the layout can infer. But it is
+// no longer remembered PER FOLDER, and no longer stored at all. It used to be a
+// `panew` key in the per-path viewstate map, which meant the divider jumped on
+// ordinary navigation — out of a folder you had dragged, into one you had not,
+// and the pane snapped between your width and the default.
+//
+// **THE STORED WIDTH IS NOW THE FILE SIDEBAR'S** (D460): one pixel number, in
+// `lib/side-store.ts`, shared by both surfaces for the life of the document — a
+// drag on either carries over to the other. It used to be its own fraction, kept
+// in `listing/pane-store.ts` (deleted), independently of the file view's pixel
+// width; the two stores already shared the undragged DEFAULT (`companionFrac`,
+// D283) and nothing else. `paneFracFromSharedWidth` (listing/pane-math.ts) is
+// the seam: the shared pixel number, re-clamped into THIS pane's own (narrower)
+// floors and turned into a fraction of this container. The reasoning for why a
+// REFRESH deliberately clears it either way lives in `lib/side-store.ts`. Off
+// the URL for the same reason as before: one machine's split isn't something a
+// shared link should impose.
+//
+// Width is RENDERED as a FRACTION of the split container, a percentage
+// flex-basis — so a pane keeps its proportion when the window resizes, which a
+// resolved pixel width never did. UNDRAGGED it is `PANE_DEFAULT_FRAC`, a constant.
+// The pixel floors survive as CSS min-widths (.listing-pane-slot /
+// .listing-main) and as the drag's clamp; those are clamps, not breakpoints. The
+// arithmetic itself is pure and lives in listing/pane-math.ts.
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { purgeViewStateParams } from "@platform/lib/viewstate";
+import {
+  getSideWidth,
+  setSideWidth,
+  subscribeSideWidth,
+} from "@apps/explorer/lib/side-store";
+import { dragPaneFrac, paneDragCloses, paneFracFromSharedWidth } from "@apps/explorer/listing/pane-math";
+
+// THE ONE-TIME PURGE of the per-folder width, run at module init — which is the
+// first time anything in the app cares about a pane at all, and the only place
+// that ever wrote these keys.
+//
+// Both are gone for good:
+//   `panew`  the per-folder fraction, whose per-folder-ness was the bug (see
+//            the header). It went session-wide first (its own module,
+//            `listing/pane-store.ts`) and from there into the file sidebar's
+//            shared pixel store (D460, `lib/side-store.ts`) — left in this old
+//            per-path storage it would do nothing except wait to be misread by
+//            a later reader.
+//   `pane`   the OFF choice from the model before that, which the old
+//            savePaneWidth deleted opportunistically on its way past — i.e.
+//            only for folders the user happened to drag again. This clears the
+//            rest.
+// Every user therefore starts on the adaptive default and keeps it until their
+// next drag; nothing here can be translated into the new model, because a width
+// chosen for one folder is not a statement about the session.
+//
+// Sorts are NOT touched: `?sort`/`&order` stay per folder on purpose (two
+// sibling folders keep independent sorts), which is exactly why the purge names
+// its params instead of clearing the map.
+purgeViewStateParams("panew", "pane");
+
+// The split container's measured width — back with D283, for ONE question: is this
+// container small (`companionFrac`, 1000px and under → the companion takes half
+// instead of a third). Measured on the CONTAINER and never read off
+// `window.innerWidth`, because the same Listing renders full-window, inside a
+// chrome-free embed and inside another view's split, and only the container knows
+// which — an embedded pane in a small frame is small.
+//
+// `useLayoutEffect`, so the first measurement lands before paint and a wide
+// container never shows one frame at half width and then jumps. The observed
+// element is the container that is always rendered — never the pane itself — so the
+// pane's own width cannot feed back into the measurement and oscillate.
+//
+// *D282 deleted this, and it deleted `useSplitIsWide` with it — the 700px verdict
+// that decided whether there was a pane at all, plus the 30/50/70 tiers. Neither
+// comes back: what returns is the number, read for one boolean.*
+export function useSplitWidth(ref: React.RefObject<HTMLElement>): number {
+  const [w, setW] = useState(0);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const read = () => {
+      const next = el.getBoundingClientRect().width;
+      setW((prev) => (prev === next ? prev : next));
+    };
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return w;
+}
+
+// `enabled=false` (an embedded Listing — the preview pane's own `_listing`
+// mode) turns the whole feature off at the source: however wide that embedded
+// listing is, it never grows a pane of its own — no nesting.
+export function usePreviewPane(enabled = true, onDragClose?: () => void) {
+  // The PIXEL width the user chose — dragged somewhere in this session, on
+  // this pane OR on the file sidebar (`lib/side-store.ts`, D460). `null` is
+  // not a missing number but a real state, "no choice yet", and it is still
+  // worth distinguishing now that the alternative is a constant: the store
+  // must record a width only when a drag produced one, so that a refresh
+  // returns everyone to the plain 30% rather than to a number that was never
+  // chosen.
+  //
+  // Seeded from the store rather than mirrored from it: the store is the source
+  // of truth ACROSS mounts (this hook remounts on every navigation and reads it
+  // again), while within a mount the React state is what re-renders.
+  const [chosenPx, setChosenPx] = useState<number | null>(getSideWidth);
+  // A width dragged on the FILE SIDEBAR while this pane is already mounted —
+  // the shared store notifies (it exists for the sidebar's own reopen-drag
+  // handoff; this is a second, ordinary reader) so this pane's fraction picks
+  // it up without waiting for a remount.
+  useEffect(
+    () =>
+      subscribeSideWidth(() => {
+        const px = getSideWidth();
+        setChosenPx((prev) => (prev === px ? prev : px));
+      }),
+    [],
+  );
+  // Still a ref, and still the split container: the DRAG reads its rect directly
+  // (below) to turn a cursor position into a fraction. What went is the standing
+  // measurement of it.
+  const splitRef = useRef<HTMLDivElement>(null);
+  // `on` is exactly the caller's own question — is this a Listing that has a pane at
+  // all — and no width enters into it. That is the half D282 settled and D283 does
+  // not reopen: the measurement below decides the pane's SHARE, never its existence.
+  const on = enabled;
+  const width = useSplitWidth(splitRef);
+  // The shared pixel width, re-clamped into THIS pane's own floors and turned
+  // into a fraction of this container (pane-math's paneFracFromSharedWidth) —
+  // never the file sidebar's wider floors, even though the two now share one
+  // stored number.
+  const frac = paneFracFromSharedWidth(chosenPx, width);
+
+  // The divider drag: pointer capture keeps the drag alive when the cursor
+  // crosses into the pane's iframe (which would otherwise swallow mousemove).
+  const onDividerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const divider = e.currentTarget;
+    divider.setPointerCapture(e.pointerId);
+    divider.classList.add("dragging");
+    // The pre-drag fraction, captured once: nothing else can change it while
+    // this drag owns the pointer. It is the RENDERED one, so a drag that starts
+    // from the undragged default continues from where the divider actually is
+    // rather than jumping.
+    let draggedFrac = frac;
+    // Did the drag produce a real fraction? That is what the COMMIT below
+    // reads: in a container narrower than both floors dragPaneFrac returns null
+    // (see there), and recording the pre-drag fraction as though the user had
+    // chosen it would keep a number nobody picked.
+    //
+    // The close-by-drag gesture is BACK (it went away with the old toggle,
+    // when a pane dragged shut had no way back). The reopen affordance exists
+    // again — the header's opener button, the same `_side` vocabulary the
+    // chevron writes — so the seam can honour #680's rule here too: the clamp
+    // holding at the floor reads as "this is as narrow as it goes" while the
+    // pane plainly can go narrower, all the way to shut. `closed` latches the
+    // gesture: once this drag has shut the pane it is over, and a second
+    // pointermove must not write `_side=off` twice.
+    let closed = false;
+    let resized = false;
+    const onMove = (ev: PointerEvent) => {
+      if (closed) return;
+      const rect = splitRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      // The pane is the right side: its width is the distance from the cursor
+      // to the container's right edge, run through the shared FS-12 clamps and
+      // divided back into a fraction of the container (dragPaneFrac).
+      const rawPx = rect.right - ev.clientX;
+      // Dragged clean through the resistance band: the gesture means SHUT.
+      // Deliberately BEFORE any width is recorded this move, and `resized`
+      // untouched by the close: every move before this one stuck the pane at
+      // its floor, and committing that would file the floor as the user's
+      // chosen share — shut a wide pane and it would come back a sliver.
+      // Closing a pane and narrowing it are different acts; one drag must not
+      // do both. (Same rule as platform/lib/panel-drag `committedWidth`.)
+      if (onDragClose && paneDragCloses(rect.width, rawPx)) {
+        closed = true;
+        onDragClose();
+        return;
+      }
+      const next = dragPaneFrac(rect.width, rawPx);
+      if (next === null) return;
+      resized = true;
+      draggedFrac = next;
+      // The first move is already a choice: from here the pane leaves the
+      // shared default and renders what the cursor says. Rendered here as the
+      // equivalent PIXEL width for this container: `chosenPx` is what both this
+      // pane and the file sidebar now read (D460), so it has to be a number the
+      // sidebar's own floors can make sense of too, not this pane's fraction.
+      const nextPx = Math.round(next * rect.width);
+      setChosenPx((prev) => (prev === nextPx ? prev : nextPx));
+    };
+    const onUp = () => {
+      divider.classList.remove("dragging");
+      divider.removeEventListener("pointermove", onMove);
+      divider.removeEventListener("pointerup", onUp);
+      divider.removeEventListener("pointercancel", onUp);
+      // Only a drag that actually RESIZED records anything. A bare click on the
+      // divider, or a drag in a container too narrow to express a split (see
+      // dragPaneFrac), leaves the pane where it was — following the window if
+      // it was already following it, keeping the session's width if there is
+      // one. A pane that is still FOLLOWING the window must stay that way: any
+      // write here turns it into a chosen width, everywhere, for the rest of
+      // the session — and now for the file sidebar too.
+      //
+      // A CLOSE records nothing either, even when the same drag resized on the
+      // way through: the last width that rendered before the shut was the
+      // floor, and filing that as the chosen share would reopen a wide pane as
+      // a sliver. Shut hands back exactly what was remembered before.
+      if (closed || !resized) return;
+      const rect = splitRef.current?.getBoundingClientRect();
+      // Re-measured rather than trusting a stale rect from mid-drag: this is
+      // the commit, and the container could in principle have resized between
+      // the last move and the release. No rect at all (detached mid-drag) means
+      // there is nothing honest to convert `draggedFrac` against, so the drag
+      // is treated as unresized rather than writing a number derived from thin
+      // air.
+      if (!rect) return;
+      const settledPx = Math.round(draggedFrac * rect.width);
+      setSideWidth(settledPx);
+      // Render the settled pixel width too, so what is on screen now and what
+      // the next folder (or the file sidebar) opens at are the same value
+      // rather than differing by however this render's `frac` rounds it.
+      setChosenPx(settledPx);
+    };
+    divider.addEventListener("pointermove", onMove);
+    divider.addEventListener("pointerup", onUp);
+    divider.addEventListener("pointercancel", onUp);
+  };
+
+  return { pane: { frac, on }, splitRef, onDividerPointerDown };
+}

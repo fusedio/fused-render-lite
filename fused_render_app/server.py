@@ -260,15 +260,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(showcase.home())
             if route == "/api/showcase/preview":
                 return self._showcase_preview(q)
-            if route == "/tasks":
-                return self._static("tasks.html")
-            if route == "/chat":
-                return self._chat_page(q)
+            if route in ("/tasks", "/chat") or route.startswith("/explorer/"):
+                # `/explorer/view/<path>?_side=claude&session_id=…` is the
+                # address fused-render's task rows and Recent lists link to;
+                # the shell page routes it to the same chat as `/chat`.
+                return self._shell_page()
             if route == "/api/prefs":
-                # The legacy chat page asks for the user's default model
-                # (fused-render's Preferences page); Render App has none.
-                return self._json({"model": {"default": ""}, "native_chat_enabled": False,
-                                   "queue": {"enabled": False}})
+                # fused-render's Preferences store, read by the chat and the
+                # Tasks page for their switches. Render App has no Preferences
+                # page, so every switch is fused-render's default: the native
+                # React chat on, the task side peek on, the project queue off,
+                # no default model.
+                return self._json({"model": {"default": ""}, "chat": {"native": True},
+                                   "queue": {"enabled": False}, "task_peek": {"enabled": True}})
+            if route == "/api/config":
+                return self._json(self._config())
+            if route == "/api/current-apps":
+                # fused-render's sidebar "Current apps" registry; the Tasks page
+                # reads it for the peek's app preview. Render App keeps none.
+                return self._json({"apps": []})
             if route == "/dock":
                 return self._static("dock.html")
             if route == "/launcher":
@@ -406,19 +416,40 @@ class Handler(BaseHTTPRequestHandler):
         page = page.replace("__FILE_JSON__", _js(file)).replace("__URL_JSON__", _js(url))
         self._html(page)
 
-    def _chat_page(self, q: dict) -> None:
-        """`/chat?_file=<folder or file>&session_id=…`: the Claude chat about a
-        target, hosted like `/open` hosts an app — the page keeps the params
-        in its own address (runtime.js reads them from the topmost same-origin
-        window) and mounts the legacy chat template in an iframe."""
-        target = q.get("_file") or q.get("file") or ""
-        if not target:
-            return self._static("tasks.html")
-        with open(os.path.join(STATIC_DIR, "chat.html"), "r", encoding="utf-8") as f:
-            page = f.read()
-        template = os.path.join(TEMPLATES_DIR, "claude", "template.html")
-        page = page.replace("__TEMPLATE_JSON__", _js(template)).replace("__FILE_JSON__", _js(target))
-        self._html(page)
+    @staticmethod
+    def _config() -> dict:
+        """`GET /api/config`: what fused-render's React shell reads at boot
+        (frontend `Config`). The fields the Tasks page and the chat use; the
+        rest name what Render App does not have (no mounts, no native folder
+        picker from the server, no onboarding)."""
+        home = os.path.expanduser("~")
+        return {
+            "start_dir": home,
+            "home": home,
+            "fused_dir": os.path.join(home, "Fused"),
+            "version": __version__,
+            "installed_version": None,
+            "dev": os.environ.get("FUSED_RENDER_DEV") == "1",
+            "engine": "builtin",
+            "mounts_root": "",
+            "cache_dir": paths.home(),
+            "native_dir_picker": False,
+            "render_app": True,
+        }
+
+    def _shell_page(self) -> None:
+        """`/tasks` and `/chat?_file=<folder>&session_id=…`: fused-render's
+        React shell, built from `frontend/` (its Tasks page and native Claude
+        chat, verbatim) into `static/shell-dist/lite.html` — the page routes
+        on `location.pathname` itself (frontend/src/LiteApp.tsx). Assets
+        resolve through `/static/shell-dist/`. Not built: say how, like
+        fused-render's server does."""
+        path = os.path.join(STATIC_DIR, "shell-dist", "lite.html")
+        if not os.path.isfile(path):
+            return self._error("React shell not built (fused_render_app/static/shell-dist/ "
+                               "missing). Run scripts/build_shell.sh.", 503)
+        with open(path, "r", encoding="utf-8") as f:
+            self._html(f.read())
 
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
@@ -899,6 +930,13 @@ class Handler(BaseHTTPRequestHandler):
             "size": None if is_dir else st.st_size,
             "mtime": st.st_mtime,
             "writable": os.access(path, os.W_OK),
+            # fused-render's registry-resolved template modes for a path
+            # (SPEC PT-8). Render App has one: the Claude chat, offered on
+            # every path — the React chat resolves its agent dir from this
+            # entry (`resolveAgentDir`) and the pane logic reads the list.
+            "templates": [{"mode": "claude",
+                           "path": os.path.join(TEMPLATES_DIR, "claude", "template.html"),
+                           "icon": os.path.join(TEMPLATES_DIR, "claude", "icon.svg")}],
         }
 
     def _fs_stat(self, q: dict) -> None:

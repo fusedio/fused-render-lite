@@ -1,0 +1,196 @@
+// Entry resolution for app cards. The rules that matter here are the ones no
+// typecheck can check: where a click lands, and whether the browser's own
+// new-tab gestures still reach the anchor. A wrong answer is either a card that
+// navigates somewhere unexpected or a middle-click that does nothing.
+import { expect, test } from "bun:test";
+
+import type { AppInfo } from "./api";
+import { installDomShim } from "./testDomShim";
+
+// appEntry pulls `navigate`/`urlForFsPath` from router.ts, which reads
+// `location` at MODULE scope (IS_EMBED) — and bun's test runtime has no DOM. A
+// static import is hoisted above any shim, so the shim has to run before the
+// module comes in, hence the dynamic import below. See testDomShim.ts for why
+// this is the one shared stub every suite in the run installs, rather than a
+// stub hand-rolled per file.
+//
+// `openApp` really does call navigate(), which pushes history and fires the
+// nav event. Stubbed rather than avoided: the assertion below is about
+// whether the shell CLAIMED the click, and swapping in a fake openApp would
+// test the fake. Where navigate() then lands is router.ts's business, not
+// this module's.
+installDomShim();
+
+const { entryOf, hrefFor, isBrowserHandledClick, onAppCardClick, openTargetFor, sortApps } =
+  await import("./appEntry");
+
+function app(over: Partial<AppInfo> = {}): AppInfo {
+  return {
+    name: "demo",
+    tag: "local",
+    path: "/w/local/demo",
+    entry_html: "/w/local/demo/index.html",
+    title: null,
+    ...over,
+  };
+}
+
+// A React MouseEvent, reduced to what the handler reads. `preventDefault`
+// records rather than mocks — the assertion is whether the shell claimed the
+// click, and that IS the preventDefault call.
+function click(over: Record<string, unknown> = {}) {
+  let prevented = false;
+  return {
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    defaultPrevented: false,
+    preventDefault() {
+      prevented = true;
+    },
+    get prevented() {
+      return prevented;
+    },
+    ...over,
+  };
+}
+
+test("entryOf prefers entry and falls back to entry_html", () => {
+  expect(entryOf(app({ entry: "/w/e.png", entry_html: null }))).toBe("/w/e.png");
+  // An older backend sends no `entry` at all; the page must not read undefined.
+  expect(entryOf(app({ entry: undefined }))).toBe("/w/local/demo/index.html");
+  expect(entryOf(app({ entry: null, entry_html: null }))).toBe(null);
+});
+
+// ------------------------------------------------------- where a click lands
+
+test("an app with a page entry opens THAT PAGE, not its folder", () => {
+  // D269, the owner's rule: a folder with a top-level html IS that page, and a
+  // card opens the page. It is an ordinary explorer FILE view — no `_mode`, and
+  // none of the machinery D262/D264 removed (there is no app route and no app
+  // template to open it in). The isDir hint is carried and false: the card knows
+  // its entry is a file, so the destination paints the file scaffold at once.
+  //
+  // This REVERSES the previous contract, which opened the folder as a plain
+  // listing; that test is this one.
+  expect(openTargetFor(app())).toEqual({
+    path: "/w/local/demo/index.html",
+    opts: { isDir: false },
+  });
+});
+
+test("an entry that is not a page opens the file itself", () => {
+  // No workspace app is shaped this way today, but `entry` exists for exactly
+  // this case and the fallback below must keep meaning "nothing to open". Same
+  // branch as the page above now — both are files.
+  expect(openTargetFor(app({ entry: "/w/local/demo/table.csv", entry_html: null })))
+    .toEqual({ path: "/w/local/demo/table.csv", opts: { isDir: false } });
+});
+
+test("an app with no entry at all opens its folder", () => {
+  // The one surviving folder destination: nothing to open but the listing.
+  expect(openTargetFor(app({ entry: null, entry_html: null }))).toEqual({
+    path: "/w/local/demo",
+    opts: { isDir: true },
+  });
+});
+
+test("an older server that reports only entry_html still opens the page", () => {
+  // `entry` is the newer key; entryOf falls back, and the fallback must not
+  // quietly degrade a card to its folder.
+  expect(openTargetFor(app({ entry: undefined }))).toEqual({
+    path: "/w/local/demo/index.html",
+    opts: { isDir: false },
+  });
+});
+
+// -------------------------------------------------------------- the new tab
+
+test("href points at the same target a left click opens", () => {
+  // The whole point of building both from openTargetFor: a new tab and an
+  // in-app click cannot land in different places. Every branch is an explorer
+  // URL — the entry page, the single non-page file, or the entry-less folder.
+  expect(hrefFor(app())).toBe("/explorer/view/w/local/demo/index.html");
+  expect(hrefFor(app({ entry: "/w/local/demo/t.csv", entry_html: null }))).toBe(
+    "/explorer/view/w/local/demo/t.csv",
+  );
+  expect(hrefFor(app({ entry: null, entry_html: null }))).toBe("/explorer/view/w/local/demo");
+  // Lockstep stated as the invariant, not just as three matching literals: a
+  // future branch added to openTargetFor is covered by this line.
+  for (const a of [app(), app({ entry: "/w/local/demo/t.csv", entry_html: null }),
+                   app({ entry: null, entry_html: null })]) {
+    expect(hrefFor(a).endsWith(encodeURI(openTargetFor(a).path))).toBe(true);
+  }
+});
+
+test("href encodes a path the URL codec would otherwise break on", () => {
+  // A space, a `#` and a non-ASCII name all have to survive into the href —
+  // an unencoded `#` would truncate the URL at the fragment.
+  expect(hrefFor(app({ path: "/w/local/my app #2", entry_html: null, entry: null }))).toBe(
+    "/explorer/view/w/local/my%20app%20%232",
+  );
+  expect(hrefFor(app({ path: "/w/local/日本", entry_html: null, entry: null }))).toBe(
+    "/explorer/view/w/local/%E6%97%A5%E6%9C%AC",
+  );
+  // The tag/name identity never reaches the URL any more — only the path does,
+  // so an app whose tag and name are hostile is encoded by the same one codec.
+  // The ENTRY is the path now (D269), and it is a hostile name of its own: the
+  // codec has to survive both halves, not just the folder.
+  expect(hrefFor(app({
+    tag: "my tag", name: "app#2", path: "/w/my tag/app#2",
+    entry: "/w/my tag/app#2/my page.html", entry_html: "/w/my tag/app#2/my page.html",
+  }))).toBe("/explorer/view/w/my%20tag/app%232/my%20page.html");
+});
+
+test("the browser keeps every gesture that means 'not this tab'", () => {
+  // Middle-click (and any non-primary button) plus every modifier: Cmd/Ctrl for
+  // a new tab, Shift for a new window, Alt for download. Intercepting any of
+  // them would make the card fight the browser.
+  expect(isBrowserHandledClick(click({ button: 1 }))).toBe(true);
+  expect(isBrowserHandledClick(click({ button: 2 }))).toBe(true);
+  expect(isBrowserHandledClick(click({ metaKey: true }))).toBe(true);
+  expect(isBrowserHandledClick(click({ ctrlKey: true }))).toBe(true);
+  expect(isBrowserHandledClick(click({ shiftKey: true }))).toBe(true);
+  expect(isBrowserHandledClick(click({ altKey: true }))).toBe(true);
+  // A plain left click is the shell's.
+  expect(isBrowserHandledClick(click())).toBe(false);
+});
+
+test("a plain left click is intercepted; a modified one is left alone", () => {
+  const plain = click();
+  onAppCardClick(plain, app());
+  expect(plain.prevented).toBe(true); // in-app navigation, no page reload
+
+  for (const modified of [click({ button: 1 }), click({ metaKey: true }),
+                          click({ ctrlKey: true }), click({ shiftKey: true })]) {
+    onAppCardClick(modified, app());
+    expect(modified.prevented).toBe(false); // the href does the work
+  }
+});
+
+test("a click something else already handled is not hijacked", () => {
+  const handled = click({ defaultPrevented: true });
+  onAppCardClick(handled, app());
+  expect(handled.prevented).toBe(false);
+});
+
+// ------------------------------------------------------------------ ordering
+
+test("sortApps orders by last-opened, modified time standing in", () => {
+  // The one grid order (/home and /apps): opened_at desc; an app never opened
+  // ranks by updated_at; one with neither sinks to the end.
+  const opened = app({ name: "opened", opened_at: 300, updated_at: 10 });
+  const editedButUnopened = app({ name: "edited", opened_at: null, updated_at: 200 });
+  const stale = app({ name: "stale", opened_at: 100, updated_at: 400 });
+  const bare = app({ name: "bare" }); // older backend: neither key at all
+  expect(sortApps([bare, stale, editedButUnopened, opened]).map((a) => a.name))
+    .toEqual(["opened", "edited", "stale", "bare"]);
+});
+
+test("sortApps breaks timestamp ties by display name, stably", () => {
+  const b = app({ name: "b", title: "Beta", opened_at: 100 });
+  const a = app({ name: "a", title: "Alpha", opened_at: 100 });
+  expect(sortApps([b, a]).map((x) => x.name)).toEqual(["a", "b"]);
+});

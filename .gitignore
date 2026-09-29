@@ -13,3 +13,5 @@ dist/
 *.log
 .claude/worktrees/
 fused_render_app/ai/apple/bin/
+fused_render_app/static/shell-dist/
+frontend/node_modules/

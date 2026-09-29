@@ -159,11 +159,34 @@ def sync_runtime(src_root: str) -> None:
     print("js  static/runtime.js (fused.tasks block, %d lines)" % block.count("\n"))
 
 
+#: Render App's own files in `frontend/`: never overwritten by a sync.
+FRONTEND_OWN = ("lite.html", "src/lite.tsx", "src/LiteApp.tsx", "vite.config.js")
+
+
+def sync_frontend(src_root: str) -> None:
+    """Copy fused-render's `frontend/` verbatim (its React shell: the Tasks
+    page, the native Claude chat and everything they import), keeping Render
+    App's own entry files (`FRONTEND_OWN`). Then `scripts/build_shell.sh`."""
+    import subprocess
+
+    src = os.path.join(src_root, "frontend") + os.sep
+    dst = os.path.join(os.path.dirname(DST), "frontend") + os.sep
+    cmd = ["rsync", "-a", "--delete", "--exclude", "node_modules", "--exclude", ".vite"]
+    for own in FRONTEND_OWN:
+        cmd += ["--exclude", own]
+    subprocess.run(cmd + [src, dst], check=True)
+    print("dir frontend/ (kept: %s)" % ", ".join(FRONTEND_OWN))
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("fused_render", help="path to a fused-render checkout (its repo root)")
     ap.add_argument("--runtime", action="store_true", help="also re-splice the fused.tasks runtime.js block")
+    ap.add_argument("--frontend", action="store_true",
+                    help="also re-copy frontend/ (fused-render's React shell), keeping Render App's entry files")
     args = ap.parse_args()
     sync(os.path.abspath(args.fused_render))
     if args.runtime:
         sync_runtime(os.path.abspath(args.fused_render))
+    if args.frontend:
+        sync_frontend(os.path.abspath(args.fused_render))

@@ -1,0 +1,321 @@
+// The app's one INSTANT tooltip, positioned at the POINTER.
+//
+// It exists because the two obvious answers are each wrong in one way, and this
+// page needed both halves. A native `title` is placed perfectly — the browser
+// draws it at the cursor, so it can never caption the wrong row and can never be
+// clipped by a scroller — but its delay is the browser's and unreachable from
+// CSS: measured on the Tasks list, the FIRST hover of a session waits four to
+// five seconds ("the very first time I hover, area label takes 4 to 5 seconds").
+// A CSS `::before` panel is instant and unplaceable: it is absolutely positioned
+// against its own element, so on the first row of a list it opens over the row
+// below, and on the last cell of a row it hangs outside the scroller. Both of
+// those shipped here and both were reported.
+//
+// Following the pointer is what has neither problem. One fixed-position element
+// for the whole document, moved to the cursor, shown with no delay:
+//
+//   * INSTANT, because nothing schedules it — `pointerover` shows it.
+//   * never displaced, because the cursor is by definition where the reader is
+//     looking, so the caption cannot land on a different row's ink.
+//   * never clipped, because `position: fixed` on a child of <body> is outside
+//     every `overflow` on the page.
+//
+// Opt in with `data-hint="…"`. Deliberately NOT `data-tip`, which is the older
+// CSS panel and still the right tool for the one thing it does — the status
+// ring's unread count, a mark in a COLUMN of identical marks, where a 300ms
+// guard against strobing is the point rather than an obstacle.
+//
+// One delegated listener set for the whole document rather than a React
+// component per tip: the tips are on rows in a list that can hold hundreds, and
+// a component and a piece of state per mark is a lot of machinery to say a file
+// path.
+
+/** How far the panel sits from the cursor's hotspot. Below and right, like the
+ *  platform's own tooltips, so the panel never covers the thing being pointed
+ *  at — a caption you have to move the pointer off to read is worse than none. */
+const OFFSET_X = 12;
+const OFFSET_Y = 18;
+/** Keep the panel this far inside the viewport before flipping it. */
+const EDGE = 8;
+
+let panel: HTMLDivElement | null = null;
+let host: Element | null = null;
+let installed = false;
+
+function ensurePanel(): HTMLDivElement {
+  if (panel) return panel;
+  panel = document.createElement("div");
+  panel.className = "hint-panel";
+  // `aria-hidden`, and it is not an oversight: every element that opts in also
+  // carries its own accessible name (see the call sites), so announcing this
+  // panel too would say the same sentence twice to a screen reader. This is a
+  // drawing of something the DOM already states.
+  panel.setAttribute("aria-hidden", "true");
+  document.body.appendChild(panel);
+  return panel;
+}
+
+/** The nearest ancestor with a hint, or null — resolved from an ELEMENT. Used by
+ *  the focus path, where there is no pointer to ask about.
+ *
+ *  An EMPTY hint stops the walk and answers null rather than deferring to an
+ *  ancestor. That is the opt-out: a band around a control (see the Tasks list's
+ *  `.schedule-tv-id-shield`) has to be able to say "nothing here" inside a
+ *  region whose parent does have a caption. */
+function hintOf(target: EventTarget | null): Element | null {
+  if (!(target instanceof Element)) return null;
+  const el = target.closest("[data-hint]");
+  if (!el) return null;
+  return (el.getAttribute("data-hint") || "").trim() ? el : null;
+}
+
+/** The hinted element under a POINT, piercing overlays.
+ *
+ *  `event.target` alone is not enough, and the case that proves it is the Tasks
+ *  row: its navigation is an `<a>` stretched over the whole row, so the pointer
+ *  lands on the LINK and never on the title underneath it — and the title is
+ *  what carries the caption. Lifting the title above the link instead would take
+ *  the click with it and stop the row from opening, so the fix belongs here.
+ *
+ *  `elementsFromPoint` gives the whole stack, topmost first. The first entry
+ *  that resolves to a hinted element decides — including deciding NOTHING, when
+ *  that element's hint is empty, so an opt-out placed above a caption still
+ *  wins.
+ *
+ *  PIERCING STOPS AT A MODAL. `elementsFromPoint` walks the whole stack
+ *  regardless of what visually blocks the pointer — a stretched link over a
+ *  row's own title and a New Task dialog sitting over that same row read
+ *  identically to this loop, "an element with no hint, keep going." That
+ *  correctly reaches the title in the first case (same row, sharing this
+ *  pointer's screen position on purpose) and wrongly reaches it in the second
+ *  (a DIFFERENT row's title, portalled to <body>, that has nothing to do with
+ *  the dialog above it) — hovering anywhere over the New Task card showed the
+ *  caption of whatever List row happened to sit under it (Akshil, 2026-09-03).
+ *  A dialog's overlay (`.modal-overlay`, every modal's chassis — Modal.tsx,
+ *  FsDialogs) covers the full viewport and owns every point inside it, so once
+ *  the walk reaches it the answer is decided: nothing further down the stack —
+ *  behind the backdrop — ever gets to caption this pointer. */
+function hintAt(x: number, y: number, target: EventTarget | null): Element | null {
+  if (typeof document.elementsFromPoint !== "function") return hintOf(target);
+  for (const node of document.elementsFromPoint(x, y)) {
+    const el = node.closest("[data-hint]");
+    if (el) return (el.getAttribute("data-hint") || "").trim() ? el : null;
+    if (node.closest(".modal-overlay")) return null;
+  }
+  return null;
+}
+
+/** THE TASK FORM FOLLOWS THE POINTER INSIDE THE MIDDLE 80% OF THE VIEWPORT
+ *  (Akshil, 2026-09-19): its LEFT edge starts at the pointer, like every other
+ *  caption, and it is CLAMPED to the band rather than flipped — the old flip
+ *  swung a 90ch panel its whole width on one pixel of travel near the right
+ *  edge. At the band's end the panel stops and the pointer walks on without it. */
+const BAND = 0.8;
+function placeTask(x: number, y: number): void {
+  const p = ensurePanel();
+  const w = measureWidth(p);
+  const h = p.offsetHeight;
+  const vw = window.innerWidth;
+  const bandLeft = vw * (1 - BAND) / 2;
+  const bandRight = vw - bandLeft;
+  let left = x + OFFSET_X;
+  if (w >= bandRight - bandLeft) left = (vw - w) / 2;
+  else left = Math.min(bandRight - w, Math.max(bandLeft, left));
+  let top = y + OFFSET_Y;
+  if (top + h > window.innerHeight - EDGE) top = Math.max(EDGE, y - OFFSET_Y - h);
+  p.style.left = `${Math.round(left)}px`;
+  p.style.top = `${Math.round(top)}px`;
+}
+
+/** The panel's width with the whole viewport to lay out in. A `position:
+ *  fixed` box with a `left` set shrink-wraps to the room to its RIGHT, so a
+ *  panel measured where the last hint left it — near the right edge — reads
+ *  narrower than it will be once moved, and the clamp computed from that
+ *  width lets it overflow. That is the "entered from the right without
+ *  moving" bug: one placement, from a stale left. Measured at 0 instead. */
+function measureWidth(p: HTMLDivElement): number {
+  p.style.left = "0px";
+  return p.offsetWidth;
+}
+
+function place(x: number, y: number): void {
+  const p = ensurePanel();
+  // The band is for the ROW's two-line form, whose 90ch panel used to swing
+  // on a flip. The Board card's reply-only form is a short caption and starts
+  // at the cursor like every other hint (Akshil, 2026-09-20: "let's not apply
+  // it for the kanban board, have the tooltip start from the cursor").
+  if (p.classList.contains("is-task") && !p.classList.contains("is-reply")) {
+    placeTask(x, y);
+    return;
+  }
+  // Measured after the text is in, because the flip depends on the width.
+  const w = measureWidth(p);
+  const h = p.offsetHeight;
+  let left = x + OFFSET_X;
+  let top = y + OFFSET_Y;
+  // Flip rather than clamp when the panel would leave the viewport: a clamped
+  // panel sits under the cursor and covers what the reader is pointing at.
+  if (left + w > window.innerWidth - EDGE) left = Math.max(EDGE, x - OFFSET_X - w);
+  if (top + h > window.innerHeight - EDGE) top = Math.max(EDGE, y - OFFSET_Y - h);
+  p.style.left = `${Math.round(left)}px`;
+  p.style.top = `${Math.round(top)}px`;
+}
+
+/** The separator a caption uses to say "this token, then what it means". */
+const GLOSS = " \u2014 ";
+
+/** A caption whose every line is `token — meaning` is a TABLE, and setting it
+ *  as text renders it as prose: the dashes land wherever each token happens to
+ *  end, so the meanings never form a column and the tokens get no distinction
+ *  from the sentences explaining them. Two spans a line and a grid gives the
+ *  reader the shape the caption already has.
+ *
+ *  Every line has to qualify. A caption with one glossed line among prose is
+ *  prose with a dash in it, and columnising it would strand the rest. */
+function renderHint(p: HTMLDivElement, text: string): void {
+  const lines = text.split("\n");
+  if (lines.length < 2 || !lines.every((line) => line.includes(GLOSS))) {
+    p.textContent = text;
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "hint-grid";
+  for (const line of lines) {
+    const cut = line.indexOf(GLOSS);
+    const key = document.createElement("span");
+    key.className = "hint-key";
+    key.textContent = line.slice(0, cut);
+    const def = document.createElement("span");
+    def.className = "hint-def";
+    def.textContent = line.slice(cut + GLOSS.length);
+    grid.append(key, def);
+  }
+  p.replaceChildren(grid);
+}
+
+/** THE TASK ROW'S OWN FORM (Akshil, 2026-09-19): hovering the title or the
+ *  reply shows BOTH, untruncated, in the styles the row prints them in — the
+ *  title's line, then the reply's. Opted into with `data-hint-title` (and an
+ *  optional `data-hint-reply`) beside `data-hint`; `data-hint` stays as the
+ *  plain-text fallback so `hintAt` resolves the element the same way.
+ *
+ *  Either line may be left out — an empty `data-hint-title` with a reply is
+ *  the Board card's REPLY-ONLY caption (Akshil, 2026-09-20: "let's not show
+ *  the title, only the last reply"), still in the reply line's own style.
+ *  Both empty is not this form at all, and the plain `data-hint` draws. */
+function renderTaskHint(p: HTMLDivElement, el: Element): boolean {
+  if (!el.hasAttribute("data-hint-title")) return false;
+  const title = (el.getAttribute("data-hint-title") || "").trim();
+  const reply = (el.getAttribute("data-hint-reply") || "").trim();
+  if (!title && !reply) return false;
+  // The reply-only form is marked, because it is PLACED differently (see
+  // `place`) and reads narrower (tasks.css `.is-reply`).
+  p.classList.toggle("is-reply", !title);
+  const wrap = document.createElement("div");
+  wrap.className = "hint-task";
+  if (title) {
+    const t = document.createElement("div");
+    t.className = "hint-task-title";
+    t.textContent = title;
+    wrap.append(t);
+  }
+  if (reply) {
+    const r = document.createElement("div");
+    r.className = "hint-task-reply";
+    r.textContent = reply;
+    wrap.append(r);
+  }
+  p.replaceChildren(wrap);
+  return true;
+}
+
+function show(el: Element, x: number, y: number): void {
+  const p = ensurePanel();
+  const task = renderTaskHint(p, el);
+  if (!task) renderHint(p, el.getAttribute("data-hint") || "");
+  p.classList.toggle("is-task", task);
+  if (!task) p.classList.remove("is-reply");
+  p.classList.add("is-on");
+  place(x, y);
+}
+
+export function hideHint(): void {
+  host = null;
+  if (panel) {
+    panel.classList.remove("is-on");
+    // Emptied as well as hidden: stale content in a hidden panel is content
+    // that flashes on the next show, before its own text lands.
+    panel.replaceChildren();
+  }
+}
+
+function onOver(e: PointerEvent): void {
+  const el = hintAt(e.clientX, e.clientY, e.target);
+  if (!el) {
+    if (host) hideHint();
+    return;
+  }
+  host = el;
+  show(el, e.clientX, e.clientY);
+}
+
+function onMove(e: PointerEvent): void {
+  // Asked on EVERY move rather than only while a hint is up, because the
+  // element under the pointer can change without any `pointerover` this sees:
+  // the row's stretched link is one continuous element, so moving from the
+  // title onto the empty space beside it never crosses an event boundary even
+  // though the answer changes from "the task's name" to "nothing".
+  const el = hintAt(e.clientX, e.clientY, e.target);
+  if (!el) {
+    if (host) hideHint();
+    return;
+  }
+  if (el !== host) {
+    host = el;
+    show(el, e.clientX, e.clientY);
+    return;
+  }
+  place(e.clientX, e.clientY);
+}
+
+function onOut(e: PointerEvent): void {
+  if (!host) return;
+  // `relatedTarget` is where the pointer went. Moving between two children of
+  // the same hinted element must not flicker the panel off and on.
+  if (hintOf(e.relatedTarget) === host) return;
+  hideHint();
+}
+
+/** Keyboard focus gets the same caption, anchored to the ELEMENT rather than to
+ *  a pointer that is not there. Without this the hint is a mouse-only feature,
+ *  which for a control whose only explanation is its hint is a control a
+ *  keyboard cannot understand. */
+function onFocus(e: FocusEvent): void {
+  const el = hintOf(e.target);
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  host = el;
+  show(el, r.left + r.width / 2 - OFFSET_X, r.bottom - OFFSET_Y + 6);
+}
+
+/** Install the one listener set. Idempotent, so a re-render or a second caller
+ *  cannot end up with two panels or a doubled listener set. */
+export function installHints(): void {
+  if (installed || typeof document === "undefined") return;
+  installed = true;
+  // `capture: true` on all of them: a row that calls `stopPropagation` on its
+  // own pointer events (this app has several) would otherwise silence the hint
+  // for everything inside it.
+  document.addEventListener("pointerover", onOver, true);
+  document.addEventListener("pointermove", onMove, true);
+  document.addEventListener("pointerout", onOut, true);
+  document.addEventListener("focusin", onFocus, true);
+  document.addEventListener("focusout", hideHint, true);
+  // A press means the reader has decided; the caption has nothing left to add,
+  // and on a control that navigates it would otherwise outlive the page.
+  document.addEventListener("pointerdown", hideHint, true);
+  // Anything that moves the page out from under a fixed panel: the panel is
+  // anchored to viewport coordinates the scroll has just invalidated.
+  window.addEventListener("scroll", hideHint, true);
+  window.addEventListener("blur", hideHint);
+}

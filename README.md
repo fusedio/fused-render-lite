@@ -60,17 +60,23 @@ download page) — `editlink.py`.
 
 ### Claude tasks
 
-Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens the Tasks
-page: every Claude Code session on this machine as a task (`TASK-nnn` per
-folder), with its chat beside the list. A task is one `claude` session run
-by fused-render's chat engine, copied into the package
+Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens fused-render's
+Tasks page — the same React page (List / Board / Cards / Calendar, filters,
+New task, the side peek with the chat in it): `frontend/` is fused-render's
+frontend copied verbatim, built into `static/shell-dist/` by
+`scripts/build_shell.sh`, with Render App's own entry (`frontend/lite.html`,
+`src/lite.tsx`, `src/LiteApp.tsx`) hosting two routes: `/tasks`, and
+`/chat?_file=<folder>` — fused-render's native chat beside the folder's app
+(the explorer-style `/explorer/view/<path>?_side=claude` links the page
+makes open the same chat). A task is one `claude` session run by
+fused-render's chat engine, copied into the package
 (`fused_render_app/templates/claude/`): permission cards, follow-ups into a
-live session, snapshots, scheduling. New task asks for a folder and a
-prompt; the chat page (`/chat?_file=<folder>`) is the split view of the
-folder's app beside the conversation. Pages get the same thing
+live session, snapshots, scheduling. Pages get the same thing
 programmatically as `fused.tasks.*` (fused-render D890). State lives under
 `~/.fused-render-app/claude-sessions/`, apart from fused-render's own; the
-transcripts are Claude Code's, under `~/.claude/projects`.
+transcripts are Claude Code's, under `~/.claude/projects`. Re-sync from a
+fused-render checkout with `scripts/sync_claude_tasks.py <path> --runtime
+--frontend`.
 
 ⌥Space (change it in Settings — the gear on the home page — or from the
 search panel's footer; right-click the menu-bar item → "Search Apps…" opens

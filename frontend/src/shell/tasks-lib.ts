@@ -1,0 +1,5560 @@
+// The Tasks page's pure half — everything the List accordion and the Board
+// decide, with no DOM and no React in it, so the rules are testable on their
+// own (shell/tasks-lib.test.ts) and the components are left holding markup.
+//
+// The model:
+//
+//   PROJECT (a folder)
+//   └─ TASK-002        one Claude session, one thread
+//      ├─ MSG-003      newest first
+//      ├─ MSG-002
+//      └─ MSG-001
+//
+// The server hands us that shape already merged, already titled, already
+// counted and already sorted (newest task first). Nothing here re-derives a
+// status or re-titles a row: the one place those are decided is the server, and
+// a client that guesses a second answer is a client that disagrees with itself
+// on the next poll.
+//
+// ORDER HAS EXACTLY ONE EXCEPTION, and it is named: sortLane, applied by
+// groupByColumn. It is not the Board's alone any more — the List and the Cards
+// wall read that very map, flattened (`sortForList`, 2026-09-14), so there is
+// one ordering function on this page and not three that agree by inspection.
+// `filterTasks` below still filters and nothing else: filtering and ordering are
+// separate passes, and the order is decided in exactly one of them.
+//
+// A LANE is a narrower question, and Upcoming's is the opposite one. A column of
+// work that has not happened yet is read to find out what happens NEXT, and
+// "most recently touched" is not that: a task edited an hour ago and due in
+// October outranks the one firing in ten minutes (Akshil, 2026-08-17: "in
+// upcoming the most recent tasks [close to current time] would be on top, in
+// done and failed the recent runs will be on top"). So Upcoming runs SOONEST
+// FIRST — ascending — and the settled lanes run most-recent-run first, which is
+// the same instinct pointed at the past.
+//
+// This is a presentation of the same data, not a second opinion about it: no
+// status is re-derived, no lane membership is re-decided (taskColumn still asks
+// the server), and every key is a time the server itself sent.
+import { EMBED_PREFIX, IS_QUERY_EMBED, VIEW_PREFIX } from "@platform/lib/router";
+import type { Task, TaskMessage, TaskPulseTask } from "@platform/lib/api";
+import { labelForSource } from "@platform/lib/format";
+// Imported as well as re-exported below: `sortLane` reads it, and a bare
+// `export ... from` binds nothing in this module's own scope.
+import {
+  CHAT_ENTRY_ORIGIN,
+  chatUrl,
+  PENDING_KEY_PREFIX,
+  pendingEntryId,
+  queuePosition,
+  runningWaitingLabel,
+  waitingLabel,
+} from "@platform/lib/queue";
+import {
+  addDays,
+  BOARD_COLUMNS,
+  BOARD_LANES,
+  explorerUrl,
+  folderHref,
+  laneOf,
+  isProjected,
+  startOfDay,
+  taskStatus,
+  turnPhase,
+} from "./schedule-lib";
+import type { BoardColumn, BoardLane, RunStatus } from "./schedule-lib";
+
+// How many messages the LISTING carries per task — the server's window, not a
+// display cap: an expanded task draws every message it has (there is no Show more
+// button since 2026-08-18), and this is how many arrive before the fetch does.
+// The server sends exactly this many in `task.messages`; the constant is here
+// so the cap and the "is there more?" test cannot drift apart.
+export const PREVIEW_MESSAGES = 3;
+
+// ---- small string helpers ----------------------------------------------------
+
+/** The first non-empty line of a body. A prompt is routinely a paragraph — a
+ * pasted URL, a blank line, then the instruction — and a row prints its opening
+ * line while the whole thing stays the tooltip. */
+export function firstLine(text: string): string {
+  return text.split("\n").map((s) => s.trim()).find(Boolean) ?? text.trim();
+}
+
+/** What a task's title row draws, and whether it is a message. */
+export interface CardTitle {
+  /** The one line to print. "" when the task has neither a message nor a title,
+   *  which is the view's own cue to print its "(untitled)" word — one place
+   *  decides those words, and it is not this one. */
+  text: string;
+  /** It is the conversation's newest message rather than the task's title.
+   *  The caption follows it (the message, not the title, is what the one-line
+   *  clamp is hiding); nothing else on the row changes with it. */
+  said: boolean;
+}
+
+/** THE ONE LINE EVERY VIEW TITLES A TASK BY — the List row, the Board card,
+ *  the Cards wall and the peek header: the reader's newest message in the
+ *  conversation, first line only, or the task's own title for a task nothing
+ *  has been said in yet (a task that has never run, a server that predates
+ *  the field). Always on since 2026-09-20 (Akshil: removing a Preferences
+ *  switch means the feature is on by default) — until then it was the
+ *  `task_card_last_message` experiment. The fallback is not a nicety: a wall
+ *  where some cards carried a message and others were simply blank would read
+ *  as a wall of broken cards. */
+export function cardTitleLine(task: {
+  title?: string | null;
+  last_message?: { text: string } | null;
+}): CardTitle {
+  const said = firstLine(task.last_message?.text ?? "");
+  return said ? { text: said, said: true } : { text: firstLine(task.title ?? ""), said: false };
+}
+
+/** A path as a person reads it: $HOME collapsed to "~". */
+export function tildePath(path: string, home: string): string {
+  if (!home) return path;
+  const h = home.replace(/[\\/]+$/, "");
+  if (path === h) return "~";
+  if (path.startsWith(h + "/")) return "~/" + path.slice(h.length + 1);
+  return path;
+}
+
+/** The last segment of a path — what the folder chip prints. "/" stays "/". */
+export { shortTaskId } from "@platform/lib/task-id";
+
+export function basename(path: string): string {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+// ---- when a message happened -------------------------------------------------
+// The spec's own wording: "09:00 today", "09:00 yesterday", "09:00 Monday".
+// Deliberately NOT toLocaleString: the thread is read as a column of times, and
+// a column only reads as one when every row is the same width — a locale that
+// swaps between "9:00 AM" and "09:00" costs that alignment, and the day word is
+// what carries the meaning anyway. 24h, zero-padded, then the day.
+
+const DAY_NAMES = [
+  "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+];
+const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** Whole days between two instants, by LOCAL calendar day — not by elapsed
+ * hours. 23:59 and 00:01 are a day apart to a reader and two minutes apart to a
+ * clock, and the reader is right. */
+function dayDelta(then: Date, now: Date): number {
+  const a = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime();
+  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return Math.round((a - b) / 86400000);
+}
+
+/** The day half of a message stamp: today / yesterday / tomorrow, a weekday
+ * name inside the surrounding week, an absolute date beyond it. */
+export function dayLabel(at: Date, now: Date): string {
+  const delta = dayDelta(at, now);
+  if (delta === 0) return "today";
+  if (delta === -1) return "yesterday";
+  if (delta === 1) return "tomorrow";
+  // Inside the week either side, the weekday alone is unambiguous and shorter.
+  if (delta > -7 && delta < 7) return DAY_NAMES[at.getDay()];
+  const date = `${at.getDate()} ${MONTH_NAMES[at.getMonth()]}`;
+  return at.getFullYear() === now.getFullYear() ? date : `${date} ${at.getFullYear()}`;
+}
+
+/** "09:00 today". `at` is epoch SECONDS (the API's unit), not ms. */
+export function messageTime(at: number, now: number = Date.now()): string {
+  if (!at) return "";
+  const d = new Date(at * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())} ${dayLabel(d, new Date(now))}`;
+}
+
+/** The absolute stamp, for the row's tooltip — the relative label above is for
+ * scanning, and "Monday" is not an answer to "which Monday?". */
+export function messageStamp(at: number): string {
+  if (!at) return "";
+  const d = new Date(at * 1000);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
+}
+
+/** Under this, the two times are the same fact told twice — a send is never
+ * instantaneous and a second of drift is not news. */
+export const RAN_SKEW_SECONDS = 60;
+
+/**
+ * Whether this message RAN AT A DIFFERENT TIME than it was due: `at` is what was
+ * asked for and never moves, `ran_at` is when the turn actually started, and they
+ * part company two ways —
+ *
+ *   * late, when the app was shut at the due minute and the run was caught up,
+ *   * early, when someone dragged the task into In Progress and ran it now.
+ *
+ * The early case is the whole reason run-now leaves `due` alone (§2 of this
+ * round's fixes): the schedule keeps saying 09:00 and the row says it ran at
+ * 07:12, which is the truth. Rewriting `due` to the moment of the drag would
+ * have made the row read as if 07:12 had always been the plan.
+ *
+ * This used to FORMAT that second time as well ("ran 07:12 today", drawn beside
+ * the row's own stamp), and the label is gone: 2026-08-17, Akshil, "I don't think
+ * I need this as well, the RAND Today stuff" — a message row carrying two absolute
+ * times was the same crowding the whole evening was spent trimming. The
+ * distinction is not gone with it: it decides the tooltip below, which is where
+ * both instants are still spelled out in full.
+ */
+export function ranOffSchedule(m: TaskMessage): boolean {
+  // No `now` in the signature, and that is the shape of the answer rather than an
+  // omission: this compares two stamps the server wrote against each other, so the
+  // current time cannot change it. The clock only mattered while the helper
+  // FORMATTED the label — "ran 07:12 today" has to know what today is.
+  if (!m.at || !m.ran_at) return false;
+  return Math.abs(m.ran_at - m.at) >= RAN_SKEW_SECONDS;
+}
+
+/** The time cell's tooltip, and since the label above went, the ONLY place a late
+ * or early run is spelled out: the absolute stamp it was due at, plus the one it
+ * actually ran at whenever the two are different facts. */
+export function messageWhenTitle(m: TaskMessage): string {
+  const due = messageStamp(m.at);
+  if (!ranOffSchedule(m)) return due;
+  return `Scheduled for ${due} · ran ${messageStamp(m.ran_at)}`;
+}
+
+// ---- "30m ago", "in 2h" -------------------------------------------------------
+
+/** Under a minute in the PAST reads as this. A run that landed forty seconds ago
+ * is news about now, and "0m ago" is not a thing anyone says. */
+export const JUST_NOW = "just now";
+/** ...and under a minute in the FUTURE cannot borrow that word: on an Upcoming row
+ * "just now" would say the run has already happened. `<1m` keeps the direction. */
+export const IMMINENT = "in <1m";
+
+const MINUTE = 60;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+/** Calendar months are not equal, and a row that says "1mo ago" is not making a
+ * claim that survives being exact — this is the same 30-day month
+ * platform/lib/format.timeAgo has always used, so the two agree. */
+const MONTH = 30 * DAY;
+const YEAR = 12 * MONTH;
+
+/**
+ * How long ago, or how long until — ONE unit, always (Akshil, 2026-08-17: the row
+ * ended in `15:53 29 Jul 🗀 ppt_builder` and "both the folder and the time with the
+ * date, they are like too much for me to handle"; the reference they sent reads
+ * `30m ago`, `31m ago`, `1mo ago`).
+ *
+ * Never two units: "1mo 3d ago" is a readout, and this is a glance. The exact
+ * instant is never dropped, only moved — every caller puts it in the element's
+ * `title`, so hovering still answers "when exactly?".
+ *
+ * BOTH DIRECTIONS, which the reference has no case for and this page is full of:
+ * most of Upcoming is in the future, and "5m ago" on a run that has not happened
+ * is simply false. So a future instant reads `in 5m`.
+ *
+ * FLOOR, not round, at every boundary — 89 minutes is `1h ago`, not `1h ago`
+ * rounded up from something it never was, and 23h59m is `23h ago` rather than
+ * jumping a day early. It is the rule platform/lib/format.timeAgo already uses,
+ * and the one that cannot ever name a unit the instant has not reached.
+ *
+ * `now` is a PARAMETER and the clock is never read in here, which is what makes
+ * every boundary above testable. That is also why neither existing helper could be
+ * reused: format.timeAgo reads `Date.now()` itself and has no future direction at
+ * all, and schedule-lib.relativeDue takes an ISO string, rounds rather than floors
+ * and stops at days (no `mo`, no `y`). Both are still right for their own callers.
+ */
+export function relativeWhen(at: number, now: number = Date.now()): string {
+  if (!at) return "";
+  const secs = at - now / 1000;
+  const ahead = secs > 0;
+  const s = Math.abs(secs);
+  if (s < MINUTE) return ahead ? IMMINENT : JUST_NOW;
+  const say = (n: number, unit: string) => (ahead ? `in ${n}${unit}` : `${n}${unit} ago`);
+  if (s < HOUR) return say(Math.floor(s / MINUTE), "m");
+  if (s < DAY) return say(Math.floor(s / HOUR), "h");
+  if (s < MONTH) return say(Math.floor(s / DAY), "d");
+  if (s < YEAR) return say(Math.floor(s / MONTH), "mo");
+  return say(Math.floor(s / YEAR), "y");
+}
+
+// ---- a message's own state ---------------------------------------------------
+// The task carries a status decided server-side; a MESSAGE does not, and the
+// ring beside each sub-row is the only place the thread says how a given run
+// went. Two facts collapse into it — `state` (did it go out) and `turn` (how
+// the session then answered) — exactly as schedule-lib.stateTone collapses the
+// scheduler's pair, because reporting a dead turn as a clean send is the one
+// mistake this row must not make.
+
+export interface MessageTone {
+  column: BoardColumn;
+  /** Paint the ring red rather than the column's hue: settled, but not well. */
+  failed: boolean;
+  /** What the ring's tooltip says. */
+  label: string;
+}
+
+/**
+ * WHY THERE ARE TWO `messageTone`s (this one, and schedule-lib's).
+ *
+ * They answer different questions about the same message and neither is a
+ * superset of the other:
+ *
+ *   - This one returns a BOARD COLUMN plus a failed flag and an English label —
+ *     four buckets, because that is how many lanes the Board has.
+ *   - schedule-lib's returns one of six CALENDAR TONES, which are CSS classes
+ *     (`--missed` is amber, `--error` is red, `--skipped` is grey), and it
+ *     draws distinctions this one has already collapsed: a missed one-off is
+ *     `missed` there and `done`+failed here, a cancelled message is `skipped`
+ *     there and `archived`/"Cancelled" here.
+ *
+ * Deriving either from the other would therefore lose a distinction the losing
+ * view actually paints. A merge is also blocked mechanically: schedule-lib is
+ * the LOWER module (this file imports explorerUrl and BoardColumn from it), so
+ * schedule-lib importing back would be a cycle.
+ *
+ * What is genuinely shared is the reading of `turn` — the half that caused the
+ * bug — and that now lives in exactly one place, schedule-lib.turnPhase, which
+ * both call. Change the meaning of `turn` there and both views move together.
+ */
+export function messageTone(m: TaskMessage): MessageTone {
+  switch (m.state) {
+    case "pending":
+      return { column: "upcoming", failed: false, label: "Scheduled" };
+    case "sending":
+      return { column: "in_progress", failed: false, label: "Sending…" };
+    case "cancelled":
+      return { column: "archived", failed: false, label: "Cancelled" };
+    // A SKIPPED occurrence is routine (the next run is already coming), so it
+    // is filed away rather than flagged. A missed ONE-OFF is a fault: the run
+    // the user asked for never happened, and it must not paint the green ring.
+    case "skipped":
+      return { column: "archived", failed: false, label: "Skipped" };
+    case "missed":
+      return m.template_id
+        ? { column: "archived", failed: false, label: "Skipped" }
+        : { column: "done", failed: true, label: "Missed" };
+    case "error":
+      return { column: "done", failed: true, label: "Failed" };
+    case "sent":
+    default:
+      // `sent` only means the turn STARTED. How it ended is the second fact,
+      // and turnPhase is the one place that fact is read (schedule-lib).
+      switch (turnPhase(m.turn)) {
+        case "unreported":
+          // Not "Running…": nothing is watching it any more, and saying
+          // otherwise is the frozen-progress-bar lie.
+          return { column: "done", failed: true, label: "Stopped reporting" };
+        case "running":
+          return { column: "in_progress", failed: false, label: "Running…" };
+        // "done", "idle", or whatever a newer server writes — the turn ended.
+        default:
+          // A run the USER stopped (the queue card's ✕, which really kills the
+          // process — schedule.py `_turn_tick`). It is a settled outcome and
+          // therefore Done, not a fault: the stop was asked for, so flying a
+          // red mark would ask the reader to deal with their own decision. What
+          // it is not is indistinguishable from a run that finished — the dock
+          // and the schedule list both say "Stopped", and a board saying "Ran"
+          // for the same run is two surfaces describing one outcome with
+          // opposite words. Same word, same lane, one fact.
+          return m.turn === "cancelled"
+            ? { column: "done", failed: false, label: "Stopped" }
+            : { column: "done", failed: false, label: "Ran" };
+      }
+  }
+}
+
+/**
+ * ARCHIVING A TASK ARCHIVES ITS THREAD — the message tone a row actually wears.
+ *
+ * `messageTone` above answers "what happened to this message", which is a fact
+ * about the message and nothing else. It was also, until 2026-08-18, the only
+ * thing the thread rows asked, and that made archiving look like it had half
+ * worked: the task card moved to Archive and the ten rows underneath it stayed
+ * green, amber and red, still reading as live work. A task is a thread, so
+ * filing the task files the thread — one gesture, one outcome, everywhere
+ * (design-principles §1).
+ *
+ * Archived is a PLACE, not an event, so the cascade changes only where a row is
+ * filed and never what it says happened: the label is left exactly as it was, so
+ * an archived thread can still be read back run by run. The `failed` flag does
+ * go — archiving is the "I have dealt with this" gesture, and a filed task that
+ * still flies a red mark is asking to be dealt with again.
+ *
+ * THE ONE EXCEPTION IS A TURN THAT IS STILL RUNNING. Filing something does not
+ * stop it, and a running turn is the one fact on this page that is about the
+ * present rather than the past — it stops being true on its own, in a minute or
+ * two, and until it does, saying otherwise is a lie the reader can watch. So a
+ * running message keeps its own tone, and the task keeps reading as In Progress
+ * over the archive record until the turn ends (the server's `_status` makes that
+ * half of the promise — see fused_render/server/routers/tasks.py). The archive
+ * is not lost either way: it is still recorded, and the moment the turn is over
+ * the task and its whole thread fall back into Archive.
+ */
+export function threadTone(task: Task, m: TaskMessage): MessageTone {
+  const tone = messageTone(m);
+  if (taskColumn(task) !== "archived") return tone;
+  if (tone.column === "in_progress") return tone;
+  return { ...tone, column: "archived", failed: false };
+}
+
+/**
+ * THE STATE WORD AND RING ONE MESSAGE WEARS inside an expanded List row.
+ *
+ * The thread used to draw a ring and nothing else: the hue said "upcoming" or
+ * "in progress" and the word for it lived only in the ring's tooltip, which is
+ * to say nowhere a person reading down a thread would find it. With the queue on,
+ * a thread routinely holds a message that is RUNNING directly above one that is
+ * WAITING for the same folder, and those two are the same shade of yellow family
+ * apart — so the row says which, in a word, beside the ring (Akshil, 2026-09-12).
+ *
+ * FOUR WORDS FOR THE FOUR THINGS THAT HAPPEN, and they are the lane's own words
+ * so a reader carries one vocabulary between the two:
+ *
+ *   * `running` — the turn is in flight (amber, `--status-progress`).
+ *   * `queued` — its time has come and its folder is busy (the SAME yellow,
+ *     `--status-queued` is an alias of `--status-progress`; the ring is dashed,
+ *     which is the whole of the difference), the lane's waiting half.
+ *   * `failed` — settled badly, whatever spelling of badly.
+ *   * `done` — settled.
+ *
+ * …plus `scheduled` for a message whose time has NOT come, which is not a queue
+ * state at all and must not be dressed as one, and the archive's own two words
+ * (`cancelled` / `skipped`) for a message nothing will ever do again.
+ *
+ * QUEUED IS THE MESSAGE'S OWN TWO FACTS — past due, still pending — and nothing
+ * else (schedule-lib's `queueRole` fallback rule, which that module already calls
+ * "not a guess"). It asked the TASK as well until 2026-09-12, and that second
+ * half was wrong for the commonest shape this feature makes: a task whose first
+ * message is RUNNING reads `in_progress`, never `queued`, so its own second
+ * message — pending, overdue, and held behind the very turn in flight above it —
+ * printed `scheduled`, which says "its time has not come" about a message that is
+ * late and standing in a line (Bugbot PR #1124). The task's status is a fact
+ * about the TASK; this row is a sentence about one message.
+ */
+export interface MessageState {
+  /** The word the row prints. */
+  word: string;
+  /** The ring's hue, as a BoardColumn — `queued` and `in_progress` are the two
+   *  the queue actually separates. */
+  column: BoardColumn;
+  /** Paint the ring red: settled, but not well. */
+  failed: boolean;
+  /** The ring's tooltip — `messageTone`'s own English, unchanged. */
+  label: string;
+}
+
+export function messageState(
+  task: Task,
+  m: TaskMessage,
+  /**
+   * IS THE QUEUE ON AT ALL (prefs `queue.enabled`) — and it is required rather
+   * than defaulted, because forgetting it is the bug (🔴 review 2026-09-12).
+   *
+   * Every other `queued` on this page comes from the SERVER's status, which is
+   * never written while the flag is down. This word is derived on the CLIENT
+   * from two facts that are true flag or no flag — pending, and past due — so
+   * with the queue off a message merely running late printed a state that does
+   * not exist in that build, under a lane with no waiting half. Off, it reads
+   * `scheduled`, exactly as it did before this feature.
+   */
+  queueOn: boolean,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): MessageState {
+  const tone = threadTone(task, m);
+  if (tone.column === "in_progress") {
+    return { word: "running", column: "in_progress", failed: false, label: tone.label };
+  }
+  // Past due and still pending — the two facts the word is about, for the reason
+  // above.
+  if (queueOn && m.state === "pending" && m.at > 0 && m.at <= nowSec) {
+    return { word: "queued", column: "queued", failed: false, label: "Queued" };
+  }
+  if (tone.failed) return { word: "failed", column: tone.column, failed: true, label: tone.label };
+  if (tone.column === "upcoming") {
+    return { word: "scheduled", column: "upcoming", failed: false, label: tone.label };
+  }
+  if (tone.column === "archived") {
+    return {
+      word: tone.label.toLowerCase(),
+      column: "archived",
+      failed: false,
+      label: tone.label,
+    };
+  }
+  return { word: "done", column: tone.column, failed: false, label: tone.label };
+}
+
+/** Is any message in this thread mid-turn? The client's half of the running
+ * exception above — `Task.live` is the server's, computed from the transcript's
+ * own tail, and the two are asked in different places rather than merged: this
+ * one is about the rows on screen, that one about the row's status.
+ *
+ * The per-message reading is `isMessageRunning` (bottom of this file), the same
+ * function the calendar's chip asks, so "running" is one rule here and not
+ * three views' worth of `=== "in_progress"`. */
+export function threadRunning(messages: TaskMessage[]): boolean {
+  return messages.some(isMessageRunning);
+}
+
+/**
+ * The task's own column, narrowed. The server decides it (Task.status); this
+ * only keeps a value a newer server invented off the board's floor. An
+ * unreadable status lands in Done, not Archive: a task the client cannot read
+ * still HAPPENED, and filing it away hides it behind a collapsed lane.
+ *
+ * Checked against BOARD_COLUMNS rather than a hand-written list of four words,
+ * so the board and this function cannot disagree about how many statuses there
+ * are — the fifth, `failed`, arrived a round after the first four and a
+ * hardcoded list is how that lane would have silently swallowed itself into
+ * Done. Read as a plain string on purpose: the union this file was compiled
+ * against is a snapshot of what the server said LAST time.
+ */
+export function taskColumn(task: Pick<Task, "status" | "kind">): BoardColumn {
+  // A DRAFT IS NOT A STATUS THE SERVER SENDS. A draft row arrives with
+  // `status: "upcoming"` on purpose — so every lane switch on this page keeps
+  // working on it without being taught a seventh word — and `kind: "draft"` is
+  // the fact that tells the two apart. Asked here, once, so the List's rank, the
+  // Board's lane, the drag matrix and the time column all read one answer.
+  if (isDraftTask(task)) return "draft";
+  return statusColumn(task.status);
+}
+
+/**
+ * The same narrowing, over a status that is not attached to a row.
+ *
+ * One caller and it needs exactly this: `api.unarchiveTask` answers with the
+ * lane the task LANDED in — a bare word, from a server that may know a lane this
+ * bundle does not — and the Board turns it into a sentence before its next poll
+ * has a Task to ask about. Split out rather than duplicated so a fifth lane
+ * cannot be swallowed into Done in one of the two places and not the other.
+ */
+export function statusColumn(status: string): BoardColumn {
+  const known = BOARD_COLUMNS.find((c) => c.key === status);
+  return known ? known.key : "done";
+}
+
+/**
+ * IS THIS ROW AN UNFINISHED NEW-TASK FORM rather than a task?
+ *
+ * One predicate for every view that has to leave drafts out (the Cards wall, the
+ * calendar) or treat them apart (the List's time column, the Board's hoist), so
+ * "what is a draft" is decided once.
+ *
+ * It asks `kind` and NOT `status`, which is the one thing to know about this
+ * row: the server sends a draft as `status: "upcoming"` so that every existing
+ * lane reading keeps working on it untaught, and says `kind: "draft"` beside it.
+ * A predicate written against `status` would therefore be quietly false on every
+ * draft there is.
+ */
+export function isDraftTask(task: Pick<Task, "kind">): boolean {
+  return task.kind === "draft";
+}
+
+/**
+ * CAN THE SIDE PEEK SHOW THIS TASK AT ALL? (design.md, Fix batch 6 §3.)
+ *
+ * The panel holds a CONVERSATION, and two kinds of row on this page are not
+ * one:
+ *
+ *   * a DRAFT — an unfinished New task form. Its press opens that form, in a
+ *     modal, in every view (`isDraftTask` is the whole rule the List row and
+ *     the Board card both spend before anything else);
+ *   * a row with NO SESSION — a scheduled run that has never happened.
+ *     `taskHref` is null for it and `openThreadIntent` therefore offers no
+ *     intent, so its press opens the edit form or does nothing.
+ *
+ * The same two questions the two views already ask before they route a press,
+ * asked once here so the WALK can ask them too: ↑/↓ and the chevrons stopped on
+ * rows the panel could not open, and the reader had to press again to get past
+ * each one.
+ *
+ * Deliberately NOT asked of the folder's existence: a missing folder is a fact
+ * about the disk that the poll can change under us, the row stays on the page
+ * saying so, and the panel opens on it the same way a `?peek=` deep link does.
+ */
+export function peekOpenable(task: Pick<Task, "kind" | "session_id">): boolean {
+  return !isDraftTask(task) && !!task.session_id;
+}
+
+/**
+ * …AND WHICH OF THE TWO KINDS IT IS (design.md, Round 2: "New-chat drafts are
+ * rows").
+ *
+ * A chat draft row is a conversation with words in it that nobody has sent, in
+ * a folder whose chat has no session yet — so unlike a task draft it has no
+ * form to re-open and no `draft_id`.
+ *
+ * BOTH KINDS OPEN THE SAME DOOR, which is the whole of the rule (Akshil,
+ * 2026-09-12): a row with no session is a draft and opens the New task modal; a
+ * row with a session opens its chat. So this predicate no longer decides
+ * WHETHER the modal opens — it decides what the modal is seeded FROM, because a
+ * chat draft has no stored form and its words have to be carried in as a hop,
+ * exactly as the composer's own Schedule button carries them
+ * (Scheduled.openDraft).
+ *
+ * Read as "is it explicitly the chat kind", so a server that predates the
+ * second kind — every draft row there is a task draft — answers no and falls
+ * through to the stored-form arm it has always used (Akshil, 2026-09-11).
+ */
+export function isChatDraftTask(task: Pick<Task, "kind" | "draft_kind">): boolean {
+  return isDraftTask(task) && task.draft_kind === "chat";
+}
+
+/**
+ * DOES THIS ROW CARRY UNSENT WORDS OF ANY SORT — the question the Draft chip,
+ * the Draft filter and the List's hoist all ask, spelled once.
+ *
+ * Three rows answer yes and they are genuinely three different things: an
+ * unfinished New task form (`kind: "draft"`, the task kind), a never-sent chat
+ * (`kind: "draft"`, the chat kind), and an ORDINARY TASK whose composer is
+ * holding something (`draft` joined onto its session). To a reader scanning the
+ * page they are one fact — there are words here nobody has sent — which is
+ * exactly why one predicate answers for all three (design.md, Round 2: the
+ * filter "keeps only rows carrying any draft").
+ */
+export function hasDraft(task: Pick<Task, "kind" | "draft">): boolean {
+  return isDraftTask(task) || !!task.draft;
+}
+
+/**
+ * DOES THIS ROW'S RING CARRY THE DRAFT MARK — a red centre dot on a settled row
+ * that is holding unsent words (Akshil, 2026-09-14).
+ *
+ * ONLY THE TWO SETTLED LANES, and that is the whole of the rule. The mark says
+ * "this looks finished and it is not": the row has been put down — Done, or
+ * filed away — with a sentence still sitting in it, which is exactly the state
+ * nothing else on a scanned page shows. An In Progress row is not finished, so
+ * there is nothing to contradict and the dot would be noise on the one lane
+ * that is already the busiest; Upcoming says "not over" the same way. BLOCKED
+ * wears it too (Akshil, 2026-09-14: "blocked rows can have red dot in middle"):
+ * a parked run with a reply already typed is a row one press from moving, and
+ * the ring is red there anyway — the dot is the "unsent" on top of the "stuck".
+ * Needs attention draws in the Blocked lane (laneOf) and is read the same way.
+ *
+ * NOT A SECOND UNREAD MARK, even though it lands in the same 8px circle. Unread
+ * is about OUTPUT nobody has read; this is about INPUT nobody has sent, and the
+ * two are told apart by hue — the dot is `--status-failed`, which is the one
+ * colour on this page that means "your attention is owed", while an unread fill
+ * is always the lane's own `currentColor`. See schedule.css for which wins when
+ * a row is both.
+ *
+ * `hasDraft` is the page's one predicate for "are there unsent words here" — the
+ * same one the chip, the filter, the List's hoist and `rowExits` ask.
+ */
+export function draftRing(task: Task): boolean {
+  const column = taskColumn(task);
+  // A DRAFT ROW WEARS IT TOO (Akshil, 2026-09-15): a `kind: "draft"` row has no
+  // task id and sits in the Upcoming lane looking like a scheduled task, when it
+  // is really a sentence nobody has sent — the same fact the settled lanes mark.
+  // Only the draft kind: a real Upcoming task (scheduled, no draft) stays bare.
+  if (column === "draft") return true;
+  const lane = laneOf(column);
+  return (lane === "done" || lane === "archived" || lane === "blocked") && hasDraft(task);
+}
+
+/**
+ * WHEN THOSE WORDS WERE LAST TOUCHED, for the List's own order among drafts
+ * (design.md, Round 2: "Drafts among themselves by recency").
+ *
+ * Epoch seconds, the API's unit throughout, and 0 for "the row does not say" —
+ * which sorts last among drafts rather than being formatted as 1970, the same
+ * care `taskWhen` takes with a zero.
+ *
+ * THREE SOURCES, most specific first, because the server states the fact in
+ * different places for the three kinds of draft row and the client is not the
+ * authority on which:
+ *
+ *   1. `draft.updated_at` — the joined chat draft, and the new-chat row's own;
+ *   2. `form.updated_at` — the stored task-draft body, which is emitted
+ *      verbatim (api.Task.form is deliberately loose, so this is read as an
+ *      unknown and only believed when it is a number);
+ *   3. `last_active` — every task row has one, and on a draft row it is the
+ *      closest thing to "when this was last worked on" the listing carries.
+ */
+export function draftUpdatedAt(task: Pick<Task, "draft" | "form" | "last_active">): number {
+  const joined = task.draft?.updated_at;
+  if (typeof joined === "number" && joined > 0) return joined;
+  const stored = task.form?.updated_at;
+  if (typeof stored === "number" && stored > 0) return stored;
+  return task.last_active || 0;
+}
+
+/** The chip's word, spelled once. The mark beside it is a pencil — Slack's own
+ *  draft mark, which is the reference UI this whole feature is built against
+ *  (design.md) — but it is a lucide `PencilLine` drawn by the view now rather
+ *  than a pencil character in this string (design.md, Round 2). One glyph family
+ *  for the whole page: every other mark on these rows is an inline lucide path
+ *  at the same stroke, and a text pencil was the one that rendered at the
+ *  font's mercy. */
+export const DRAFT_CHIP = "Draft";
+
+/**
+ * THE `Draft` CHIP, for both the chat draft and the task draft (design.md,
+ * Decisions: "`Draft` chip + tooltip first line").
+ *
+ * ONE mark for the two kinds, which is the point: a reader scanning the list is
+ * being told the same thing either way — there are words here nobody has sent.
+ * What differs is only whose words they are, and that is what the tooltip says.
+ * Null when the row has neither, which is almost every row.
+ *
+ * ONE WORD, TOO, and that is the settled answer (Akshil, 2026-09-12). A second
+ * label — "Draft reply" for the composer's words — was tried for a day, to warn
+ * that the two kinds opened in two different places. The wording was never the
+ * fix for that; the PRESS was. A row with no session is a draft and opens the
+ * New task modal, a row with a session opens its chat, and the rule is the
+ * row's own rather than something the chip has to whisper (see `isDraftTask`,
+ * and Scheduled.openDraft where it is spent).
+ *
+ * It is an `OutcomeTag` so it is drawn by the pill the row already has
+ * (ScheduleTaskViews.DraftChip wraps `.tasks-outcome-pill` — muted, currentColor
+ * border, sized to the id beside it). No new CSS primitive: a second chip shape
+ * for a second kind of note is how a row grows marks nobody can tell apart.
+ */
+/**
+ * IS THIS ROW'S DRAFT IN THE READER'S HANDS RIGHT NOW (Akshil, 2026-09-17,
+ * item 7)? The side peek opens a task's chat, and that chat's composer LOADS
+ * the task's unsent message — so while the peek is open on this row, the ✎
+ * Draft chip, the draft line and the ring's dot say something the reader is
+ * already looking at, one pane to the right. Same rule as the Explorer
+ * landing: never list what the composer holds. Only a row with a session can
+ * be peeked, and only a row with a draft has anything to hide.
+ */
+export function draftHeldByPeek(
+  task: Pick<Task, "session_id" | "draft">,
+  peeked: boolean,
+): boolean {
+  return peeked && !!task.session_id && !!task.draft;
+}
+
+export function draftTag(task: Task): OutcomeTag | null {
+  // Both tooltips show the WORDS, not a description of the chip: the row's
+  // title already says it is a draft, and what a reader hovering wants is a
+  // glimpse of what they were writing (Akshil, 2026-09-11 — same rule the chat
+  // draft's badge follows). A task draft's words are its description first
+  // (the title is already on the row), else its title, else nothing to add.
+  if (isDraftTask(task)) {
+    // A NEW-CHAT row's words are the composer's, and the server sends them in
+    // the same `draft.preview` an ordinary session row carries — asked first,
+    // so the two chat drafts (one with a session, one without) caption
+    // identically. It falls through to the form/title pair below on a task
+    // draft, and on a chat row from a server that sent no preview.
+    const preview = task.draft?.preview?.trim();
+    if (preview) return { text: DRAFT_CHIP, title: preview };
+    const description = task.form?.description;
+    const words =
+      (typeof description === "string" ? firstLine(description) : "") ||
+      task.title?.trim() ||
+      "";
+    return { text: DRAFT_CHIP, title: words || "Draft" };
+  }
+  const preview = task.draft?.preview?.trim();
+  if (!preview) return null;
+  return { text: DRAFT_CHIP, title: preview };
+}
+
+
+/**
+ * Is this column a run that is genuinely happening — the one question every
+ * "is it running" reading on this page actually means. TWO lanes answer yes:
+ * `in_progress`, the ordinary case, and `needs_attention`, a run parked on a
+ * permission or question card that is every bit as live (the server's own
+ * `_status` promotes it for exactly that reason — see
+ * fused_render/server/routers/tasks.py). A caller that only checks
+ * `=== "in_progress"` is reading half the definition of running and will read
+ * a waiting task as settled — the shimmer drops, Archive appears where it
+ * should be refused, a project reads idle while its rail says otherwise.
+ */
+export function inFlight(column: BoardColumn): boolean {
+  return column === "in_progress" || column === "needs_attention";
+}
+
+// ---- unread ------------------------------------------------------------------
+// Unread is per MESSAGE (§7) and clicking through is what clears it. The click
+// also posts to the server, but the dot has to go NOW — the list polls on a
+// 20s interval, and a dot that survives its own click reads as a failed click.
+// So reads are held locally as well, and merged over whatever the poll returns
+// until the server's own answer catches up.
+//
+// EVERY ENTRY HERE IS AN OVERRIDE OF A KNOWN-STALE VALUE, never a fact. That is
+// one sentence and it decides the whole shape of this section:
+//
+//   * an entry is GATED on the server still disagreeing. A per-message mark only
+//     discounts a message the poll still calls unread (isUnread, taskUnread), so
+//     it retires itself the moment the server agrees, and the set never has to be
+//     pruned against a list that moves under us.
+//   * an entry can be TAKEN BACK. A write that is refused has to give the dot
+//     back, or the optimism has quietly become an assertion about a write that
+//     never happened (unmarkRead, unmarkAllRead).
+//   * the whole-task sentinel, which cannot name a message and therefore cannot
+//     be gated per message, is stamped with the observation it overrides instead
+//     (markObservation) and expires when that observation is replaced.
+
+/** The local read-set's key. Message ids are per TASK ("MSG-001" exists in
+ * every thread), so the task key has to be part of it.
+ *
+ * NUL is the joiner because it is the one character neither half can
+ * contain, so two different pairs cannot flatten onto one key the way they
+ * can under a space. Written as the ESCAPE `\u0000`, never as a literal
+ * control byte: one raw NUL makes the whole source file `data` rather than
+ * text, which silently breaks grep, diff and every line-oriented tool over
+ * it -- including the greps this repo's own tests are built out of. */
+export function readKey(taskKey: string, messageId: string): string {
+  return `${taskKey}\u0000${messageId}`;
+}
+
+export function markRead(read: Set<string>, taskKey: string, messageId: string): Set<string> {
+  const next = new Set(read);
+  next.add(readKey(taskKey, messageId));
+  return next;
+}
+
+/** Take one message's local mark back — the write it stood in for was refused,
+ * so the dot it hid has to come back. The mirror of markRead, and the half the
+ * optimism was missing on both paths: an override with no way back is not
+ * optimism, it is an assertion. */
+export function unmarkRead(
+  read: Set<string>,
+  taskKey: string,
+  messageId: string,
+): Set<string> {
+  const next = new Set(read);
+  next.delete(readKey(taskKey, messageId));
+  return next;
+}
+
+/**
+ * The message-id slot's stand-in for "all of them", for the ONE thing a
+ * per-message mark cannot cover: the messages OUTSIDE the loaded window, whose
+ * ids this client has never seen and cannot enumerate.
+ *
+ * `*` cannot collide with a real entry: a message id is always `MSG-nnn`
+ * (tasks_store.format_message_id), so no thread can produce this one.
+ *
+ * IT IS NOT A CLAIM THAT THE TASK IS READ FOR EVER, and that is the correction
+ * here. It used to be exactly that — a bare `taskKey \0 *` that isUnread and
+ * taskUnread both read as absolute, with nothing that ever removed it — so a
+ * REFUSED write left the row looking read with its own Mark read button gone
+ * (no retry), a server still reporting unread was ignored, and a message
+ * arriving afterwards was invisible until the List remounted. The comment above
+ * claimed the next poll restored truth; nothing in the poll could, because a
+ * poll only replaces `task.unread`, and the sentinel outranked it.
+ *
+ * What the local set is actually for is hiding the 20-second gap between a
+ * press and the server's own answer — a SHORT-LIVED OVERRIDE OF A KNOWN-STALE
+ * VALUE, not a fact of its own. So the sentinel now carries the observation it
+ * overrides (markObservation) and applies only while the server is still
+ * quoting that same value; the first poll that disagrees is a poll about a
+ * value nobody is overriding, and the server wins.
+ */
+export const ALL_MESSAGES = "*";
+
+/**
+ * The server observation a whole-task mark overrides: the count it printed, and
+ * the ids it still calls unread.
+ *
+ * Both halves earn their place. The COUNT is what the row draws and what the
+ * mark zeroes. The IDS are what make an ARRIVAL visible without a remount: a
+ * message that lands after the press changes the set even in the case where it
+ * happens to leave the count where it was (one marked read, one arrived).
+ *
+ * Deliberately not a timestamp and not a nonce. A stamp would expire on its own
+ * schedule, whether or not anything had changed; this expires exactly when the
+ * value it corrects is replaced, which is the only event that means anything.
+ *
+ * Read off the LISTING row only, never the thread Show more fetched. The poll is
+ * what replaces these numbers, and expanding a row is not a new answer from the
+ * server about them — stamping the fuller list would retire a mark that is still
+ * perfectly true the moment the reader opens the thread they just cleared.
+ */
+export function markObservation(task: Task): string {
+  const ids = (task.messages ?? [])
+    .filter((m) => m.unread)
+    .map((m) => m.message_id)
+    .sort();
+  return `${task.unread}\u0000${ids.join(",")}`;
+}
+
+/** The one key a whole-task mark occupies — the sentinel, stamped with the
+ * observation it is only true of. NUL-joined for readKey's own reason. */
+export function allReadKey(taskKey: string, observation: string): string {
+  return readKey(taskKey, `${ALL_MESSAGES}\u0000${observation}`);
+}
+
+/**
+ * Everything in this task is read, locally, as of THIS observation.
+ *
+ * Two things are written, and the split is the fix:
+ *
+ *   * a concrete id for every unread message we actually HOLD — the very
+ *     entries a click on each of those rows would have written, so the dots go
+ *     out through the mechanism that was already sound: each entry is gated on
+ *     the server still calling that message unread, and a message we have never
+ *     held has no entry, so it still draws its own dot when it arrives;
+ *   * ONE observation-stamped sentinel, for the only part arithmetic cannot
+ *     reach — the messages outside the window, which are why the row must not go
+ *     on saying "86" after the press that cleared all 89.
+ *
+ * THE TWO HALVES ANSWER DIFFERENT QUESTIONS, and reading them off the same list
+ * was the bug after this one:
+ *
+ *   * the observation is about WHAT THE SERVER LAST TOLD US, so it comes off the
+ *     listing row alone (markObservation reads `task.messages` and nothing
+ *     else) — stamping the fuller thread Show more fetched would retire a mark
+ *     that is still perfectly true;
+ *   * the concrete ids are about WHAT IS ON SCREEN AND MUST STOP SHOWING A DOT,
+ *     so they must cover everything currently HELD — which after Show more is
+ *     the whole thread (heldMessages), not the three the listing carried. Ids
+ *     off the window only, with a sentinel that zeroes the count, is a row
+ *     saying 0 above 86 lit dots.
+ */
+export function markAllRead(
+  read: Set<string>,
+  task: Task,
+  held?: TaskMessage[],
+): Set<string> {
+  const next = new Set(read);
+  for (const m of held ?? task.messages ?? []) {
+    if (m.unread) next.add(readKey(task.key, m.message_id));
+  }
+  next.add(allReadKey(task.key, markObservation(task)));
+  return next;
+}
+
+/**
+ * The same mark, carried onto messages that have only just come into our hands.
+ *
+ * Show more fetches the whole thread AFTER the press that cleared it, and that
+ * reply is a read of a value the mark overrode: the server had not applied the
+ * write yet (or the fetch crossed it), so 86 messages arrive flagged `unread`
+ * and nothing in the poll ever refreshes them — `more` is false by then, so
+ * there is no second fetch until the List remounts. Left alone, they light 86
+ * dots under a row that says 0, on messages the reader marked read a second ago.
+ *
+ * The GATE is the sentinel's own observation, which is exactly the question
+ * being asked: while it holds, the server is still quoting the value the press
+ * overrode, so a thread it hands us is a thread the press covered, and the ids
+ * are written the same way the press wrote its own. The moment a poll (or the
+ * mark's own answer, or a rollback) retires that sentinel, this adopts nothing
+ * and a message that is genuinely unread keeps its dot.
+ *
+ * That is NOT the sentinel leaking back into isUnread. It is consulted once, at
+ * the moment a fetch lands, to decide whether the mark covers what the fetch
+ * brought; the dots themselves still go out through concrete ids, each one gated
+ * on the server still calling that message unread. A message arriving later is
+ * named by nothing here and dots on its own.
+ *
+ * Idempotent: the sentinel markAllRead re-adds is the one the gate just matched,
+ * so the observation is never widened — only the id half grows.
+ */
+export function carryMarkToHeld(
+  read: Set<string>,
+  task: Task,
+  held: TaskMessage[],
+): Set<string> {
+  if (!isAllRead(read, task)) return read;
+  return markAllRead(read, task, held);
+}
+
+/**
+ * Take the whole-task mark back: the write was refused, or the server's own
+ * answer said something is still unread.
+ *
+ * EVERY sentinel for the task goes, whatever observation it was stamped with. A
+ * poll may have landed while the request was in flight, which leaves the mark
+ * inert but still sitting there, and "inert" is not the same as "gone" the next
+ * time that observation comes round.
+ *
+ * The concrete ids the press wrote go too — `held` is the list it wrote them
+ * from — because restoring the count without restoring the dots would leave a
+ * row saying "3 unread" above three rows that all look read.
+ *
+ * `held` is therefore EVERYTHING THE MARK WROTE, not just what was held when the
+ * press went out: a Show more that lands while the write is in flight adopts the
+ * mark onto the rest of the thread (carryMarkToHeld), and a rollback that cannot
+ * see those ids is the same half-restored row wearing the other hat. Callers
+ * pass both lists; a duplicate id deletes once and costs nothing.
+ */
+export function unmarkAllRead(
+  read: Set<string>,
+  taskKey: string,
+  held: TaskMessage[] = [],
+): Set<string> {
+  const next = new Set(read);
+  // Built by the one function that builds these keys, so a change to their
+  // shape cannot leave this scan looking for the old one.
+  const prefix = allReadKey(taskKey, "");
+  for (const key of next) if (key.startsWith(prefix)) next.delete(key);
+  for (const m of held) next.delete(readKey(taskKey, m.message_id));
+  return next;
+}
+
+/**
+ * What the server's OWN answer to the mark means for the local optimism.
+ *
+ * `POST /api/tasks/read {all: true}` replies with what is still unread after
+ * the mark — 0 unless something arrived while the request was in flight. That
+ * number used to be dropped on the floor. A non-zero one is the server saying
+ * the press did not clear the row, so the optimism is void: the row goes back
+ * to reporting what is there, and the button comes back with it.
+ *
+ * Over-reporting for one poll interval is the safe direction, and the reason
+ * this rolls the whole mark back rather than trying to guess which messages the
+ * answer is about: it can only show news that exists, never hide news that does.
+ */
+export function settleMarkAllRead(
+  read: Set<string>,
+  taskKey: string,
+  held: TaskMessage[],
+  answer: { unread: number },
+): Set<string> {
+  return answer.unread > 0 ? unmarkAllRead(read, taskKey, held) : read;
+}
+
+/** Whether the whole-task mark still speaks about the value the server is
+ * quoting. False the moment a poll disagrees — which is the poll winning. */
+export function isAllRead(read: Set<string>, task: Task): boolean {
+  return read.has(allReadKey(task.key, markObservation(task)));
+}
+
+/**
+ * Whether this message still reads as unread.
+ *
+ * Per message and nothing else: the whole-task sentinel is deliberately NOT
+ * consulted here. It cannot name a message, so consulting it is precisely how a
+ * message that arrived after the press stayed invisible. The whole-task mark
+ * writes concrete ids for everything it can see (markAllRead) and those are what
+ * this reads — and `m.unread` gating them is what retires each one on its own:
+ * once the server agrees the message is read, the local entry stops mattering
+ * rather than having to be pruned against a list that moves under us.
+ *
+ * Which puts the whole burden on "everything it can see" being the truth: every
+ * gesture that marks a whole task has to write ids for everything HELD at the
+ * time (heldMessages), and a fetch that hands us more of the thread while the
+ * mark still stands has to be adopted into it (carryMarkToHeld). A narrower
+ * write is a lit dot this function will never take back, because the only key
+ * that could is one nobody wrote.
+ */
+export function isUnread(taskKey: string, m: TaskMessage, read: Set<string>): boolean {
+  return m.unread && !read.has(readKey(taskKey, m.message_id));
+}
+
+/**
+ * What the LEADING slot of a message row draws.
+ *
+ * The dot used to ride at the far right of the row, beside the time, with the
+ * word "unread" after it — and it was missed entirely (Akshil, 2026-08-16: "on
+ * the right hand I missed it, I did not even see it"). A thread is read as a
+ * COLUMN, and a column is scanned down its left edge; a marker at the right end
+ * has to be tracked across every row to be found at all.
+ *
+ * So the slot is at the START of the row and it is ALWAYS THERE — filled on an
+ * unread message, blank on a read one. Always-there is the half that makes it
+ * scannable: a slot that only exists on unread rows shifts every other cell of
+ * that row right, and a ragged left edge is exactly the thing a scan cannot
+ * follow.
+ *
+ * The word is gone. A dot that LEADS is already the whole signal, and "unread"
+ * printed beside it was a caption for a symbol that no longer needs one. It
+ * survives where it always mattered — `label` is rendered as the marker's
+ * accessible name (role="img" + aria-label), so a screen reader still hears
+ * "Unread" on exactly the rows that are.
+ */
+export interface UnreadMarker {
+  /** Filled (a dot) or a blank spacer holding the column open. */
+  unread: boolean;
+  /** The accessible name, "" when there is nothing to announce. */
+  label: string;
+}
+
+/** The word a screen reader hears in place of the dot. */
+export const UNREAD_LABEL = "Unread";
+
+export function unreadMarker(
+  taskKey: string,
+  m: TaskMessage,
+  read: Set<string>,
+): UnreadMarker {
+  return isUnread(taskKey, m, read)
+    ? { unread: true, label: UNREAD_LABEL }
+    : { unread: false, label: "" };
+}
+
+/**
+ * The count on the task row: what the server said, less the ones cleared here
+ * since. Only messages we actually HOLD can be discounted — the badge counts
+ * the whole thread, and a message outside the loaded window is one we know
+ * nothing about beyond the server's total.
+ *
+ * `held` is heldMessages: the window before Show more, the whole thread after it,
+ * and the same list the mark writes its ids from, so the count and the dots are
+ * arithmetic over one set rather than two.
+ */
+export function taskUnread(
+  task: Task,
+  read: Set<string>,
+  held?: TaskMessage[],
+): number {
+  // The one case that is NOT arithmetic over the messages we hold: a whole-task
+  // mark cleared the ones outside the window too, and the server was told so in
+  // the same breath. Discounting only the loaded three would leave a row saying
+  // "86" after the press that cleared all 89.
+  //
+  // It is asked of the mark AND of this poll's own numbers (isAllRead), so it
+  // answers 0 only while the server is still quoting the count the press
+  // overrode. A poll that brings back anything else — a refused write the server
+  // never applied, a message that arrived since — falls through to the
+  // arithmetic below and the server's number is what the row draws.
+  if (isAllRead(read, task)) return 0;
+  // A PROVISIONAL row (provisionalTasks) holds no messages and a `message_count`
+  // of 0 — a default, not a count — so the "we hold the whole thread" arm below
+  // would read it as an empty, fully read thread and hollow the ring on a task
+  // pulse says has unread, for exactly the wait the seed exists to cover
+  // (Bugbot, #1079). Pulse's `unread` IS the server's number, and there is
+  // nothing held here to discount it by.
+  if (task.provisional) return task.unread;
+  const known = held ?? task.messages ?? [];
+  // Once Show more has run we hold the WHOLE thread, and then the count is not
+  // arithmetic at all — it is the dots, counted. Same predicate (isUnread), same
+  // list the rows are drawn from, so the badge and the rail cannot say two
+  // different things about one thread; the row saying 0 over 86 lit dots is
+  // precisely the bug this arm closes.
+  //
+  // It is also the more accurate of the two. `task.unread` is deliberately
+  // arithmetic on the server ("every message is unread unless marked read or not
+  // yet happened", clamped at zero because a marked-then-cancelled message counts
+  // twice) and its own docstring says the Show-more endpoint is the exact one. So
+  // where we have the exact thread, we use it.
+  if (known.length >= task.message_count) {
+    return known.filter((m) => isUnread(task.key, m, read)).length;
+  }
+  const cleared = known.filter(
+    (m) => m.unread && read.has(readKey(task.key, m.message_id)),
+  ).length;
+  return Math.max(0, task.unread - cleared);
+}
+
+/**
+ * What a TASK row says about its whole thread — the counterpart of unreadMarker,
+ * which speaks for one message.
+ *
+ * The two are drawn in the same place now (trailing the title) and in the SAME
+ * MARK, and that is the last of four passes:
+ *
+ *   * The dot moved to the head of every MESSAGE row, because a thread is scanned
+ *     down its left edge and a marker at the right end is missed entirely
+ *     (Akshil, 2026-08-16: "on the right hand I missed it").
+ *   * The task's count followed it to the left, so the rail would not start
+ *     halfway down the node.
+ *   * And that was wrong, because the two rows are not the same question. A list
+ *     is scanned for its TITLES, and a number in front of every one of them
+ *     announced the messages before the work they are about — it "breaks the
+ *     reading priority" (Akshil, 2026-08-17). So both marks went to the end of
+ *     their title.
+ *   * And then the NUMBER went too (Akshil, 2026-08-17: "only show a single dot
+ *     like the notification that we show"). A row said `211` and a card said `13`
+ *     — a readout nobody acts on per unit, where the only decision it feeds is
+ *     "is there anything new here?". That is one bit, so it is drawn as one bit,
+ *     in the very mark the message rows already use.
+ *   * And then the mark left the title altogether (Akshil, 2026-08-18). A dot
+ *     after the words was a SECOND glyph on a row that already carries one — the
+ *     status ring — and two marks a few characters apart, one saying "this
+ *     finished" and one saying "you have not looked", is a row a reader has to
+ *     decode rather than scan. So read-state moved INTO the ring: the centre dot
+ *     that used to mean "settled" now means "settled AND unread", and a ring gone
+ *     hollow is the whole of "you have seen this". Colour is untouched, so the
+ *     ring still says WHICH terminal state in exactly the hue it always did, and
+ *     the row is back to one mark carrying two orthogonal facts — shape and hue.
+ *
+ * So there is no pill, no digit and no trailing dot: a task with unread wears a
+ * filled ring (ScheduleTaskViews.StatusIcon, `.schedule-ring--unread`), the same
+ * mark its own unread messages wear one level down, and the same mark the board
+ * lane's header wears one level up.
+ *
+ * THE COUNT IS NOT LOST, it is only unprinted — taskUnreadLabel below returns the
+ * accessible name, and it names the real number. A reader who cannot see the ring
+ * gets more than the sighted one, which is the right way round for a mark whose
+ * whole visual job is to be noticed rather than read.
+ */
+
+/** The tooltip and accessible name a container wears when something inside it is
+ * unread — a TASK row over its thread, a board LANE over its cards. Null when
+ * there is nothing unread, and then nothing is said at all.
+ *
+ * "3 unread", not "3 unread messages" (2026-08-18). A lane's total counts TASKS
+ * and a task's counts MESSAGES, and the mark that carries both is now one glyph
+ * (StatusIcon's centre dot) — so the noun would have to change with the container
+ * while the mark did not, which is two vocabularies for one fact again. The
+ * count is the part a reader acts on; what it counts is whatever they are
+ * hovering.
+ *
+ * Uncapped, and the same shape at one. The old pill printed "99+" past a cap
+ * because a three-digit number does not fit a 16px chip; a tooltip has no such
+ * constraint, and the name it carries is the whole of what the row knows.
+ *
+ * LEAVES DO NOT GET ONE. A single unread message's dot means exactly "unread"
+ * and a hover saying "1 unread" over it is a caption for a symbol that needs
+ * none (Akshil, 2026-08-18); only containers, whose dot stands for a number the
+ * ink does not print, are named. */
+export function taskUnreadLabel(count: number): string | null {
+  if (count <= 0) return null;
+  return `${count} unread`;
+}
+
+/**
+ * How many of a LANE's tasks have something unread — what a kanban group header
+ * says about the column under it.
+ *
+ * Counted in TASKS, not messages: the header stands over cards, and the question
+ * a reader asks of a collapsed lane is "how many of these do I still have to
+ * look at", which is one per card however long its thread is. (A task's own mark
+ * counts messages, for the same reason at the other scale.)
+ */
+export function laneUnread(tasks: Task[], read: Set<string>): number {
+  return tasks.filter((t) => taskUnread(t, read) > 0).length;
+}
+
+/**
+ * A task whose work is still ahead of it — the List greys such a title, so a
+ * column of rows reads as "these already happened" with the future set behind
+ * them (Akshil, 2026-08-18).
+ *
+ * BOTH halves are required. The lane alone is not enough: an Upcoming task whose
+ * time has already gone by is overdue, and fading it would mute the one row on
+ * the page that most wants reading. And a future time alone is not enough
+ * either — a Done task usually has a next run scheduled too, and its title is
+ * history that HAS happened.
+ */
+export function isUpcomingTask(task: Task, now: number = Date.now()): boolean {
+  return taskColumn(task) === "upcoming" && !isPastDue(nextRunAt(task), now);
+}
+
+// ---- the accordion -----------------------------------------------------------
+
+export interface ThreadView {
+  /** What the expanded task actually lists, newest first. */
+  messages: TaskMessage[];
+  /** Whether the thread is longer than what we hold — i.e. a fetch is OWED.
+   *
+   * This used to mean "offer the Show more button". There is no button since
+   * 2026-08-18; expanding a task fetches the rest by itself, and this is the
+   * predicate that decides whether the trip is needed at all. Same question, same
+   * answer — only the thing that reads it changed. */
+  more: boolean;
+  /** How many are still missing. The loading line names it, so a reader looking at
+   * three rows of a twenty-six-message thread can see that the other twenty-three
+   * are on their way rather than absent. */
+  hidden: number;
+}
+
+/**
+ * EVERY MESSAGE OF THIS THREAD THIS CLIENT HOLDS, freshest copy of each — the
+ * one answer to "what is in our hands", which is what a whole-task mark has to
+ * cover (markAllRead) and what its count is arithmetic over (taskUnread).
+ *
+ * Two lists arrive on two schedules and neither is simply better than the other:
+ *
+ *   * the LISTING row (`task.messages`) is the three newest, replaced by every
+ *     poll — so it is the freshest thing we have, and the only place a message
+ *     that arrived a moment ago can appear at all;
+ *   * the thread Show more FETCHED (`loaded`) is all of it, read once and never
+ *     read again — `more` goes false, so nothing refetches it before a remount.
+ *
+ * So: the fetched thread for depth, the listing's copy of any message that is in
+ * both for its state, and anything the listing has that the fetch does not is a
+ * message that ARRIVED AFTER the fetch — it leads, because the order is newest
+ * first. Without that last part an expanded thread is frozen at the instant it
+ * was fetched: an arrival is invisible until the List remounts, which is the very
+ * defect the whole-task sentinel was rebuilt to stop having.
+ *
+ * Deduped by message id, so nothing is ever drawn twice.
+ */
+export function heldMessages(task: Task, loaded?: TaskMessage[]): TaskMessage[] {
+  const window = task.messages ?? [];
+  if (!loaded) return window;
+  const fresh = new Map(window.map((m) => [m.message_id, m]));
+  const fetched = new Set(loaded.map((m) => m.message_id));
+  return [
+    ...window.filter((m) => !fetched.has(m.message_id)),
+    ...loaded.map((m) => fresh.get(m.message_id) ?? m),
+  ];
+}
+
+/**
+ * What an expanded task shows.
+ *
+ * Until the fetch lands that is `task.messages` — the three newest, already ordered
+ * by the server. After it, the full thread REPLACES those three rather than
+ * appending to them, so a message can never appear twice: heldMessages merges
+ * them by id, taking the listing's fresher copy of anything in both and leading
+ * with whatever arrived after the fetch.
+ *
+ * THE THREE ARE A DATA WINDOW, NOT A DISPLAY CAP, and that distinction is the whole
+ * of why this function still slices. The listing endpoint sends three messages per
+ * row because it runs for every task on the page and a full transcript parse per
+ * task would not survive a few hundred of them (server routers/tasks.py `_row`);
+ * the rest are not in the client's hands to draw. Until 2026-08-18 a dashed
+ * "Show N more" button was the press that went and got them, and it is gone —
+ * expanding a task makes that trip by itself (ScheduleTaskViews.TasksList.toggle).
+ * So this still reports a short list for the moment before the reply arrives, and
+ * `more` is what sends for the rest rather than what draws a button.
+ *
+ * `message_count` is the server's total, and the honest source for "is there
+ * more?": the preview list alone cannot tell a thread of exactly three from a
+ * thread of three hundred.
+ */
+export function threadView(task: Task, loaded?: TaskMessage[]): ThreadView {
+  if (loaded) return { messages: heldMessages(task, loaded), more: false, hidden: 0 };
+  const messages = (task.messages ?? []).slice(0, PREVIEW_MESSAGES);
+  const hidden = Math.max(task.message_count - messages.length, 0);
+  return { messages, more: hidden > 0, hidden };
+}
+
+/**
+ * Whether this task is an ACCORDION at all — i.e. whether expanding it would
+ * reveal anything the row has not already said.
+ *
+ * A thread of one message is not a thread. Expanding it drew exactly one message
+ * row, whose title is the same text the task row above it was already showing, so
+ * the disclosure offered a press that told the reader nothing ("empty task (1 msg
+ * only) should not have dropdown", Akshil, 2026-08-17). A task of ZERO — a pending
+ * one that has never run — is the same case and the same answer.
+ *
+ * Asked of `message_count`, the SERVER's total, and never of the tail this client
+ * happens to be holding. `task.messages` is a preview window (PREVIEW_MESSAGES),
+ * so a busy thread can arrive with a short tail or none at all, and counting what
+ * we hold would call a forty-message task unexpandable. It is the same number
+ * threadView already trusts for "is there more?", so the chevron and the "Show N
+ * more" button under it cannot disagree about how long the thread is.
+ *
+ * A DRAFT COUNTS AS A SECOND VOICE (Akshil, 2026-09-12: "if i have a single
+ * message task, and i have a draft message, let's show accordion in that one").
+ * The expanded thread leads with the composer's unsent words as a row of their
+ * own, so a one-message task holding a draft has something to reveal — the words
+ * the row's title does not show. One message and no draft stays a plain row.
+ */
+export function isExpandable(task: Task): boolean {
+  if (task.message_count > 1) return true;
+  return task.message_count === 1 && !!task.draft;
+}
+
+/** How many digits a message number is padded to — `tasks_store._MSG_WIDTH`,
+ *  which is the only place this number is decided. Named rather than typed into
+ *  the template below so the two files can be read against each other. */
+const MSG_WIDTH = 3;
+
+/**
+ * THE ID THE NEXT MESSAGE OF THIS THREAD WILL HAVE — `MSG-004` on a task of
+ * three (Akshil, 2026-09-12).
+ *
+ * The client-side half of `tasks_store.format_message_id`, and it exists for
+ * exactly one row: the DRAFT line at the head of an expanded thread
+ * (ScheduleTaskViews). That line is words nobody has sent, so it has no message
+ * and therefore no id of its own — but it stands in the column the ids stand in,
+ * and a blank there would read as a broken row the way every other hole in a
+ * column on this page does. What it can honestly say is which message these
+ * words would BE, and that is arithmetic the client is allowed to do: a message
+ * id is *derived* — the Nth message of a task in time order IS MSG-N
+ * (tasks_store.message_ids says so, and stores nothing) — so the next one is
+ * `count + 1` and nothing has to be asked of the server.
+ *
+ * `count` is `task.message_count`, the SERVER's total, and never the tail this
+ * client happens to hold: the listing sends a three-message window, so counting
+ * what is in hand would number the draft of a forty-message task `MSG-004`.
+ *
+ * A count of zero (or a negative one, or a number that is not one) gives
+ * `MSG-001`, which is the truth for a thread with nothing in it — the first
+ * thing sent there will be its first message. Past 999 the number simply grows a
+ * digit, exactly as the Python does: the width is a MINIMUM, not a cap, and
+ * silently wrapping a four-digit thread back to `MSG-000` would be a wrong id
+ * rather than a wide one.
+ */
+export function nextMessageId(count: number): string {
+  const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  return `MSG-${String(n + 1).padStart(MSG_WIDTH, "0")}`;
+}
+
+/**
+ * The ONE message a leaf row is about, or null when there is not exactly one.
+ *
+ * Dropping the chevron from a one-message row left its click doing nothing at
+ * all, which Akshil noticed and disliked (2026-08-17). With nothing to expand,
+ * "open it" is the only thing a press on that row can sensibly mean — and what
+ * it opens is this message, through the very path a MESSAGE row's own click
+ * takes (openMessage → messageHref). So the row needs to name that message, and
+ * this is where it is named.
+ *
+ * Both halves of the guard matter:
+ *
+ *   * NOT expandable (isExpandable, the server's `message_count`), so this can
+ *     never answer for a row whose press is the accordion. A row of forty
+ *     messages holding a window of one is still an accordion.
+ *   * EXACTLY ONE message in hand. A task that has never run has none — no
+ *     transcript, nothing to open — so it answers null and the row stays inert
+ *     rather than navigating somewhere half-built.
+ *
+ * `held` is heldMessages, the same list the row's count and its marks are
+ * arithmetic over, so the message the click opens is the message the row is
+ * drawing a dot for.
+ */
+export function soleMessage(task: Task, held?: TaskMessage[]): TaskMessage | null {
+  if (isExpandable(task)) return null;
+  const messages = held ?? task.messages ?? [];
+  return messages.length === 1 ? messages[0] : null;
+}
+
+/** Collapsed by default, so the expanded set is what is OPEN (an empty set is
+ * the resting state and needs no seeding from a task list that changes on
+ * every poll). */
+export function toggleExpanded(expanded: Set<string>, key: string): Set<string> {
+  const next = new Set(expanded);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  return next;
+}
+
+export function isExpanded(expanded: Set<string>, key: string): boolean {
+  return expanded.has(key);
+}
+
+// ---- which view is up, in the URL --------------------------------------------
+// The List/Board/Calendar choice was localStorage-only, which made it a fact
+// about this browser rather than about this page: a link to the Tasks page
+// opened whatever the recipient last looked at, and there was no way to send
+// somebody the board. It lives in the URL now (`/tasks?view=board`), with the
+// stored preference kept as the fallback for a bare `/tasks`.
+//
+// LIST OMITS THE PARAM, deliberately: it is the default, and `?view=list` is a
+// second spelling of `/tasks` that would show up in every share and every
+// bookmark while saying nothing at all.
+
+/** Which of the page's four views is up. */
+export type TaskView = "list" | "board" | "calendar" | "cards";
+
+/** The query key that carries it. */
+export const VIEW_PARAM = "view";
+
+/** Every value `?view=` accepts, in the order the switcher draws them. ONE list,
+ * read by the parser below and by the test that holds the switcher's buttons to
+ * it — a view that exists in the union and not here is a view a link cannot
+ * reach, which is exactly the bug a second hand-written list invites. */
+export const TASK_VIEWS: TaskView[] = ["list", "board", "cards", "calendar"];
+
+/**
+ * The view a URL asks for, or `fallback` when it asks for nothing this page
+ * knows — an unrecognised value is a typo or a stale link, and the page it
+ * should land on is the default one rather than an error.
+ *
+ * `search` is a raw query string, with or without its leading `?`.
+ */
+export function viewFromSearch(search: string, fallback: TaskView = "list"): TaskView {
+  const raw = search.startsWith("?") ? search.slice(1) : search;
+  const v = new URLSearchParams(raw).get(VIEW_PARAM);
+  return (TASK_VIEWS as string[]).includes(v ?? "") ? (v as TaskView) : fallback;
+}
+
+/**
+ * The same URL with the view switched — every OTHER param preserved, because
+ * this page's query also carries the chat's deep-link handoff, and switching
+ * between two views is not a reason to drop it.
+ *
+ * Returns path + query, ready for `history.replaceState`. Replace, not push:
+ * the toggle is a way of READING this page, and a back button that first walked
+ * back through six view switches before leaving would be a worse back button.
+ */
+export function viewUrl(pathname: string, search: string, view: TaskView): string {
+  const raw = search.startsWith("?") ? search.slice(1) : search;
+  const q = new URLSearchParams(raw);
+  if (view === "list") q.delete(VIEW_PARAM);
+  else q.set(VIEW_PARAM, view);
+  const rest = q.toString();
+  return pathname + (rest ? `?${rest}` : "");
+}
+
+// ---- a press that leaves this tab --------------------------------------------
+
+/**
+ * Does this click mean "somewhere else, not here" — a new tab, a new window, a
+ * download — and must therefore be left to the browser?
+ *
+ * Every row on this page is a real `<a href>` so that ⌘-click, middle-click and
+ * the context menu's "Open in new tab" all work without this page implementing
+ * any of them. The one thing its handler must do is GET OUT OF THE WAY: a
+ * modified click is never intercepted, never `preventDefault`ed, and never
+ * marks anything read — the reader is not looking at that thread, they are
+ * stacking it up for later, and a badge cleared for a tab nobody has read yet
+ * is the one thing a background open must not do.
+ *
+ * `button` is the mouse button as React reports it (0 = primary); a middle
+ * click reaches `onAuxClick` rather than `onClick`, and both ask this, so the
+ * rule is written once.
+ */
+export function opensElsewhere(e: {
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  button?: number;
+}): boolean {
+  return Boolean(
+    e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || (e.button !== undefined && e.button !== 0),
+  );
+}
+
+// ---- what the List remembers between visits ----------------------------------
+// Opening a task's chat LEAVES the Tasks page, and coming back used to hand the
+// reader a fully collapsed list scrolled to the top — so reading three threads
+// out of ninety meant re-finding the same row three times (Akshil, 2026-08-18).
+// The page now remembers which rows were open and where the list stood.
+//
+// sessionStorage, not localStorage: this is "where I was a moment ago", which is
+// true for this tab and this sitting only. A week-old scroll offset restored into
+// a list whose rows have all changed is not a memory, it is a surprise.
+
+/** The key the List's per-tab memory lives under. */
+export const LIST_MEMORY_KEY = "fused-render:tasks-list-memory";
+
+export type ListMemory = {
+  /** Task keys the reader had open. Keys that no longer exist simply never match
+   * a row, so a stale entry costs nothing and needs no pruning. */
+  expanded: string[];
+  /** scrollTop of the list's own scroller, in px. */
+  scroll: number;
+  /**
+   * The task whose conversation the reader last opened FROM this list, or "".
+   *
+   * The third thing coming back to the page has to answer. Which rows were open
+   * and where the list stood put the reader back in the right part of the list;
+   * this puts them back on the right ROW. A list of ninety near-identical
+   * three-line rows gives no clue which one you just came out of, so "let me
+   * look at the next one" meant re-finding the last one first — the same
+   * complaint the scroll memory was for, one level finer (Akshil, 2026-08-18).
+   *
+   * A key, not an index: rows re-sort on every poll (last_active), and an index
+   * would highlight whichever row happened to land in that slot.
+   *
+   * One task, not a set. This is "where I just was", and a page that lit up
+   * every row visited this sitting would be a highlight that means nothing by
+   * the fourth one.
+   */
+  selected: string;
+};
+
+export const EMPTY_LIST_MEMORY: ListMemory = { expanded: [], scroll: 0, selected: "" };
+
+/**
+ * What came out of the store is a STRING WRITTEN BY SOMEONE ELSE — an older
+ * build, a hand-edited devtools row — so every field is checked and anything
+ * unrecognisable degrades to "remember nothing" rather than throwing during a
+ * render.
+ */
+export function parseListMemory(raw: string | null): ListMemory {
+  if (!raw) return EMPTY_LIST_MEMORY;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return EMPTY_LIST_MEMORY;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return EMPTY_LIST_MEMORY;
+  }
+  const row = parsed as { expanded?: unknown; scroll?: unknown; selected?: unknown };
+  const expanded = Array.isArray(row.expanded)
+    ? row.expanded.filter((k): k is string => typeof k === "string")
+    : [];
+  const scroll =
+    typeof row.scroll === "number" && Number.isFinite(row.scroll) && row.scroll > 0
+      ? row.scroll
+      : 0;
+  // Absent on anything written before 2026-08-18, and on any hand-edited row:
+  // "" is the same answer as "nothing selected", so an older memory upgrades
+  // silently rather than being thrown away for the two fields it does have.
+  const selected = typeof row.selected === "string" ? row.selected : "";
+  return { expanded, scroll, selected };
+}
+
+// ---- where a click goes ------------------------------------------------------
+// schedule-lib.explorerUrl is the app's one answer to "open this session in the
+// explorer, with the Claude pane on it". A message adds one thing: WHICH turn
+// to land on, carried as its transcript record uuid so the chat can scroll to
+// it. Extending that url rather than minting a second scheme is deliberate —
+// two ways to open a chat is two ways for one of them to rot.
+
+/** The query key the Claude pane reads to scroll a resumed chat to one turn. */
+export const MESSAGE_ANCHOR_PARAM = "msg";
+
+/** The FILE this task is about, or "" when it is about the folder.
+ *
+ * The server resolves `target` to the scheduled entry's own target, else the
+ * file the chat pane was on, else the project folder (routers/tasks.py
+ * `_place`), so "the target is not the project" IS the test for a file — that
+ * fallback is the only way the two are ever equal. Compared with trailing
+ * slashes off both, because a folder target can arrive spelled either way and
+ * a task about a folder must not grow a file mark over a slash. */
+export function taskFile(task: Task): string {
+  const trim = (p: string) => p.replace(/\/+$/, "");
+  const target = trim(task.target || "");
+  if (!target) return "";
+  return target === trim(task.project || "") ? "" : task.target;
+}
+
+/** The task's thread, top of the chat. Null when the task has never run —
+ * there is no session to open yet.
+ *
+ * Takes the three fields it reads rather than a whole `Task` so the pulse's own
+ * compact row (api.TaskPulseTask, which carries exactly these) can open a chat
+ * too — the Notifications section's needs-attention rows do, off the pulse poll
+ * the shell already runs. Widening the parameter is the alternative to a second
+ * copy of this url that would rot separately. */
+export function taskHref(
+  task: Pick<Task, "session_id" | "target" | "project"> & {
+    key?: string;
+    status?: string;
+    entry_origin?: string;
+  },
+): string | null {
+  const href = taskHrefView(task);
+  // FRAMED `/tasks?embed=1` (an app page's Tasks view): a row press must not
+  // pull the frame into the full explorer with its sidebar — stay chrome-free.
+  return href && IS_QUERY_EMBED && href.startsWith(VIEW_PREFIX)
+    ? EMBED_PREFIX + href.slice(VIEW_PREFIX.length)
+    : href;
+}
+
+function taskHrefView(
+  task: Pick<Task, "session_id" | "target" | "project"> & {
+    key?: string;
+    status?: string;
+    entry_origin?: string;
+  },
+): string | null {
+  if (task.session_id) return explorerUrl(task.target || task.project, task.session_id);
+  /**
+   * A QUEUED TASK IS NOT A DEAD END ANY MORE (2026-09-12).
+   *
+   * `pending:<entry id>` is the server's key for a task with no transcript yet,
+   * and `queued` is the one status that means "its words are waiting in a
+   * folder's line, behind somebody else's run". That row used to answer null —
+   * no session, no door — so a chat a reader had typed into minutes before could
+   * not be opened from anywhere, in exactly the minutes they want to read it
+   * back. The ENTRY is the name it has, and `chatUrl`'s `queued` param opens the
+   * pane on it (`platform/lib/queue.QUEUED_PARAM`): the chat draws its waiting
+   * rows, wears its TASK id, and adopts the real session when the leader runs.
+   *
+   * `queued` AND NOT EVERY `pending:` KEY, which was the first spelling and was
+   * too wide by one lane: an UPCOMING one-off is also keyed `pending:<entry>`,
+   * and its row press opens the EDIT FORM — the instruction that has not run yet
+   * is the content of that row, and `activate`'s thread arm runs before its edit
+   * arm. Widening this would have quietly taken the form away from every
+   * scheduled message on the page.
+   */
+  if (task.status !== "queued") return null;
+  /**
+   * …AND ONLY A CHAT'S OWN WAITING WORK (`entry_origin`, 🔴 review 2026-09-12).
+   *
+   * ONE DOOR PER TASK is the rule this keeps. A queued row that a FORM composed
+   * — the New task modal, the calendar, a repeat's next occurrence — has an
+   * instruction that has not run yet, and that instruction is the content of the
+   * row: its press opens the EDIT form, exactly as it does while the same entry
+   * is merely `upcoming`. Handing it a chat url instead would make a task's door
+   * depend on whether its folder happened to be busy when the reader clicked.
+   * A chat-origin entry has no form to edit — the words were typed into a
+   * composer and the conversation IS the row.
+   */
+  if ((task.entry_origin || "") !== CHAT_ENTRY_ORIGIN) return null;
+  const queued = pendingEntryId(task.key || "");
+  const where = task.target || task.project;
+  if (queued && where) return chatUrl(where, "", queued);
+  return null;
+}
+
+/** One message inside that thread. Falls back to the thread itself when the
+ * transcript gave us no anchor — landing at the top of the right conversation
+ * beats not opening at all. */
+export function messageHref(task: Task, m: TaskMessage): string | null {
+  const base = taskHref(task);
+  if (!base) return null;
+  if (!m.anchor) return base;
+  return `${base}&${MESSAGE_ANCHOR_PARAM}=${encodeURIComponent(m.anchor)}`;
+}
+
+/**
+ * Where a click on a message ROW goes, or null when it has nowhere to go — the
+ * form every view that lists messages should ask in, because the calendar's
+ * popover lists one kind the List never does.
+ *
+ * A PROJECTED occurrence (schedule-lib.isProjected) is cron arithmetic, not a
+ * message: the server computed that it WILL happen and wrote nothing down. It
+ * has no transcript record and therefore no anchor, so linking it would open a
+ * conversation that has not happened — and a `msg=` built from its empty anchor
+ * would be a pointer at nothing. It is inert.
+ *
+ * The other two cases are messageHref's own and are not re-decided here: a task
+ * with no session yet is null, and a real message with an empty anchor falls
+ * back to the top of the right thread.
+ */
+export function openMessageHref(task: Task, m: TaskMessage): string | null {
+  if (isProjected(m)) return null;
+  return messageHref(task, m);
+}
+
+// ---- cancelling a message that has not gone out ------------------------------
+// A scheduled message the user no longer wants is a real capability, and the
+// thread is the only place it is now offered: the calendar's Queued strip covers
+// work that is already PAST DUE and waiting, which says nothing about a task
+// scheduled for next Tuesday.
+//
+// Two rules decide it, and both are about honesty rather than convenience.
+//
+// 1. Only a `pending` message. `sending` is deliberately not cancellable
+//    server-side (schedule.cancel) — the helper is away and the turn may have
+//    started, so "cancelled" would be a claim nothing can make good on — and a
+//    sent/missed/errored message has already had its whole life.
+//
+// 2. On an OCCURRENCE of a recurring rule, the id sent is the occurrence's own,
+//    never its template's. This is the one place the thread's two affordances
+//    deliberately disagree: Edit resolves an occurrence UP to its template
+//    (changing "next Tuesday's run" means changing the rule, because there is
+//    nowhere else for the change to live), while Cancel stays DOWN on the
+//    occurrence. The server reads it exactly that way — cancelling a template
+//    stops every further run, cancelling an occurrence skips that one and the
+//    next materialisation pass carries on — so a Cancel that resolved upward
+//    like Edit does would silently delete a schedule the user meant to skip one
+//    run of. Since the two mean different things, the button says which one it
+//    is doing: "Cancel" on a one-off, "Skip this run" on an occurrence.
+
+export type CancelScope = "message" | "occurrence";
+
+export interface CancelIntent {
+  /** The schedule entry id to pass to cancelScheduledMessage — the message's
+   * OWN entry, never a template it was materialized from. */
+  id: string;
+  scope: CancelScope;
+  /** The button's accessible name, and what it says it will do. */
+  label: string;
+  /** The tooltip, which is where the consequence is spelled out in full. */
+  title: string;
+}
+
+/** What Cancel would do to this message, or null when there is nothing to
+ * cancel. Null is the answer for every message that has already gone out, and
+ * for a chat message, which was delivered the moment it was typed. */
+export function cancelIntent(m: TaskMessage): CancelIntent | null {
+  if (m.state !== "pending" || !m.entry_id) return null;
+  if (m.template_id)
+    return {
+      id: m.entry_id,
+      scope: "occurrence",
+      label: "Skip this run",
+      title: "Skip this run — the repeat itself keeps going",
+    };
+  return {
+    id: m.entry_id,
+    scope: "message",
+    label: "Cancel",
+    title: "Cancel this scheduled message",
+  };
+}
+
+/** Whether the row draws the affordance at all. */
+export function canCancel(m: TaskMessage): boolean {
+  return cancelIntent(m) !== null;
+}
+
+/**
+ * WHICH ENTRY A MESSAGE ROW'S PRESS EDITS, or null when that press means the
+ * transcript instead.
+ *
+ * The same principle the task row follows one level up: a message that has not
+ * gone out is an INSTRUCTION, and the form is where an instruction is read and
+ * changed; a message that has run is a TRANSCRIPT TURN, and the transcript is
+ * where it is read (Akshil, 2026-08-17: "for multi-message tasks when i click on
+ * the message, that should open the edit modal").
+ *
+ * SO THE SPLIT IS `state`, and it is the same predicate cancelIntent already
+ * uses — deliberately the same, because the two questions have one answer: a
+ * message the server would refuse to cancel is a message it would refuse to
+ * edit. `pending` and nothing else. `sending` is mid-flight and already beyond
+ * changing; `sent`, `missed`, `error` and `cancelled` have all had their whole
+ * life, so a form over one would present a Save that means nothing. Note it is
+ * `state`, not turnPhase: turnPhase reads `turn` and answers how the SESSION
+ * replied, which is a question only a message that already went out can have.
+ *
+ * THE MESSAGE'S OWN ENTRY, never the task's `next_run_entry`: a repeating task
+ * has several pending occurrences and the row pressed is the one the reader
+ * means. Resolving an occurrence UP to its template is Scheduled.tsx's
+ * `editEntry` — see the note above cancelIntent for why Edit resolves upward
+ * while Cancel stays down.
+ *
+ * NULL ON A PENDING MESSAGE IS POSSIBLE, and then the press must fall through to
+ * the transcript rather than open a blank form: a CHAT message carries no
+ * `entry_id` at all (it was delivered the moment it was typed and the schedule
+ * has no record of it), and a listing row from an older server may not carry one
+ * either.
+ */
+export function messageEditEntry(m: TaskMessage): string | null {
+  if (m.state !== "pending" || !m.entry_id) return null;
+  return m.entry_id;
+}
+
+// ---- drag --------------------------------------------------------------------
+// THE WHOLE DRAG MATRIX, and it follows from one sentence: a lane is what
+// Claude's work is DOING, and the only thing a person decides about a task is
+// whether to run it, to put it away, or to take that away back. So there are
+// exactly three moves, and four lanes a card may leave.
+//
+//   Upcoming    → In Progress  RUN IT NOW. Not a filing decision, an
+//                              instruction (Akshil, 2026-08-16: "if I move a
+//                              task from upcoming to in progress, don't change
+//                              the time of it, but run it and run it at that
+//                              point"). The server sends the pending message
+//                              immediately and leaves its `due` alone, so the
+//                              row keeps reading as the time it was MEANT to
+//                              run and the thread honestly shows a run that
+//                              happened early.
+//               → Archive      CANCEL. Filing a task away calls off the work
+//                              in it; a run still booked for tomorrow on a
+//                              task somebody archived would un-archive itself.
+//   In Progress → nowhere      LOCKED. In Progress is Claude's output, not a
+//                              verdict a reader hands down: a card leaves this
+//                              lane when the run ends and at no other moment.
+//   Done        → Archive      and nothing else. "Not finished after all" is
+//                              not a thing a drag can make true.
+//   Blocked     → In Progress  RETRY — the same run-now call, same
+//                              precondition (something pending to fire).
+//               → Archive
+//   Archived    → anywhere     UNARCHIVE, and it is ONE move however far the
+//                 else         card is carried. Lifting a card out of Archive
+//                              means "this is not put away any more" and
+//                              nothing else; it does not name a lane, because
+//                              the lane is not a person's to name (that is the
+//                              same rule that keeps Done and Blocked
+//                              undroppable, below). The filing is dropped
+//                              server-side and the task lands wherever it
+//                              DERIVES to — Done, Blocked, In Progress — which
+//                              may well not be the lane under the cursor. That
+//                              is the intended outcome, not a near miss: the
+//                              board shows what the work is doing.
+//
+// Nothing may be dropped INTO Upcoming (a task cannot be un-run), into Blocked
+// (failure is something that HAPPENED, and a lane you can drag a healthy task
+// into is a lane whose count means nothing), or into Done (a run says that,
+// not a reader) — with the ONE exception above, and it is not really an
+// exception: an archived card dropped on any of them does not become that lane,
+// it becomes unfiled. The lane is the gesture's target, never its argument.
+//
+// THE OTHER WAY OUT OF ARCHIVE IS STILL ACTIVITY, and it is the older one
+// (Akshil, 2026-08-18: "if you want to move it to in progress or done, just type
+// in a message inside that chat and it will automatically move"). A message that
+// arrives after the filing drops the filing by itself, server-side, with nobody
+// dragging anything. The drag is the same drop of the same record, reached
+// deliberately — so the two cannot disagree.
+//
+// AND THERE IS A BUTTON FOR IT TOO, on both views (`filingIntent`) — the drag is
+// the accelerator, not the only route, because the Archive lane starts collapsed
+// and "expand the lane first" is how the archive button came to exist as well.
+// The button is safe to label because the move names no lane: "Unarchive" claims
+// exactly what happens, where the old Archive → In Progress button claimed a
+// verdict on work the reader had not watched.
+//
+// Legality follows from what each move NEEDS, never from what triage happens to
+// be keyed by. Run-now needs a pending MESSAGE, so a scheduled task that has
+// never run — no session id at all — may still be dragged into In Progress,
+// while a pure-chat task with nothing pending may not. Archive needs only the
+// task's key, because it is one server verb over the whole task
+// (`POST /api/tasks/archive`) rather than a triage write keyed by session — so
+// the never-run row can be filed away too, which is the case the old
+// session-keyed rule could not reach. Unarchive needs nothing at all — the same
+// task key, and the record either was there to drop or was not — so an archived
+// card always lifts, including the never-run one and the pure-chat one.
+//
+// There is no DROP_LANES list any more. It said "the lanes a person may drop a
+// card on", which stopped being one list the moment leaving Archive became a
+// move: In Progress is the target of a run AND of an unarchive, and Done is the
+// target of an unarchive and nothing else. Which lanes accept THIS card is
+// `dropLanes`, and it was already the only caller anything had.
+
+/**
+ * THE MATRIX ITSELF: where a card in each lane may go. The table above in
+ * words, written down once so `dropLanes` reads it instead of reconstructing it.
+ *
+ * A TABLE AND NOT A PREDICATE, which is the correction (bugbot, PR #613). It
+ * was "every unlocked lane may go anywhere droppable, subject to a
+ * precondition", and that quietly offered Done → In Progress to any done task
+ * with something pending — which is not a corner case on this branch, it is the
+ * COMMONEST done card there is: a recurring task whose last run finished and
+ * whose next occurrence is booked now sits in Done by design (see
+ * `_message_verdict`, server side). So the lane a person is most likely to drag
+ * from was the one lane whose rules were wrong, and the drop would have fired a
+ * real run.
+ *
+ * Re-running a task that finished is deliberately not a gesture. "Run this
+ * again" on work that succeeded is an ask better made in the chat, where the
+ * person can say what they want differently this time — the same reasoning
+ * `taskRunIntent` gives for offering Re-send on a failed task and nowhere else.
+ *
+ * Every BoardColumn is a key, so a seventh status is a type error here rather
+ * than a lane that silently permits nothing (or everything). The VALUES are
+ * lanes — a card is dropped on a column the board draws, and `needs_attention`
+ * is not one (schedule-lib.BOARD_LANES).
+ */
+const LANE_EXITS: Record<BoardColumn, BoardLane[]> = {
+  // IN PROGRESS, AND ONLY THERE (design.md §4, 2026-09-14). A draft has no entry
+  // to run, nothing to archive and no session to triage — so the one move it has
+  // is the one that makes it a task: dropped on In Progress, its stored form is
+  // submitted with `when` = now (draft-run.runDraftNow). Filing a draft is not a
+  // gesture, because there is nothing filed yet; the way to be rid of one is to
+  // delete it.
+  //
+  // Not every draft lifts: a chat draft carries no form at all, and a
+  // half-written task form has nothing to send. That test is the New task
+  // form's own Save gate (draft-run.canRunDraft) and the Board applies it — see
+  // `laneAction`, which says why it cannot be applied from this module.
+  draft: ["in_progress"],
+  // Run it early, or call it off.
+  upcoming: ["in_progress", "archived"],
+  // Skip the line, and NOTHING ELSE. The drop onto In Progress is not a run —
+  // nothing may interrupt the task already holding this folder — it is `skip`,
+  // which moves this card to the head of its folder's line and leaves the run in
+  // flight completely alone (laneAction).
+  //
+  // ARCHIVE IS NOT OFFERED ON A WAITING TASK (Akshil, 2026-09-12). Filing is for
+  // work that has happened: a queued task is a message the reader has just sent
+  // and the server has not run yet, so "put this away" is really "call it off",
+  // and this page already has a word for that — Delete, which stays. Offering
+  // both put an irreversible verb and a reversible one side by side on the one
+  // row where they mean the same thing, and the archive half would have left a
+  // filed task whose entries were cancelled underneath it. Hidden rather than
+  // disabled, on this page's usual rule: a dead control on every waiting row is
+  // what makes the rows a control DOES work on hard to find.
+  //
+  // `filingIntent` reads this table, so the List's mark-slot button, the Board
+  // card's button and the Cards wall's all go with the drop — one predicate, by
+  // construction.
+  queued: ["in_progress"],
+  // Locked: a run in flight is Claude's output, and it leaves this lane when it
+  // ends, not when a card is dragged.
+  in_progress: [],
+  // Archive only. "Not finished after all" is not something a drag can make
+  // true, and neither is "do it again".
+  //
+  // …UNLESS THE ROW IS CARRYING SOMETHING UNSENT, which is the one exit a table
+  // keyed by column cannot express — it is a fact about the row. See `rowExits`
+  // immediately below, which adds it, here and on Archive alike.
+  done: ["archived"],
+  // Locked, for In Progress's reason and one more: a run waiting on an answer
+  // is still Claude's output, and the way out is answering the card in the
+  // chat — a drag cannot say yes on somebody's behalf.
+  needs_attention: [],
+  // Retry, or file it away. The retry is a RE-RUN (Akshil, 2026-09-11: "allow
+  // moving from blocked to in progress and trigger a rerun"): laneAction picks
+  // what is sent again — see `rerunAction`.
+  blocked: ["in_progress", "archived"],
+  // Done only (Akshil, 2026-09-07 — "we don't allow dragging from archive to
+  // done, enable that"). The drop is the Unarchive button as a gesture: it
+  // un-files the task and nothing more, and the landing lane is still derived
+  // server-side (`api.unarchiveTask` takes no status), so a card dropped on
+  // Done lands wherever its thread puts it — Done for finished work, which is
+  // what an archived card almost always was. Upcoming stays shut: a drop there
+  // would read as a claim about a run, and unarchiving starts nothing.
+  //
+  // …AND IN PROGRESS ON THE ROWS WEARING A DRAFT, which is the same row rule
+  // Done has and is added the same way — see `rowExits`.
+  archived: ["done"],
+};
+
+/**
+ * WHERE THIS PARTICULAR CARD MAY GO — the column's exits, plus the one exit
+ * that belongs to a ROW rather than to a lane.
+ *
+ * "done + draft and archive + draft both can be dropped in progress to rerun
+ * the task with draft message" (Akshil, 2026-09-14.) Done and Archive are
+ * otherwise locked out of In Progress on purpose — re-running work that
+ * finished is an ask better made in the chat, and the commonest Done card
+ * there is is a recurring task with its next occurrence already booked, whose
+ * drop would have fired that run (`LANE_EXITS`, and the bugbot round behind
+ * it). None of that changes. What a DRAFT on the row changes is WHAT the drop
+ * would send: not the task's work again, but the sentence the reader has
+ * already written and not sent. That is not a second opinion about finished
+ * work, so the exit opens — and only for the rows wearing the chip.
+ *
+ * A TABLE PLUS A ROW RULE, rather than a second table: `LANE_EXITS` stays the
+ * one written-down matrix (every column a key, so a seventh status is a type
+ * error), and the exceptions to it are here, where each can say who it is for.
+ * Today there is one, and it reads the same on both settled lanes.
+ *
+ * ARCHIVE IS SYMMETRIC NOW, and the earlier asymmetry is worth saying why it
+ * went. It stood on "taking a task out of the filing cabinet and sending a
+ * message into it are two decisions, and a gesture may only make one" — which
+ * is true of the DROP ON DONE (that one is an unarchive and nothing else) and
+ * not of this one: sending the draft un-files the row by itself, server-side
+ * and for the same reason typing in the chat does. The run stamps `ran_at`
+ * after the filing's own stamp, so `routers/tasks.py::_revived` drops the
+ * record on the next poll — and while the run is in flight the row already
+ * reads In Progress (`_status`, rule 1). One gesture, one decision, and the
+ * un-filing is a consequence of the message rather than a second claim.
+ *
+ * `hasDraft` is the page's one predicate for "are there unsent words here" — the
+ * same one the chip, the filter, the List's hoist and the ring's red dot
+ * (`draftRing`) ask. It answers yes for a draft ROW as well, which costs
+ * nothing here: a draft row's column is `draft`, never `done` or `archived`.
+ */
+function rowExits(task: Task, here: BoardColumn): BoardLane[] {
+  const settled = here === "done" || here === "archived";
+  if (!settled || !hasDraft(task)) return LANE_EXITS[here];
+  // In Progress first, so a settled card with unsent words reads like every
+  // other unlocked lane: the run on the left, the filing on the right.
+  return ["in_progress", ...LANE_EXITS[here]];
+}
+
+/**
+ * The next run the ROW ITSELF names, when it names one: the server's `next_run`
+ * (`min(at)` over every pending entry, epoch seconds) together with the entry
+ * that run belongs to.
+ *
+ * Read as ONE fact because that is how the server writes them (tasks.py
+ * `_next_run`) and either half alone is useless: a time nothing can fire, or an
+ * id with no place in the order. The server refuses to name a run it cannot
+ * name completely, so this is either both or neither.
+ *
+ * Null covers the two cases every caller treats identically — the fields are
+ * absent (an older server) or zero (nothing pending) — and the answer for both
+ * is "read the window instead", which is what they did before these existed.
+ */
+function namedNextRun(task: Task): { at: number; entryId: string } | null {
+  const at = task.next_run ?? 0;
+  const entryId = task.next_run_entry ?? "";
+  if (!at || !entryId) return null;
+  return { at, entryId };
+}
+
+/**
+ * What a run-now press or drop actually sends. Not a TaskMessage, because the
+ * message this fires is not always one the row is CARRYING: see runNowTarget.
+ */
+export interface RunTarget {
+  /** What runScheduledNow is called with. The whole point of this object. */
+  entryId: string;
+  /**
+   * Which message that is — "" when the run is one the row named without
+   * holding (`next_run_entry`). The listing cannot number a message it did not
+   * parse: MSG-n is a position in the whole thread, and the row's ids are
+   * counted back from its total across the three it holds.
+   *
+   * Nothing in the run path needs it — the call sends `entryId` — so an empty
+   * one costs a caller a sentence it could have said, never a wrong action.
+   */
+  messageId: string;
+  /** When it is due, epoch seconds: the same instant nextRunAt sorts the lane
+   * by, which is what makes the button and the order agree. */
+  at: number;
+}
+
+/**
+ * Which pending message a run-now press or drop fires: the EARLIEST due.
+ *
+ * A task can hold several pending messages — a recurring rule's next
+ * occurrence sitting beside a one-off someone scheduled for Friday. The
+ * earliest is the one the scheduler itself would have sent next, so running it
+ * early is the only choice that does not reorder the thread: any other pick
+ * would fire a later message first and leave an older one still pending behind
+ * it. On an exact tie the OLDER message wins (the server's list is newest
+ * first, so the later element of a tie is the one that has waited longer).
+ *
+ * TWO PLACES ARE READ, and the second is the point.
+ *
+ * The window — the three newest by `at` — used to be all of it, on the belief
+ * that pending messages are due in the future and so sit at its head. On this
+ * branch that is false: scheduling into the past is allowed and catch-up is
+ * unbounded, so an OVERDUE pending is ordinary, and two sent runs plus next
+ * month's occurrence push it out of the window entirely. The row's own
+ * `next_run` / `next_run_entry` name that run, and this fires it — because
+ * nextRunAt reads the same field to ORDER Upcoming by, and a card promoted to
+ * the top of the lane whose button then sent some other message would make the
+ * order a lie. The sort and the button widen together or neither does.
+ *
+ * `entry_id` (or `next_run_entry`) is required either way: it is what the call
+ * sends, and a message without one cannot be fired at all.
+ */
+export function runNowTarget(task: Task): RunTarget | null {
+  let held: RunTarget | null = null;
+  for (const m of task.messages ?? []) {
+    if (m.state !== "pending" || !m.entry_id) continue;
+    if (!held || m.at <= held.at)
+      held = { entryId: m.entry_id, messageId: m.message_id, at: m.at };
+  }
+  const named = namedNextRun(task);
+  // Strictly earlier, so a run the row BOTH names and holds is fired as the
+  // message it is — same entry either way, and that way it keeps its id.
+  if (named && (!held || named.at < held.at))
+    return { entryId: named.entryId, messageId: "", at: named.at };
+  return held;
+}
+
+/** Whether this task has anything to run early at all. */
+export function canRunNow(task: Task): boolean {
+  return runNowTarget(task) !== null;
+}
+
+/**
+ * WHICH SCHEDULE ENTRY A ONE-MESSAGE UPCOMING ROW'S PRESS EDITS, or null when
+ * that row's press means something else.
+ *
+ * Such a row's interesting content is the instruction that HAS NOT RUN yet, and
+ * the form is where that instruction lives (Akshil, 2026-08-17: "when i click on
+ * upcoming tasks i think they should open up the edit modal" — then narrowed:
+ * "this should be only for 1 message tasks"). A transcript is the wrong answer
+ * for a row whose whole point is what happens next.
+ *
+ * THREE CONDITIONS, and each is somebody else's function so this adds no rule of
+ * its own:
+ *
+ *   * the LANE, from taskColumn — the same function that files the card into the
+ *     Board's lanes, so the List and the Board cannot disagree about what
+ *     "Upcoming" means. QUEUED COUNTS TOO, and it is the same row: a one-off due
+ *     into a folder somebody's run is holding is upcoming work that has been
+ *     told to wait, and the queue is not supposed to change what a task IS. It
+ *     was the one lane whose row could not be pressed at all — no session to
+ *     open (nothing has run), no chat door (its `entry_origin` is not "chat"),
+ *     and this arm declining left `pressable` false, so a row with a time, a
+ *     title and a place in the line was inert (review, PR #1124). The other two
+ *     conditions carry the weight, exactly as they do for `upcoming`.
+ *   * EXACTLY ONE MESSAGE, from soleMessage. Which is the case the user asked
+ *     for and it lands where they meant: a task scheduled but never run has
+ *     exactly one message — the pending one — so "one message and upcoming" IS
+ *     the never-ran-yet row, and a one-off that has run once with its next
+ *     occurrence pending is the same shape and the same answer. It also inherits
+ *     soleMessage's isExpandable guard, so a REPEATING task with past runs is
+ *     never this: its press stays the accordion, whatever its lane.
+ *   * WHICH ENTRY, from runNowTarget — the earliest-due pending entry, reading
+ *     the server's `next_run_entry` when the row names a run it does not hold.
+ *     Deliberately the function run-now and the drag already ask: "the next one
+ *     due" is the only run either gesture could mean, and a second function here
+ *     would let Edit and Run now act on different ones. Only `entryId` is spent;
+ *     Scheduled.tsx's `editEntry` is what resolves an occurrence to its template,
+ *     because changing "tomorrow's run" of a repeating task means changing the
+ *     rule.
+ *
+ * `held` is heldMessages, as soleMessage's own is — so the message this counts is
+ * the message the row is drawing.
+ *
+ * NULL DESPITE THE LANE IS POSSIBLE and the caller must fall through rather than
+ * open an empty form: runNowTarget answers null when the one message the row holds
+ * is not pending or carries no `entry_id` (a chat message is delivered the moment
+ * it is typed and the schedule has no record of it) AND the server named no next
+ * run — an older server without the `next_run` fields.
+ */
+export function upcomingEditEntry(task: Task, held?: TaskMessage[]): string | null {
+  const lane = taskColumn(task);
+  if (lane !== "upcoming" && lane !== "queued") return null;
+  if (soleMessage(task, held) === null) return null;
+  return runNowTarget(task)?.entryId ?? null;
+}
+
+/**
+ * Whether the task READS as failed. Two things say so and the row shows the
+ * same word for both — the `blocked` lane, and the flag that repaints a Done
+ * task's ring red (StatusIcon) — so both take the same verb on the button.
+ *
+ * THE LANE ALONE IS NOT THE ANSWER ANY MORE, and this is where that shows.
+ * Blocked holds two different things since 2026-09-03 — a run that broke, and
+ * (through `needs_attention`, which draws there) a run parked on a card — so
+ * "in the Blocked lane" is not "broke". A parked task never reaches the first
+ * clause, because its own status is `needs_attention`; if it also carries the
+ * flag its newest SETTLED run genuinely did break, which is what the flag has
+ * always meant.
+ */
+export function isFailedTask(task: Task): boolean {
+  return taskColumn(task) === "blocked" || task.failed;
+}
+
+/**
+ * Whether this task is waiting on the READER — a permission or question card
+ * raised by its live run that nobody has answered (server: tasks.py
+ * `_parked_runs`).
+ *
+ * The status, and nothing derived beside it. `blocked_reason` says which kind of
+ * card and `attention` says which tool, but neither may be the test: an older
+ * server sends neither field, and a row painted from the status while a
+ * predicate reads the extras is exactly the split-brain that deriving status on
+ * the server exists to end.
+ */
+export function needsAttention(task: Pick<Task, "status">): boolean {
+  return taskColumn(task) === "needs_attention";
+}
+
+// ---- the project queue -------------------------------------------------------
+// One task in progress per FOLDER (prefs `queue.enabled`). A task whose work is
+// due into a folder somebody else's run is holding waits, and its row reads
+// `queued` with the four fields on `Task` that say where in the line it stands.
+//
+// Everything below is a reading of those fields and nothing else. The client
+// never derives "is this folder busy" — that is a fact about live processes
+// (server: project_queue.holders()), and the whole reason `/api/tasks` decides
+// status server-side is that the client guessing it is how two views end up
+// disagreeing about one task.
+
+/** Is this task WAITING on its folder? The status, and nothing beside it —
+ *  needsAttention's rule, for needsAttention's reason: the positions and the
+ *  ahead-id are what the row SAYS, never what decides it, and an older server
+ *  sends none of them. */
+export function isQueued(task: { status: string }): boolean {
+  // `statusColumn`, not `taskColumn`: this is asked of a pulse row as well as of
+  // a listing row, and the union a bundle was compiled against is a snapshot of
+  // what the server said LAST time (see taskColumn's own note).
+  return statusColumn(task.status) === "queued";
+}
+
+/**
+ * The queue's whole vocabulary — RE-EXPORTED from platform, not defined here.
+ *
+ * The chat says the same sentences and lives in `apps/claude`, which may not
+ * import shell (scripts/check-boundaries.mjs). So the builder sits in
+ * `platform/lib/queue.ts`, where both layers can read it, and this file passes
+ * it through so every reader on this page still takes its vocabulary from
+ * tasks-lib like everything else about a row.
+ */
+export {
+  canForceStart,
+  canRunNext,
+  chatUrl,
+  CHAT_ENTRY_ORIGIN,
+  pendingEntryId,
+  PENDING_KEY_PREFIX,
+  QUEUED_PARAM,
+  QUEUED_WORD,
+  queueAfter,
+  queueAheadHref,
+  queueCaption,
+  QUEUE_CAPTION_SEP,
+  queueOrdinal,
+  queuePosition,
+  queueRunsNext,
+  runningWaitingLabel,
+  waitingCount,
+  waitingLabel,
+  FORCE_START_HINT,
+  FORCE_START_LABEL,
+  QUEUE_PRIORITY_GLYPH,
+  RUN_NEXT_DONE_HINT,
+  RUN_NEXT_HINT,
+  RUN_NEXT_LABEL,
+} from "@platform/lib/queue";
+export type { QueueCaption, QueueFacts } from "@platform/lib/queue";
+
+/**
+ * …AND THE PLAN'S OWN PAUSE, re-exported for the same reason: the chat's header
+ * says it too, and the chat may not import shell. A usage-limited session is a
+ * `blocked` row with `blocked_reason: "usage_limit"` — the lane and the red ring
+ * are unchanged, and the CAPTION is what tells it apart from the runs that
+ * actually broke (platform/lib/usage-limit).
+ */
+export {
+  isUsageLimited,
+  resumesClock,
+  usageLimitCaption,
+  usageLimitStatusWord,
+  USAGE_LIMIT_REASON,
+} from "@platform/lib/usage-limit";
+export type { UsageLimitFacts } from "@platform/lib/usage-limit";
+
+/**
+ * The same move the drag makes, reachable without dragging (Akshil,
+ * 2026-08-17: "for failed tasks do we want a rerun button... same for the
+ * upcoming tasks. Do you think we should add a trigger now button... And if
+ * that is the case we'll just update the run at instead of updating the at the
+ * actual time it was scheduled").
+ *
+ * That last clause is confirmation, not a change: run-now moves `ran_at` and
+ * never touches `due`, which is exactly what the drag path already does and
+ * what ranNote above prints. NOTHING about the times moves here.
+ *
+ * WHICH message fires is not re-decided: runNowTarget is asked, the same
+ * function dropAction asks, so the button and the drag can never pick
+ * differently. Only the WORD differs — starting something early and restarting
+ * something that broke are not the same sentence to a person, even though they
+ * are one call to the server.
+ *
+ * Availability is simply "is there a pending message to claim", not the drag's
+ * lane legality: dropLanes answers a question about DROP TARGETS (which lane
+ * may receive this card), and a button has no lane. A task with nothing
+ * pending — which is most failed tasks, since the run that broke has already
+ * been spent — gets null here. That gap is what taskRunIntent below closes,
+ * now that the server has a re-send verb; this function still answers only the
+ * run-now question, so the drag and the drop can keep asking it.
+ */
+export interface RunNowIntent {
+  /** What runScheduledNow is called with. */
+  entryId: string;
+  /** Which message that is — the same one the drag would have fired. */
+  messageId: string;
+  /** Whether this reads as a restart rather than an early start. */
+  rerun: boolean;
+  /** The button's accessible name, and the word it says. */
+  label: string;
+  /** The tooltip: the consequence, including the half a person would fear. */
+  title: string;
+}
+
+export function runNowIntent(task: Task): RunNowIntent | null {
+  const m = runNowTarget(task);
+  if (!m) return null;
+  const rerun = isFailedTask(task);
+  return {
+    entryId: m.entryId,
+    messageId: m.messageId,
+    rerun,
+    label: rerun ? "Re-run" : "Run now",
+    title: rerun
+      ? "Re-run now — the scheduled time stays put"
+      : "Run now — the scheduled time stays put",
+  };
+}
+
+// ---- one button, two calls ---------------------------------------------------
+// Re-run on a failed task used to be absent exactly when it was wanted. The
+// common failure spends its message — the run went out and broke — so there was
+// no PENDING entry left for run-now to claim, and the button that would have
+// said "Re-run" was simply not drawn. The server now has the other verb
+// (`POST /api/schedule/resend`, which sends the message AGAIN as a new one in
+// the same thread), and this is where the choice between the two is made.
+//
+// It is a pure function and it lives beside runNowIntent deliberately: the
+// component holds no rule about which call to make, and the run-now half is
+// still runNowIntent — the same function dropAction asks — so the button and
+// the drag cannot pick different messages.
+//
+// THE DRAG IS UNCHANGED. Dragging Upcoming → In Progress is still run-now and
+// nothing else: a drop on a lane is a statement about where the card belongs,
+// and turning "put this back in progress" into "send the whole message again"
+// is not something a gesture can consent to. Re-sending is a button press with
+// a word on it.
+
+export type TaskRunKind = "run-now" | "resend";
+
+export interface TaskRunIntent {
+  /** Which call: runScheduledNow or resendScheduledMessage. */
+  kind: TaskRunKind;
+  /** The schedule entry id that call is given. For "resend" it is the entry
+   * that ALREADY RAN — the server reads it, copies it, and leaves it alone. */
+  entryId: string;
+  /** Which message that is, for the caller that wants to say so. */
+  messageId: string;
+  /** Whether this reads as a restart rather than an early start. */
+  rerun: boolean;
+  /** The button's accessible name, and the word it says. */
+  label: string;
+  /** The tooltip: the consequence, including the half a person would fear. */
+  title: string;
+}
+
+/**
+ * Which message a re-send would copy: the newest one that WENT AND ENDED.
+ *
+ * `sent` and `error` are the two the server accepts (schedule.RESENDABLE), and
+ * for the reason it gives — a message that never went has nothing to send
+ * again. `pending` and `sending` are excluded here as well, but they never
+ * reach this function: a task holding one takes the run-now branch above.
+ *
+ * A chat message carries no `entry_id` and is skipped, which is correct rather
+ * than incidental: it was delivered the moment it was typed and the schedule
+ * has no record of it to copy.
+ *
+ * Newest first, because the server's list is: re-asking means asking for the
+ * LAST thing that was asked for, not the first.
+ */
+export function resendTarget(task: Task): TaskMessage | null {
+  for (const m of task.messages ?? []) {
+    if (!m.entry_id) continue;
+    if (m.state === "sent" || m.state === "error") return m;
+  }
+  return null;
+}
+
+/**
+ * What the task row's run button does — the whole decision, in one place.
+ *
+ * Order matters and says what the two verbs mean. A pending message is a
+ * message the user already asked for and has not had yet, so bringing it
+ * forward is the smaller, truer action and wins whenever it is available. Only
+ * with nothing pending does a FAILED task fall through to re-sending, which
+ * creates work that was not previously scheduled.
+ *
+ * Re-send is offered on a failed task and nowhere else. A Done task's run
+ * finished; offering to silently re-run it would make a thread grow every time
+ * someone leaned on a button, and "run this again" on work that succeeded is an
+ * ask better made in the chat, where the user can say what they want differently
+ * this time.
+ */
+export function taskRunIntent(task: Task): TaskRunIntent | null {
+  const now = runNowIntent(task);
+  if (now)
+    return {
+      kind: "run-now",
+      entryId: now.entryId,
+      messageId: now.messageId,
+      rerun: now.rerun,
+      label: now.label,
+      title: now.title,
+    };
+  if (!isFailedTask(task)) return null;
+  const m = resendTarget(task);
+  if (!m) return null;
+  return {
+    kind: "resend",
+    entryId: m.entry_id,
+    messageId: m.message_id,
+    rerun: true,
+    label: "Re-run",
+    // The tooltip carries the one thing a person needs to know before pressing
+    // it: this does not rewrite the run that failed, it asks again in the same
+    // conversation.
+    title: "Re-run — sends this message again, as a new one in the same thread",
+  };
+}
+
+/**
+ * Which lanes this card may be dropped on. Empty ⇒ do not let it lift.
+ *
+ * ASKED OF `laneAction`, one lane at a time, rather than re-deriving the
+ * preconditions here: a lane is offered exactly when the drop on it has
+ * something to do, so "where may this card go" and "what happens when it lands"
+ * cannot answer differently. Before, this held the run's precondition itself and
+ * dropAction re-checked it through this function — fine while there was one
+ * precondition, and wrong the moment In Progress became the target of two
+ * different moves with different requirements (a run needs a pending message; an
+ * unarchive needs nothing).
+ */
+export function dropLanes(task: Task): BoardLane[] {
+  const here = taskColumn(task);
+  // `rowExits` and not `LANE_EXITS`: one exit belongs to the row rather than to
+  // the column it is sitting in (a settled card — Done or Archived — carrying
+  // an unsent draft).
+  return rowExits(task, here).filter((lane) => laneAction(task, here, lane) !== null);
+}
+
+/** Whether a card may lift AT ALL — "is there anywhere for it to go".
+ *
+ *  Not the whole answer for a DRAFT: its one exit is offered on the strength of
+ *  it being a draft, and whether the stored form is finished enough to send is
+ *  the modal's gate, applied by the Board (ScheduleTaskViews.cardLifts — see
+ *  `laneAction` for why it cannot be applied here). */
+export function isDraggable(task: Task): boolean {
+  return dropLanes(task).length > 0;
+}
+
+/**
+ * What a drop on `lane` actually DOES — the one place the three meanings are
+ * told apart, so the Board's handler holds no rule of its own beyond which call
+ * to make. Null when the drop is illegal, which is the same answer dropLanes
+ * gave before the card lifted: the two agree because dropLanes asks this.
+ *
+ * `archive` and `unarchive` carry no payload, for the same reason and it is not
+ * an omission. Archiving used to be a triage status composed here and sent to a
+ * session-keyed endpoint; both are now one verb over the whole task
+ * (`api.archiveTask` / `api.unarchiveTask`), and a verb with one meaning has
+ * nothing left to parameterise. `unarchive` in particular does NOT carry the
+ * lane it was dropped on — the server would refuse to honour it, because the
+ * landing lane is derived from the thread and never asserted by a reader.
+ */
+export type DropAction =
+  | { kind: "run"; entryId: string; messageId: string }
+  /** Submit a stored New-task draft as a real task, due immediately — the one
+   *  drop that CREATES work rather than moving it (design.md §4). No payload:
+   *  the draft's own stored `form` is the whole message, and draft-run is the
+   *  one module that knows its shape (the modal writes it). */
+  | { kind: "run-draft" }
+  /**
+   * SEND THE DRAFT THIS ROW IS WEARING — the extra exit a settled card gets,
+   * on Done and on Archive alike (`rowExits`; Akshil, 2026-09-14). Not
+   * `run-draft`: that one is a draft ROW
+   * becoming a task and carries no payload because the row IS the draft. Here
+   * the row is a real task and the draft is a message into it, so the drop has
+   * to say which draft and where it is going.
+   *
+   * `draftKind` is the row's own `draft.kind` and picks the call: `"chat"` is
+   * unsent words in that conversation's composer, which travel as an immediate
+   * message into the session; `"form"` is a New task card bound to the session,
+   * which is submitted the way a draft row's drop submits one. Both are
+   * draft-run's business — this module names the draft, never its shape.
+   */
+  | {
+      kind: "send-draft";
+      draftKind: "chat" | "form";
+      /** The conversation the message is going into — `Task.session_id`. */
+      sessionId: string;
+      /** The bound form's id (`Task.bound_draft`) on a `"form"` draft, "" on a
+       *  `"chat"` one, whose words are filed under the session id itself. */
+      draftId: string;
+    }
+  /** Send a scheduled message that already went again, as a new one in the
+   *  same thread (`api.resendScheduledMessage`). */
+  | { kind: "resend"; entryId: string; messageId: string }
+  /** Say a TYPED message again: the schedule has no entry to copy, so the words
+   *  travel — a new immediate message into the same session
+   *  (`api.scheduleMessage`). */
+  | { kind: "resay"; body: string; sessionId: string; target: string; messageId: string }
+  /** Move this task's pending work to the head of its FOLDER's line
+   *  (`api.skipQueue`). Carries the task key the endpoint takes — the task's,
+   *  not the folder's: skipping is something one task does, and the server
+   *  reads the folder off the row. It NEVER interrupts the run in flight, which
+   *  is why it is a different kind from `run` even though the drop lands on the
+   *  same lane. */
+  | { kind: "skip"; key: string }
+  | { kind: "archive" }
+  | { kind: "unarchive" };
+
+export function dropAction(task: Task, lane: BoardLane): DropAction | null {
+  return laneAction(task, taskColumn(task), lane);
+}
+
+/**
+ * The whole decision, given the lane the card is IN as well as the one it was
+ * dropped on — which is what lets `dropLanes` and `dropAction` be the same rule
+ * read twice instead of two rules that agree by inspection.
+ *
+ * SOURCE FIRST, and that ordering is the unarchive rule: a card leaving Archive
+ * is unfiled whatever it was dropped on, so the target lane is only ever a
+ * legality check (`rowExits`) and never an argument.
+ *
+ * WITH ONE EXCEPTION, and it is the row rule rather than a lane rule: an
+ * archived row WEARING A DRAFT may be dropped on In Progress, and that drop
+ * sends the draft (Akshil, 2026-09-14: "done + draft and archive + draft both
+ * can be dropped in progress"). It is still one decision — the un-filing is the
+ * server's consequence of the message, not a second claim by the reader — see
+ * `rowExits`. Every other archived drop is the unarchive it always was, and In
+ * Progress on a row with nothing unsent is not offered at all.
+ */
+function laneAction(
+  task: Task,
+  here: BoardColumn,
+  lane: BoardLane,
+): DropAction | null {
+  if (!rowExits(task, here).includes(lane)) return null;
+  if (here === "archived") {
+    // `rowExits` opens In Progress for an archived row only when it is carrying
+    // something unsent, so this lane and this lane alone means "send it".
+    return lane === "in_progress" ? sendDraftAction(task) : { kind: "unarchive" };
+  }
+  if (lane === "archived") return { kind: "archive" };
+  // OUT OF QUEUED, THE DROP IS A SKIP — never a run. The only lane a queued card
+  // may be dropped on (besides Archive) is In Progress, and the reader's gesture
+  // there means "go sooner", which is all skipping is: this task's pending work
+  // jumps to the head of its folder's line and the run already in that folder is
+  // left completely alone. Firing it instead would put two runs in one folder,
+  // which is the one thing the queue exists to prevent — so the gesture that
+  // LOOKS like the Upcoming drag deliberately makes a different call.
+  if (here === "queued") return { kind: "skip", key: task.key };
+  // DONE, WITH SOMETHING UNSENT ON IT. `rowExits` opened In Progress for this
+  // row and no other lane, so by elimination that is where it was dropped, and
+  // what the drop means is "send the draft now" (Akshil, 2026-09-14: "done +
+  // draft and archive + draft both can be dropped in progress to rerun the task
+  // with draft message"). It is checked BEFORE the run rules below on purpose: a Done row
+  // frequently HAS a pending message — the next occurrence of a recurring
+  // task — and firing that instead would be the drop the lane is locked
+  // against, wearing the draft's clothes.
+  if (here === "done") return sendDraftAction(task);
+  // A DRAFT, before the run rules below: it has no entry and no session, so
+  // every question they ask of it answers "nothing to do". What it has is a
+  // stored form, and the drop submits it (design.md §4).
+  //
+  // WHETHER THIS PARTICULAR DRAFT IS FINISHED ENOUGH TO SEND IS NOT ASKED HERE,
+  // and that is the one exception to "a lane is offered exactly when the drop on
+  // it has something to do". The test is the New task form's own Save gate
+  // (draft-run.canRunDraft), and draft-run reaches into NewJobModal to apply it
+  // — so asking it from this module would point the page's smallest, most-
+  // imported file at its largest, and drag a React form into every test that
+  // touches a task. The Board asks it instead, once, in `cardLifts`, which is
+  // the only thing that consults `isDraggable` at all.
+  if (here === "draft") return { kind: "run-draft" };
+  // The one precondition, and it belongs to the run rather than to the lane:
+  // In Progress needs a pending MESSAGE to fire, not a session to file under, so
+  // a scheduled task that has never run may be dragged there and a pure-chat
+  // task with nothing pending may not.
+  const m = runNowTarget(task);
+  if (m) return { kind: "run", entryId: m.entryId, messageId: m.messageId };
+  // OUT OF BLOCKED, WITH NOTHING PENDING, THE DROP IS A RE-RUN (Akshil,
+  // 2026-09-11). Upcoming keeps the stricter rule: a task that has not run yet
+  // has nothing to run AGAIN, and its drop means "now" or nothing.
+  return here === "blocked" ? rerunAction(task) : null;
+}
+
+/**
+ * WHICH DRAFT A SETTLED CARD IS CARRYING, and where it is going — the payload
+ * behind `send-draft`, and the reason `rowExits` can offer that lane at all.
+ * One function for both settled lanes: a filed row's unsent words are the same
+ * words, going to the same conversation, as a finished one's.
+ *
+ * Null is "there is nothing this drop could do", which is what keeps the lane
+ * from being offered in the first place (`dropLanes` filters on exactly this
+ * answer). Three ways to get it:
+ *
+ *   · no draft — the ordinary Done or Archived card, locked as it has always
+ *     been;
+ *   · NO SESSION. The draft is words to say in a conversation, and this row has
+ *     none to say them in (a `pending:<entry>` row that never ran cannot be
+ *     wearing a chat draft anyway — the chip is joined on the session id — but
+ *     the rule is stated rather than assumed, because the drop's whole payload
+ *     is that id);
+ *   · a `"form"` draft the row cannot NAME. The bound form's id travels in
+ *     `bound_draft`, filled from the same join that sets `draft.kind`
+ *     (routers/tasks.py `_row`), so the two go together — and an old page or an
+ *     odd store that has one without the other must not produce a drop that
+ *     would have to go hunting for which form it meant.
+ *
+ * `"chat"` is the fallback for a `kind` the server did not send, which is the
+ * same way `Task.draft.kind` is documented to be read: the field is newer than
+ * the chip, and before it existed every draft on a session row was a chat one.
+ */
+export function sendDraftAction(task: Task): DropAction | null {
+  if (!task.draft) return null;
+  const sessionId = task.session_id ?? "";
+  if (!sessionId) return null;
+  const draftKind = task.draft.kind === "form" ? "form" : "chat";
+  const draftId = draftKind === "form" ? (task.bound_draft ?? "") : "";
+  if (draftKind === "form" && !draftId) return null;
+  return { kind: "send-draft", draftKind, sessionId, draftId };
+}
+
+/**
+ * WHAT A RE-RUN SENDS, for a Blocked card dropped on In Progress with nothing
+ * pending to bring forward (Akshil, 2026-09-11: "trigger a rerun when that
+ * happens [rerun what? … last message? a stored prompt, what?]").
+ *
+ * The answer is THE MESSAGE WHOSE RUN BROKE — the newest one that went out,
+ * which is the one the lane is red about — sent again into the same
+ * conversation, so the thread reads as a person asking once more rather than
+ * as history rewritten. Nothing is stored for this: the message is the prompt.
+ *
+ * Two shapes, because the schedule knows one of them and not the other:
+ *
+ *   * a SCHEDULED message has an entry the server can copy verbatim
+ *     (`resendTarget` → `/api/schedule/resend`, the List's own Re-run) —
+ *     attachments, model and permission mode travel with it;
+ *   * a TYPED message has no entry, so its words go as a new immediate message
+ *     into the session (`api.scheduleMessage` with `session_id`) — the same
+ *     road the New task form's "continue this conversation" takes.
+ *
+ * Newest first across BOTH kinds, by the window's order: re-asking means the
+ * last thing that was asked for, whichever way it was asked. Null when the
+ * window holds nothing that went — then the card stays where it is, exactly as
+ * before (dropLanes offers no In Progress).
+ */
+export function rerunAction(task: Task): DropAction | null {
+  for (const m of task.messages ?? []) {
+    if (m.state === "pending" || m.state === "sending") continue;
+    if (m.entry_id) {
+      if (m.state === "sent" || m.state === "error")
+        return { kind: "resend", entryId: m.entry_id, messageId: m.message_id };
+      continue;
+    }
+    if (m.kind === "chat" && m.body.trim() && task.session_id)
+      return {
+        kind: "resay",
+        body: m.body,
+        sessionId: task.session_id,
+        target: task.target || task.project,
+        messageId: m.message_id,
+      };
+  }
+  return null;
+}
+
+// ---- filing, without the drag ------------------------------------------------
+// "Can a task be deleted?" — no, and it never will be: a task IS a Claude
+// session and this app does not destroy transcripts (D306). What it can be is
+// ARCHIVED, which is the honest answer to that question — but only while
+// archiving is something a person can actually reach. It was once one gesture on
+// one view: drag the card onto the Archive lane, which starts COLLAPSED. "Switch
+// to Board, expand a lane, drag" is not an affordance.
+//
+// So the move gets a button, and now BOTH directions do (Akshil, 2026-08-19).
+// The rule behind them lives here rather than in either component, and it is
+// deliberately not two predicates: the whole decision is asked of dropAction, on
+// the lanes the Board's drag would have used, so the buttons and the drops cannot
+// disagree about who may file what. That is why this sits after dropAction
+// instead of up beside runNowIntent — it is the same shape of function, and it is
+// defined below the one function it is only a re-reading of.
+//
+// THE WAY BACK IS A BUTTON AGAIN, and this is the third answer that position has
+// had, so it is worth saying what changed. It was `SHOW_UNARCHIVE` — computed,
+// never drawn by the row, drawn by the Board, which is two answers to one
+// question — and its move was Archive → In Progress: a lane a reader was
+// asserting about work they had not watched. Then it was nothing at all, on the
+// reasoning that any label for it over-claims.
+//
+// What was wrong was never the button, it was the DESTINATION. Unarchive names
+// no lane now: the filing is dropped, the server derives the lane from the thread
+// (`api.unarchiveTask`), and the row draws that. So there is a label that claims
+// exactly what happens and no more — "Unarchive" — and the trap the old button
+// was is gone with the lane it used to pick.
+//
+// THE OTHER WAY BACK IS STILL ACTIVITY, and it needs no affordance at all: say
+// something in that conversation and the server drops the filing by itself. The
+// button is for the reader who has nothing to say in there and only wants the
+// card back — which was exactly the person the one-way door stranded.
+//
+// ONE BUTTON PER ROW, and on an archived row it is the ONLY button (see
+// showsRowActions). Nothing is destroyed in either direction: the conversation is
+// kept, the transcript is kept (D306), and Archive is a place to read them.
+
+export interface FilingIntent {
+  /** WHICH DIRECTION, and therefore which call the caller makes
+   * (`api.archiveTask` / `api.unarchiveTask`). A row draws one or the other and
+   * never both: a task is either put away or it is not. */
+  kind: "archive" | "unarchive";
+  /**
+   * The lane this move puts the card in, when the move HAS one — the same lane
+   * the Board's drop would have targeted, which is what makes button and drag
+   * agree by construction.
+   *
+   * NULL FOR UNARCHIVE, and that is the model rather than a gap. Coming out of
+   * Archive says "not put away any more" and nothing about what the work is
+   * doing, so the lane is derived server-side from the thread and there is no
+   * lane for this to name. A `BoardColumn` here would be a promise nothing
+   * keeps — the value the old, deleted Archive → In Progress button asserted.
+   */
+  lane: BoardColumn | null;
+  /** The button's accessible name, and the word it says. */
+  label: string;
+  /** The tooltip: what happens, and the thing a person deleting would fear. */
+  title: string;
+}
+
+/**
+ * WHETHER THIS TASK'S FILING CAN BE CHANGED, and in which direction. One
+ * function for both halves, because it is one decision with one answer per row —
+ * two predicates would let a row draw both buttons, or neither, on a status
+ * neither of them had thought about.
+ *
+ * BOTH HALVES ARE ASKED OF THE DRAG, on the lanes the drag itself would use, so
+ * the button and the drop cannot disagree about who may file what. That is why
+ * this sits below dropAction: it adds no rule of its own, it only puts words on
+ * the one dropAction already answered.
+ *
+ * Null exactly when the Board would refuse every filing drop, which is the
+ * mid-run row and nothing else now: In Progress is Claude's output and its cards
+ * neither file nor un-file until the run ends.
+ *
+ * A never-run task gets the archive button. Archiving is one verb over a task
+ * key (`api.archiveTask`), not a triage write keyed by session id, so the
+ * `pending:<entry>` row that had no session to file is filed by cancelling its
+ * work — which is what archiving a task that has not run has always meant.
+ */
+export function filingIntent(task: Task): FilingIntent | null {
+  // AWAY, on the lane the drag aims at.
+  if (dropAction(task, "archived")?.kind === "archive")
+    return {
+      kind: "archive",
+      lane: "archived",
+      label: "Archive",
+      // Three clauses because a person reaching for Delete is asking all three:
+      // where does it go, what happens to work already booked, and can I get it
+      // back.
+      title:
+        "Archive — files this away and calls off any run still booked; the conversation is kept, and you can bring the task back",
+    };
+  // BACK OUT. Asked of the row itself, NOT the drag matrix: Archive's exits are
+  // locked (Akshil, 2026-08-19 — the way out is this button, not a gesture), so
+  // deriving the button from dropLanes would delete the only door. The rule the
+  // drag used to encode survives here: an archived row that is not mid-run may
+  // un-file, and the landing lane is derived server-side — no lane named.
+  const back = taskColumn(task) === "archived";
+  if (!back) return null;
+  return {
+    kind: "unarchive",
+    lane: null,
+    label: "Unarchive",
+    // Says the one thing a person cannot see before pressing: the card is about
+    // to appear somewhere they are not looking, and nothing is going to run.
+    title:
+      "Unarchive — takes this back out of Archive and into whatever lane its work is in; nothing is re-run",
+  };
+}
+
+/** The hint a blocked trash wears, and the words the server refuses in
+ *  (`/api/tasks/erase`: "that task is running — stop the run first, then
+ *  delete"). Said in the SHORT form on a 24px door, but it is the same sentence
+ *  — a control whose caption promises one reason and whose refusal gives another
+ *  is the divergence this page's vocabulary is written against. */
+export const ERASE_BLOCKED_HINT = "Stop the run first";
+
+/**
+ * Whether deleting this task for good must be REFUSED — the client half of the
+ * server's 409.
+ *
+ * `inFlight` and nothing else, so the trash and the endpoint cannot disagree
+ * about what "running" means: both lanes count (`in_progress` and the
+ * `needs_attention` run parked on a permission card, which is every bit as
+ * live), and a control that only checked `in_progress` would offer to erase the
+ * transcript a waiting `claude --resume` still has open.
+ *
+ * NOT a version of `filingIntent`: archiving a mid-run task is refused because
+ * filing work that is still happening is dishonest, and it is offered again the
+ * moment the run ends. This is refused because the file is in use. Same lanes
+ * today, two different reasons, and folding them together would tie an
+ * irreversible verb's guard to a reversible one's rules.
+ */
+export function eraseBlocked(task: Pick<Task, "status">): boolean {
+  return inFlight(taskColumn(task));
+}
+
+/**
+ * Whether a row draws its ORDINARY actions — run, re-run, mark read.
+ *
+ * OPENING IS NOT ONE OF THEM and is never withheld: Archive is a place to READ
+ * things (D306 — the transcript is kept), so the row link, the ring and the Open
+ * chat control all keep working on an archived task. What this gates is the
+ * controls that act on the WORK.
+ *
+ * False on an archived task, which is the whole of it (Akshil, 2026-08-19: only
+ * the unarchive button on archived rows). A card in Archive has exactly one
+ * decision left against it — whether it is still archived — and every other
+ * control on it is a control for work somebody has already said they are done
+ * with. Offering Re-run beside Unarchive also invites the misread this branch
+ * spent its whole design avoiding: that coming back out of Archive runs
+ * something.
+ *
+ * Not folded into `taskRunIntent` or `markReadIntent`: those two answer "is
+ * there a run to make / is there anything unread", which stays true of an
+ * archived task and is the honest answer for the calendar popover and any other
+ * surface that asks. This is a rule about a ROW's chrome, so it is its own
+ * function and the row asks it.
+ */
+export function showsRowActions(task: Task): boolean {
+  return taskColumn(task) !== "archived";
+}
+
+// ---- clearing a task, without opening it -------------------------------------
+// Read state is per MESSAGE and that is the right model (§7) — but per message
+// was also the only way to CLEAR it, so "I have seen all of this" was one click
+// per row, each one navigating away into a transcript (Akshil, 2026-08-17: "in
+// list you add mark as read button on the task right next to archive or
+// something so you don't have to open everything individually").
+//
+// So the task row gets the whole-task verb, and the server gets ONE call for it
+// (api.markWholeTaskRead). Nothing about the per-message path changes: clicking
+// a message still opens the transcript at that turn and still marks only that
+// one.
+//
+// Offered only on a task that HAS something unread. Unlike Archive — which is
+// about a task's place and is always a sensible thing to ask — this one is a
+// no-op the moment the count is zero, and a button that does nothing on most
+// rows is what makes the ones that do matter hard to find. The count it asks is
+// the DISPLAYED one (taskUnread, so local marks count), which is what lets the
+// button remove itself on its own press instead of a poll later.
+
+export interface MarkReadIntent {
+  /** How many messages this clears — the number the tooltip says. */
+  unread: number;
+  /** The button's accessible name, and the word it says. */
+  label: string;
+  /** The tooltip: how much this clears, since the row shows only three of it. */
+  title: string;
+}
+
+export function markReadIntent(
+  task: Task,
+  read: Set<string>,
+  held?: TaskMessage[],
+): MarkReadIntent | null {
+  const unread = taskUnread(task, read, held);
+  if (unread <= 0) return null;
+  return {
+    unread,
+    label: "Mark read",
+    // The number matters here in a way it does not on the other actions: the row
+    // lists three messages and the count can be 89, so "all of them" has to say
+    // how many it is about to be.
+    title: unread === 1
+      ? "Mark read — clears the 1 unread message in this task"
+      : `Mark read — clears all ${unread} unread messages in this task`,
+  };
+}
+
+// ---- opening a thread --------------------------------------------------------
+// A gesture that opens the conversation used to open it and mark nothing: the
+// card (or the row) carried an unread pill, the press took the reader into the
+// very thread that pill was pointing at, and the pill was still there when they
+// came back (Akshil, 2026-08-17: "when i click from kanban on unread task it
+// should register it read correct?"). Yes.
+//
+// This is deliberately NOT the Board's rule. It is the rule for OPENING A
+// THREAD, and both gestures that do that ask it: the Board card's click and the
+// List row's "Open chat" button. They go to the same place (taskHref) by the
+// same gesture, so they must come back with the same badge — a mark that
+// depended on which view you happened to be in would be a coin toss, not a
+// rule. Hence the view-neutral name: one function, one behaviour, two callers.
+//
+// WHOLE-TASK, not one message, and that follows from the href: both link
+// taskHref — the thread, with no per-turn anchor — so what the reader is shown is
+// the conversation, not one turn of it. That is precisely the case
+// api.markWholeTaskRead exists for, and it is the same call the List row's Mark
+// read button makes. There is no second way to mark read here.
+//
+// The two things are ORDERED but not coupled: the mark is a side effect of
+// opening, so a thread with nothing unread still opens, and a failed write must
+// not cost the navigation (callers fire and forget — the press is leaving the
+// page, exactly as the per-message path already argued).
+//
+// What this does NOT cover, and must not: the List task ROW's own click, which
+// toggles the accordion and opens nothing (there is no "you have seen it" to
+// infer from expanding a row), and a MESSAGE click, which lands on its own turn
+// and therefore marks that one message.
+
+export interface OpenThreadIntent {
+  /** Where the press goes. Never empty: a gesture with nowhere to go has no
+   * intent at all, so the caller cannot navigate to null. */
+  href: string;
+  /** Whether opening this also clears the task's unread. */
+  markRead: boolean;
+}
+
+/**
+ * What opening this task's thread does, or null when it does NOTHING.
+ *
+ * THE `queued` CASE IS NO LONGER ONE OF THOSE (2026-09-12). A task that has
+ * never run has no session id (§5), and that used to be the end of it; a task
+ * WAITING IN A FOLDER'S LINE now opens by the entry it is waiting as (`taskHref`,
+ * `QUEUED_PARAM`), so the reader can read back what they typed and what it is
+ * behind. The mark rides along honestly: there is a conversation on screen after
+ * the press. Every other `pending:<entry>` row — an upcoming one-off, whose
+ * content is the instruction in its form — still answers null here.
+ *
+ * `unread` defaults to the server's count and may be passed as the DISPLAYED one
+ * (taskUnread, so local marks count), which is what stops a second press on an
+ * already-cleared task from posting again.
+ */
+export function openThreadIntent(
+  task: Task,
+  unread: number = task.unread,
+): OpenThreadIntent | null {
+  const href = taskHref(task);
+  if (!href) return null;
+  return { href, markRead: unread > 0 };
+}
+
+// ---- filtering ---------------------------------------------------------------
+
+export interface TaskFilters {
+  search: string;
+  statuses: BoardColumn[];
+  /**
+   * Project FOLDERS, full paths — the value `Task.project` carries.
+   *
+   * A LIST THAT HOLDS AT MOST ONE (design.md, 2026-09-14). The menu is radio-
+   * style — pick a folder, or All — and the row chips write the same shape
+   * (Scheduled's folder chip), so nothing in the app ever stores two. The TYPE
+   * stays a list because that is the one thing worth not churning: `taskMatches`
+   * asks it with `includes`, which is the right question for either shape, and a
+   * stored filter written by an older build still reads correctly.
+   */
+  projects: string[];
+  /**
+   * ONLY THE ROWS WITH UNSENT WORDS IN THEM (design.md, Round 2: the Draft chip
+   * "is a filter tag").
+   *
+   * A BOOLEAN and not a list, unlike the two facets above, because there is one
+   * of it: "draft" is not a value a row has one of several of, it is a thing a
+   * row either carries or does not (`hasDraft`). And deliberately NOT a member
+   * of `statuses` — the Status menu offers the Board's lanes, and a draft is
+   * drawn INSIDE Upcoming rather than being a lane (schedule-lib's note on
+   * `BoardColumn`), so a "Draft" entry there would advertise a seventh column
+   * that does not exist.
+   *
+   * Its only control is the chip on the rows themselves, which is why it is not
+   * offered in the toolbar's popovers at all: the filter and the mark that sets
+   * it are one object, the way the project chip already is.
+   */
+  draft: boolean;
+}
+
+export const EMPTY_FILTERS: TaskFilters = {
+  search: "",
+  statuses: [],
+  projects: [],
+  draft: false,
+};
+
+export function hasActiveFilters(f: TaskFilters): boolean {
+  return (
+    f.statuses.length > 0 || f.projects.length > 0 || f.draft || f.search.trim() !== ""
+  );
+}
+
+// THE ARCHIVE FACET, SCOPED TO THE VIEW (Akshil, 2026-08-20). The calendar
+// draws nothing for an archived task (ScheduleCalendar's header comment: "AN
+// ARCHIVED TASK DRAWS NOTHING") — so the Status filter's Archive option, which
+// the List and the Board both honour, is a dead control there: picking it
+// alone always redraws an empty grid, and it is not obvious WHY a grid a
+// person just filtered stopped answering their calendar question.
+//
+// The filter's VALUE is still one shared `TaskFilters` (Scheduled.tsx keeps
+// one control for all three views — a person filtering List to one project
+// and switching to Calendar means to keep looking at that project), so this
+// does not touch the value the popover reads or writes. It only asks: for the
+// query this VIEW is about to run, does "archived" belong in the status list
+// it hands to `filterTasks`? On the calendar the answer is always no — a
+// hidden facet must never silently filter the grid to nothing — and on List
+// or Board (where Archive is a real, renderable lane) the value passes
+// through unchanged.
+//
+// Because this touches only the EFFECTIVE query and not the stored filters, a
+// person who ticks Archive on Calendar and then switches to List sees Archive
+// still ticked and the archived tasks it was always going to show — the
+// facet was ignored, never cleared.
+//
+// THE DRAFT FACET IS SCOPED THE SAME WAY, and for the identical argument
+// (Akshil, 2026-09-11). Its control is the chip on a row or a card, so the
+// question is only ever "does THIS view draw one?" — and the calendar draws
+// chips for scheduled runs and no draft anywhere, so there it is a facet with
+// no control: ignored, exactly like Archive, rather than cleared.
+//
+// THE CARDS WALL IS NO LONGER ONE OF THEM (Akshil, 2026-09-12). It was, on the
+// reading that the wall draws no draft ROW (CARD_LANES) — true, and beside the
+// point: a card's head carries the chip whenever the task's composer is holding
+// unsent words, and that chip is now the same pressable tag the List and the
+// Board draw (TaskCards → DraftChip). So the wall has a control, the facet has
+// something to keep, and the one view left dropping it is the calendar.
+export function filtersForView(f: TaskFilters, view: TaskView): TaskFilters {
+  const draft = view === "calendar" && f.draft;
+  const archived = view === "calendar" && f.statuses.includes("archived");
+  if (!draft && !archived) return f;
+  return {
+    ...f,
+    ...(draft ? { draft: false } : {}),
+    ...(archived ? { statuses: f.statuses.filter((s) => s !== "archived") } : {}),
+  };
+}
+
+/**
+ * Does the list a view is DRAWING span more than one project?
+ *
+ * Which is the whole of the folder chip's reason to exist. With the Project filter
+ * pinned to one folder — or a search that happens to narrow to one — every visible
+ * row repeats the same word, and a column of identical chips is noise on the busiest
+ * edge of the row (Akshil, 2026-08-17: "this looks like a lot of information on the
+ * right side... both the folder and the time with the date, they are like too much
+ * for me to handle"). So the chip is drawn only when it DISTINGUISHES rows.
+ *
+ * Asked of the ROWS THEMSELVES, deliberately, not of the filter's value: a search
+ * for "roadmap" that leaves three rows in one project is the same page to read as
+ * the filter set to that project, and a rule that consulted the control would only
+ * be right about one of the two. It also means the answer is right for a view that
+ * has no filter control at all.
+ *
+ * An empty list is `false` — there is nothing to distinguish — which is the
+ * harmless answer either way, since nothing is drawn.
+ */
+export function spansProjects(tasks: Task[]): boolean {
+  const seen = new Set<string>();
+  for (const t of tasks) {
+    seen.add(t.project);
+    if (seen.size > 1) return true;
+  }
+  return false;
+}
+
+/** The project filter's own choices — "auto-detected from the set of folders
+ * that have tasks" (§10), sorted so the menu does not reshuffle when the task
+ * order does. */
+export function projectOptions(tasks: Task[]): string[] {
+  const seen = new Set<string>();
+  for (const t of tasks) if (t.project) seen.add(t.project);
+  // **Sorted by the NAME the menu prints, not by the path it carries** (D448).
+  // The menu draws `basename(path)` and this sorted the whole path, so a list
+  // that is alphabetical by `/Users/me/Desktop/fused/…` then `/Users/me/Fused/
+  // local/…` arrives on screen as "fused-render, aviary, lens, canvas" — no
+  // order at all as far as the reader is concerned ("check order of the filter
+  // folder as well, it appears random to me").
+  //
+  // The full path is the TIE-BREAK, not the key: two checkouts of one repo in
+  // different parents share a basename, and a sort with no stable second key
+  // would let them swap places between renders.
+  return [...seen].sort(
+    (a, b) => basename(a).localeCompare(basename(b)) || a.localeCompare(b),
+  );
+}
+
+/**
+ * DOES THIS FOLDER ANSWER WHAT WAS TYPED — the project filter's own search, and
+ * a search box narrowing a list this page already holds.
+ *
+ * THE NAME ONLY — the word the menu prints (`basename`), case-folded substring,
+ * so "render" finds `fused-render` and "AVIARY" finds `Aviary`. Not the path:
+ * the menu shows names, and a match on a path segment the reader cannot see
+ * ("desktop" lighting up every folder under ~/Desktop) read as the filter
+ * being wrong rather than as a wider search (Akshil, 2026-09-18: "in project
+ * filter instead of name + path let's only do name"). No fuzzy matching and no
+ * glob — that is the INDEX's language (`fused_render/index/query.py`,
+ * DECISIONS-one-search-language.md), for searching a disk this page is not
+ * touching.
+ *
+ * An empty query is not a filter: every folder answers it.
+ */
+export function projectMatches(path: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return basename(path.toLowerCase()).includes(q);
+}
+
+
+// TODO: follow the Explorer's search ORDERING here too — a title match and a
+// path-only match rank the same today, and the Explorer ranks the name first.
+export function taskMatches(task: Task, filters: TaskFilters): boolean {
+  // By LANE (schedule-lib.laneOf): the Status menu offers the Board's lanes,
+  // and a Blocked tick means everything the Blocked lane holds — the run that
+  // broke and the run parked on a card (`needs_attention`). Lanes on BOTH
+  // sides, so a `needs_attention` in `statuses` — nothing writes one today, the
+  // type still admits it — means the same lane the menu would have ticked.
+  if (filters.statuses.length) {
+    const lane = laneOf(taskColumn(task));
+    if (!filters.statuses.some((s) => laneOf(s) === lane)) return false;
+  }
+  if (filters.projects.length && !filters.projects.includes(task.project)) return false;
+  // The Draft tag, and it is the same shape as the two facets above: OFF says
+  // nothing at all about a row, ON keeps only the rows carrying unsent words of
+  // any of the three sorts (`hasDraft`; design.md, Round 2).
+  if (filters.draft && !hasDraft(task)) return false;
+  const q = filters.search.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    task.title.toLowerCase().includes(q) ||
+    // TASK-002 is a designed, printed identifier — searching it is how a
+    // person uses it.
+    task.task_id.toLowerCase().includes(q) ||
+    task.project.toLowerCase().includes(q) ||
+    task.target.toLowerCase().includes(q) ||
+    // The bodies we hold. A thread the user has not expanded is only searched
+    // as far as its three newest, which is the same window the row shows.
+    (task.messages ?? []).some((m) => m.body.toLowerCase().includes(q)) ||
+    // A session uuid is never PRINTED (it reads as a second, competing ID
+    // scheme beside TASK-n) but stays findable: someone holding one from a log
+    // or a URL can paste it in and land on the row.
+    task.session_id.toLowerCase().includes(q)
+  );
+}
+
+/** Filter without reordering. The server sorted this list, newest task first,
+ * and re-sorting it here is how two views start disagreeing about "newest". */
+export function filterTasks(tasks: Task[], filters: TaskFilters): Task[] {
+  return tasks.filter((t) => taskMatches(t, filters));
+}
+
+// ---- per-lane order (the Board's one exception) -------------------------------
+// See the exception named at the top of this file. Two keys and three
+// directions, all built out of times the server sent.
+
+/** The earliest pending `at` among the messages the row is CARRYING. Null when
+ * the window holds nothing pending.
+ *
+ * Every pending message counts, not just the ones with an `entry_id`:
+ * runNowTarget needs that field because it is what the call SENDS, and this only
+ * needs to know when the thing happens.
+ *
+ * On its own this is a BOUND rather than an answer — see nextRunAt, which is why
+ * it is not exported. */
+function windowNextRun(task: Task): number | null {
+  let best: number | null = null;
+  for (const m of task.messages ?? []) {
+    if (m.state !== "pending" || !m.at) continue;
+    if (best === null || m.at < best) best = m.at;
+  }
+  return best;
+}
+
+/**
+ * When this task NEXT runs — the row's own `next_run` where it has one, and the
+ * window's earliest pending where it does not. Null when neither names a run.
+ *
+ * `at`, not `ran_at`, and that is not a slip — a pending message has never run,
+ * so its `ran_at` is 0 and `at` is the only time it has. It is also the same
+ * instant runNowTarget fires (both prefer the same field, and both fall back to
+ * the same window), so the card at the top of Upcoming is the card whose Run now
+ * button sends the message the lane's order is promising.
+ *
+ * WHY THE FIELD, since the window looks like it should be enough. It is not, and
+ * the old note here was wrong about why: it said pending messages "are due in the
+ * future, which puts them at the head of that window". On this branch scheduling
+ * into the PAST is allowed and catch-up is unbounded, so a pending message whose
+ * `at` has gone by is an ordinary state — and it is exactly the work that should
+ * be read first. `task.messages` is the three newest by `at` (server: tasks.py
+ * `_row`, which merges every entry with the transcript's prompts, sorts ASCENDING
+ * by `at` and keeps the tail), so an overdue pending is pushed out of it by three
+ * messages with later `at` — two sent runs and next month's occurrence will do it
+ * — and reading the window alone then answers the LATER pending: an upper bound
+ * that sorted the buried work behind everything it should have led.
+ *
+ * `next_run` closes that: `min(at)` over every pending ENTRY, taken on the server
+ * before the tail is cut, where the whole set is already in hand. The window stays
+ * as the fallback for an older server, and for a task the field says nothing about.
+ *
+ * Widening `task.messages` was the other way and is still the wrong one — another
+ * row of tail held per session, on every poll, for every row, to fix a minority.
+ *
+ * Guessing remains deliberately unattempted where neither source knows. The client
+ * can tell that a window is truncated (`message_count`) but not whether anything
+ * pending hides in the part it cannot see, and promoting every long thread on that
+ * suspicion would put a task due in October above one firing in ten minutes.
+ */
+export function nextRunAt(task: Task): number | null {
+  const named = namedNextRun(task);
+  const held = windowNextRun(task);
+  if (named === null) return held;
+  // The window can only beat the field in one case, and it is a real one: the
+  // server names the earliest pending entry it can also FIRE, so a pending entry
+  // with no readable id is skipped there and still seen here. It is unfireable
+  // either way, so ordering by it changes nothing about which message the button
+  // sends — and the earlier of two times is the honest one to sort by.
+  return held !== null && held < named.at ? held : named.at;
+}
+
+/**
+ * Whether a lane time has already gone by — work that should have happened.
+ *
+ * `at` is epoch SECONDS (the API's unit) and `now` is milliseconds, which is the
+ * one thing worth being careful about here. Null is not overdue: a task with no
+ * time at all has nothing to be late for.
+ */
+export function isPastDue(when: number | null, now: number = Date.now()): boolean {
+  return when !== null && when * 1000 <= now;
+}
+
+/** The states that mean the message never went out, so it dates no run. A
+ * `missed` one is deliberately NOT here: it was due and the run did not happen,
+ * which is the event the Blocked lane exists to show, and its `at` is the closest
+ * thing to a time it has. */
+const NEVER_RAN = new Set<TaskMessage["state"]>(["pending", "cancelled", "skipped"]);
+
+/**
+ * When this task LAST ran — the newest run in the window, by when it actually
+ * happened. Null when nothing in the window has run.
+ *
+ * `ran_at` first, `at` only as the fallback, because the two part company: a
+ * caught-up run has an `at` from Thursday and a `ran_at` from Saturday (see
+ * api.TaskMessage), and Done ordered by `at` would file Saturday's run two days
+ * back among work that finished before it.
+ *
+ * A MAX over the window rather than the first non-pending element, for the same
+ * reason: the server's list is newest-first by `at`, and the caught-up case is
+ * exactly the case where that is not newest-first by `ran_at`. Taking element
+ * zero would inherit the bug the fallback exists to fix.
+ */
+export function lastRunAt(task: Task): number | null {
+  let best: number | null = null;
+  for (const m of task.messages ?? []) {
+    if (NEVER_RAN.has(m.state)) continue;
+    const when = m.ran_at || m.at;
+    if (!when) continue;
+    if (best === null || when > best) best = when;
+  }
+  return best;
+}
+
+/**
+ * How one lane is ordered. `server` means exactly that: leave the list as the
+ * server sent it (`last_active` descending) and sort nothing.
+ */
+export interface LaneSort {
+  /** `queue` is the only key here that is not a clock: it orders by the place in
+   *  the folder's line the server already computed (`Task.queue_position`). It
+   *  gets its own word rather than borrowing `server` because the server's order
+   *  for the listing is `last_active`, which says nothing about a line. */
+  key: "next-run" | "last-run" | "server" | "queue";
+  dir: "asc" | "desc";
+  /**
+   * Work that is ALREADY PAST DUE sorts ahead of work that is not, before the
+   * direction below is consulted at all.
+   *
+   * Ascending order happens to put a past time first anyway, and that is the
+   * reason to write this down rather than the reason not to: the promise "the
+   * overdue run is at the top" was resting on a coincidence between two
+   * independent decisions, and the first person to reconsider `dir` would have
+   * broken it without touching a line that mentions overdue work. On this branch
+   * an overdue pending is a normal state — past scheduling is allowed and
+   * catch-up is unbounded — so it is the lane's headline case and it says so.
+   *
+   * Within the bucket the direction still applies, which is what puts the MOST
+   * overdue first: that is the one the scheduler will send next.
+   */
+  overdueFirst?: boolean;
+}
+
+/**
+ * Every lane's order, in one map, keyed off BoardColumn so a lane cannot be
+ * added to the board and forgotten here.
+ *
+ *   upcoming     next run, ASCENDING — soonest first, and OVERDUE first of all.
+ *                The user's ask, and the only ascending lane on the board that
+ *                orders by a TIME at all.
+ *   queued       the LINE ITSELF (`queue_position`), ascending — #1 at the top,
+ *                which is the one order this lane can honestly claim. It is not
+ *                a time key and cannot be: two folders' lines interleave in this
+ *                column, and the thing a reader wants from a queued card is
+ *                where it stands, not when it was asked for. Ties (two folders
+ *                both at #1, the common case) fall back to `last_active`, so the
+ *                order is total and a card cannot swap places between polls.
+ *   in_progress  last run, descending. The freshest work sits at the top like
+ *                every other settled lane, and for a task that is RUNNING the
+ *                last run is the one that started it, so this reads as "most
+ *                recently started first".
+ *   needs_attention  last run, descending. A RUNNING lane — the turn is in
+ *                flight, it is simply waiting on an answer — so it takes In
+ *                Progress's key rather than Blocked's. The two happen to be the
+ *                same today; writing it down as the running one is what keeps it
+ *                right if either ever changes.
+ *   done         last run, descending — "the recent runs will be on top".
+ *   blocked      last run, descending, same question.
+ *   archived     the server's. Nothing scans Archive by time-to-run, and it is
+ *                the one lane whose contents are not about when anything runs —
+ *                it holds cancelled and skipped messages, which have no run to
+ *                date. `last_active` (which the server has and a truncated
+ *                message window may not) is the better key there, so the honest
+ *                move is to leave the server's own order alone.
+ */
+export const LANE_SORTS: Record<BoardColumn, LaneSort> = {
+  // A draft has no run to be ordered by — no next, no last — so the order it
+  // arrives in is the only honest one, exactly as for Archive. It is also what
+  // keeps `taskWhen` from claiming a time for a row that has none: the map is
+  // where that question is asked.
+  draft: { key: "server", dir: "asc" },
+  upcoming: { key: "next-run", dir: "asc", overdueFirst: true },
+  queued: { key: "queue", dir: "asc" },
+  in_progress: { key: "last-run", dir: "desc" },
+  needs_attention: { key: "last-run", dir: "desc" },
+  done: { key: "last-run", dir: "desc" },
+  blocked: { key: "last-run", dir: "desc" },
+  archived: { key: "server", dir: "asc" },
+};
+
+/** The instant a lane orders this task by, or null when the task has none of
+ * it. Null is a real answer, not a zero: zero is 1970 and would sort at one end
+ * of the lane by accident rather than by decision. */
+export function laneTime(task: Task, lane: BoardColumn): number | null {
+  switch (LANE_SORTS[lane].key) {
+    case "next-run":
+      return nextRunAt(task);
+    case "last-run":
+      return lastRunAt(task);
+    default:
+      return null;
+  }
+}
+
+// ---- the time a task ROW prints ----------------------------------------------
+
+export type TaskWhenKind = "next" | "last" | "active" | "none" | "draft";
+
+/** What a row prints when the task has no timestamp of any kind. An em dash and
+ * not a blank: the time is the last cell of every row, so an empty one reads as a
+ * broken row rather than as an absent fact — and the column has to hold its width
+ * or the folder chips beside it stop lining up. */
+export const NO_TIME = "—";
+
+export interface TaskWhen {
+  /** The instant, epoch seconds. 0 on `none` — and on the one `draft` that has no
+   * clock of any kind either — which is why nothing may format this without
+   * checking: 0 through a formatter is 1970. */
+  at: number;
+  /** Which time it is — the row prints it, the tooltip says which. */
+  kind: TaskWhenKind;
+  /** What the row prints: ONE relative unit ("30m ago", "in 2h"), the same
+   * vocabulary a message row's time speaks — relativeWhen. */
+  text: string;
+  /** The tooltip: which run, and the absolute stamp — "Monday" is not an answer
+   * to "which Monday?" (messageStamp, same reason the message rows carry one). */
+  title: string;
+}
+
+/**
+ * The time a task ROW shows beside its folder, on every task (Akshil,
+ * 2026-08-17: "let's show the time as well for like besides the folder. Let's do
+ * that for every task") — until now a time was only visible on a message row,
+ * which meant a one-message task with nothing to expand showed none at all.
+ *
+ * WHICH time is not a new policy. It is LANE_SORTS', the map that already decides
+ * what each lane is a column of: the lane sorted by `next-run` (Upcoming) is the
+ * lane whose reader wants to know when the work happens, and every lane sorted by
+ * `last-run` wants to know when it did. Reading the answer off that map rather
+ * than off a second list of column names is what keeps the row and the lane it
+ * sits in from disagreeing — and it means Archive, whose order is deliberately the
+ * server's, falls through to "when it last ran", which is the only run it has.
+ *
+ * WHAT IT PRINTS is one relative unit and nothing else (relativeWhen): the row
+ * used to end in a clock AND a date AND a folder, which is three things to read on
+ * every line (Akshil, 2026-08-17). The absolute instant moves into `title`, where
+ * it also gains the word for WHICH run it is — the ink cannot say that in one unit
+ * and does not try.
+ *
+ * The OTHER run is the first fallback, not a blank: an Upcoming task whose pending
+ * message is outside the window still shows the run it already made, and a Done
+ * task that also has a repeat coming still has a time to show.
+ *
+ * AND `last_active` IS THE THIRD, which is the bug this now closes. Both run times
+ * are derived from the three-message WINDOW (nextRunAt reads `next_run` or that
+ * window; lastRunAt reads only the window), so a task whose window is EMPTY had
+ * neither and the row printed nothing at all — a hole in the last column of an
+ * otherwise full list (Akshil, 2026-08-18, on TASK-044, a `/clear`).
+ *
+ * An empty window is not an exotic state. A task IS a Claude session, and a session
+ * whose transcript surfaces no prompt — one that holds only a slash command like
+ * `/clear` — is a real row with a real id, a real folder and no messages under it.
+ * The server had the answer the whole time and on the very same row: `last_active`
+ * is the session's own clock (routers/tasks.py — the transcript's activity, or the
+ * newest entry's `created` when nothing has run), which is exactly "when did
+ * anything last happen here". Reading it is one field, and it is the field the
+ * server itself sorts the list by, so the row and its position now agree.
+ *
+ * The word for it is "Active", not "Last run": nothing ran, and saying it did would
+ * be a confident wrong answer of the kind the `at === 0` guard below refuses.
+ *
+ * NOTHING RETURNS NULL any more. A task with no timestamp of any kind — every
+ * source zero — gets `kind: "none"` and prints NO_TIME, because the alternative was
+ * a blank last cell that reads as a broken row. `at` stays 0 there and `title` says
+ * so in words: 0 formats as 1970, so the one thing this must never do is hand a
+ * zero to a formatter, which is why `none` is a KIND rather than a stamp.
+ */
+export function taskWhen(task: Task, now: number = Date.now()): TaskWhen {
+  // A DRAFT PRINTS WHEN IT WAS LAST TYPED IN (Akshil, 2026-09-12: "drafted 3h
+  // ago" — the word itself dropped later the same day, see below). It used to print the literal word "Draft", on the argument that a
+  // draft has none of the three times this function knows — no run ahead, no run
+  // behind, no session activity — and the honest cell was the one fact it did
+  // have. That was a true sentence in the wrong column: the chip on the same row
+  // ALREADY says "Draft", in red, with a pencil, so the time column was spending
+  // the row's last cell repeating it, and the one thing the row could not say was
+  // how stale the words are. A draft nobody has touched in a week and one typed a
+  // minute ago read identically.
+  //
+  // The clock is `draftUpdatedAt` — the same three sources, most specific first,
+  // that the drafts at the head of Upcoming sort by (`byDraftClock`), so the
+  // order of these rows and the times printed on them come off one number rather
+  // than two.
+  //
+  // AND THE COLUMN'S OWN FORMATTER, `relativeWhen`, not a second one: the cell
+  // beside it on every other row reads "5h ago", and a draft that spoke a
+  // different dialect of the same fact would be two vocabularies in one column.
+  //
+  // NOTHING IS ADDED TO IT EITHER (Akshil, 2026-09-12, second pass). The cell
+  // said "drafted 5h ago" for a day, on the argument that the word is what stops
+  // the unit being read as a run. The red `Draft` chip on the same row already
+  // says it — in a word and a pencil, four hundred pixels to the left — so the
+  // prefix was the second statement of one fact, and it was the one that made
+  // the last column of the list ragged: every other row ends in two short units
+  // and these ended in three. The unit alone is the column's vocabulary, and
+  // WHICH kind of time it is stays where the other rows keep it, in the tooltip
+  // ("Drafted <absolute>").
+  //
+  // A draft with NO clock at all (every source zero — `draftUpdatedAt` returns 0)
+  // keeps the old cell. Not a fallback so much as the same care `none` takes: 0
+  // formats as 1970, so nothing may hand this to a formatter, and `at` stays 0
+  // with the kind saying why.
+  if (isDraftTask(task)) {
+    const at = draftUpdatedAt(task);
+    if (!at) {
+      return {
+        at: 0,
+        kind: "draft",
+        text: "Draft",
+        title: "Not scheduled yet — an unfinished task",
+      };
+    }
+    return {
+      at,
+      kind: "draft",
+      // CLAMPED TO NOW for the phrasing only (review, 2026-09-12). A draft is
+      // written in the past by definition — there is no such thing as one typed
+      // in two minutes — but the stamp comes off the machine's clock and
+      // `relativeWhen` reads a future number as "in 2m", so a clock nudged
+      // backwards (an NTP correction, a laptop waking in another timezone) put
+      // "in 2m" on a row nobody can have typed into yet. Pinning the argument at
+      // `now` degrades that to "just now", which is both true and
+      // unremarkable. `at` itself
+      // is NOT clamped: it is what the row sorts on and what the tooltip prints,
+      // and rewriting the stored fact to fix a sentence would be a second
+      // vocabulary again. `now / 1000` because this function's `now` is in
+      // MILLISECONDS (it is `Date.now()`) and every stamp it handles is in
+      // seconds — `relativeWhen` does the same division on the way in.
+      text: relativeWhen(Math.min(at, now / 1000), now),
+      title: `Drafted ${messageStamp(at)}`,
+    };
+  }
+  const nextFirst = LANE_SORTS[taskColumn(task)].key === "next-run";
+  const next = nextRunAt(task);
+  const last = lastRunAt(task);
+  const runs: [TaskWhenKind, number | null][] = nextFirst
+    ? [["next", next], ["last", last]]
+    : [["last", last], ["next", next]];
+  // `|| null` on the third: `last_active` is a float that is 0.0 for "never", and
+  // 0 must fall through to `none` rather than be formatted as 1970.
+  const order: [TaskWhenKind, number | null][] = [
+    ...runs,
+    ["active", task.last_active || null],
+  ];
+  const WORD: Record<TaskWhenKind, string> = {
+    next: "Next run",
+    last: "Last run",
+    active: "Active",
+    none: "",
+    // Unreachable — the draft arm returns above, with its own sentence — but the
+    // map is exhaustive by type and an omission here would be a compile error
+    // rather than a missing word.
+    draft: "",
+  };
+  for (const [kind, at] of order) {
+    if (at === null) continue;
+    return {
+      at,
+      kind,
+      text: relativeWhen(at, now),
+      title: `${WORD[kind]} ${messageStamp(at)}`,
+    };
+  }
+  return {
+    at: 0,
+    kind: "none",
+    text: NO_TIME,
+    title: "No recorded activity yet",
+  };
+}
+
+/**
+ * One lane, in its own order. A new array; the input is never mutated (it is a
+ * slice of the polled list, which React is still holding).
+ *
+ * TWO rules make this safe to run every 20 seconds:
+ *
+ * 1. TIES KEEP THE SERVER'S ORDER, by comparing the incoming index explicitly
+ *    rather than trusting the sort to be stable. Two tasks that ran in the same
+ *    minute must not trade places between polls — a card that moves on its own
+ *    is worse than any ordering, and the lane re-renders on every poll. (The
+ *    index passed is the position within the lane, which orders the same way as
+ *    the position in the server's full list, since bucketing preserves it.)
+ *
+ * 2. A TASK WITH NO USABLE TIME GOES LAST, in both directions, and lands there
+ *    by decision rather than by whatever `null` would coerce to. It is the
+ *    honest place: the lane is sorted by a fact this card does not have, so it
+ *    cannot claim a place among the cards that do — and the top of a lane is the
+ *    slot that means something. Among themselves those cards keep the server's
+ *    order, by rule 1.
+ *
+ * And one rule that is about WHAT the lane is for rather than about the poll:
+ *
+ * 3. PAST DUE COMES FIRST, on the lane that asks for it (LaneSort.overdueFirst).
+ *    Read `now` once for the whole lane rather than per comparison, so the
+ *    comparator cannot change its mind halfway through a sort that straddles a
+ *    second — a comparator that is not consistent is a comparator with no defined
+ *    output.
+ *
+ * Rule 3 used to carry a limit, and it is gone: an overdue pending pushed out of
+ * the three-message window left the lane sorting by the later run it could see, so
+ * the most urgent card could sit mid-lane. The row now names its next run
+ * (`next_run`, server-side `min(at)` over every pending entry — see nextRunAt) and
+ * runNowTarget fires that same run, so a card promoted here is a card whose Run
+ * now sends what the order promised. Against an older server the window is the
+ * fallback and the old bound is what remains: late, never early.
+ */
+export function sortLane(
+  tasks: Task[],
+  lane: BoardColumn,
+  now: number = Date.now(),
+): Task[] {
+  if (LANE_SORTS[lane].key === "server") return tasks;
+  // THE LINE, not a time (LANE_SORTS.queued). Its own branch rather than a
+  // `laneTime` case because a position is not an instant and must not be
+  // compared as one: 0 is "not queued" here, not 1970, and the fallback when two
+  // cards share a position is the clock, which the time branch has no way to
+  // reach for. Rules 1 and 2 below still hold — ties keep the server's order by
+  // comparing the incoming index, and a card with no position at all goes last
+  // rather than winning the lane by sorting as zero.
+  if (LANE_SORTS[lane].key === "queue") {
+    const rows = tasks.map((task, index) => ({
+      task,
+      index,
+      at: queuePosition(task) || Number.MAX_SAFE_INTEGER,
+    }));
+    rows.sort((a, b) =>
+      a.at !== b.at
+        ? a.at - b.at
+        : a.task.last_active !== b.task.last_active
+          ? b.task.last_active - a.task.last_active
+          : a.index - b.index,
+    );
+    return rows.map((r) => r.task);
+  }
+  const { dir, overdueFirst } = LANE_SORTS[lane];
+  const rows = tasks.map((task, index) => {
+    const when = laneTime(task, lane);
+    return { task, index, when, late: overdueFirst === true && isPastDue(when, now) };
+  });
+  rows.sort((a, b) => {
+    // Ahead of the direction, not a special case of it.
+    if (a.late !== b.late) return a.late ? -1 : 1;
+    if (a.when === null || b.when === null) {
+      // Exactly one of them has a time: the one that does comes first.
+      if (a.when !== b.when) return a.when === null ? 1 : -1;
+    } else if (a.when !== b.when) {
+      return dir === "asc" ? a.when - b.when : b.when - a.when;
+    }
+    return a.index - b.index;
+  });
+  return rows.map((r) => r.task);
+}
+
+/**
+ * The board's lanes, each in ITS OWN order (LANE_SORTS above). Seeded from
+ * BOARD_COLUMNS so a lane cannot exist on the board and be missing from this
+ * map — an empty lane must still be an empty lane, not an undefined one.
+ *
+ * The sort lives here rather than in the Board so that a lane's contents and a
+ * lane's order are decided in the same breath, by one function, and the
+ * component holds no rule about either. And it is where the LIST's order comes
+ * from too, since 2026-09-14: `sortForList` flattens this very map, so the two
+ * views cannot disagree about which card comes first.
+ *
+ * `now` is read once here and handed to every lane, so the whole board is sorted
+ * against ONE instant: two lanes that disagreed about what "past due" means would
+ * be two answers to the same question in one render.
+ */
+export function groupByColumn(
+  tasks: Task[],
+  now: number = Date.now(),
+): Map<BoardLane, Task[]> {
+  const map = new Map<BoardLane, Task[]>(
+    BOARD_LANES.map((c) => [c.key, [] as Task[]]),
+  );
+  // By LANE, not by status: `needs_attention` is drawn in Blocked (laneOf), so
+  // the bucket a card lands in is the column the reader will look for it under.
+  for (const task of tasks) map.get(laneOf(taskColumn(task)))?.push(task);
+  for (const col of BOARD_LANES) {
+    // …then DRAFTS FIRST inside the lane (`hoistDrafts`) — and it is a BUG FIX,
+    // not a preference (Akshil, 2026-09-12: a Done card with a chat draft showed
+    // no chip while the List row showed one). It began as the List's own extra
+    // pass; the List now reads this very map, so it is simply the order.
+    //
+    // The lane is sorted by the time the card PRINTS — the last run — and a
+    // draft's own clock is not that time, so a task whose composer is holding
+    // unsent words but whose last run was yesterday sat wherever yesterday
+    // sorts: rank 64 of a 416-card Done lane, on a board that draws the first
+    // twenty (ScheduleTaskViews LANE_INITIAL_VISIBLE). The chip rendered
+    // perfectly; the card was never drawn. The List had already cured this in
+    // itself, and the cure was exactly this partition — so the Board takes the
+    // same one rather than a cap of its own or a rule about which lane is
+    // special.
+    //
+    // A STABLE partition, so both halves keep the lane's recency and no card
+    // moves for any other reason; and BEFORE the two partitions below, which is
+    // what lets them stay the outer order (waiting still outranks a draft in
+    // Blocked) while the hoist survives inside each of their halves.
+    map.set(col.key, hoistDrafts(sortLane(map.get(col.key)!, col.key, now)));
+  }
+  // WAITING FIRST, inside the one lane that holds two statuses. The lane's own
+  // order (last run, descending) says nothing about which of its cards somebody
+  // is being waited on by, and a parked run under three broken ones is the one
+  // card in the column that a person can still do something about right now.
+  // Applied AFTER the sort and by a stable partition, so recency still orders
+  // within each half and no card moves for any other reason.
+  const blocked = map.get("blocked");
+  if (blocked && blocked.length > 1) {
+    map.set("blocked", [
+      ...blocked.filter((t) => needsAttention(t)),
+      ...blocked.filter((t) => !needsAttention(t)),
+    ]);
+  }
+  // RUNNING FIRST, THEN WAITING — the other lane that holds two statuses, and the
+  // partition is the whole reason `queued` could give up its column
+  // (schedule-lib.laneOf). What is actually going is what the lane is read for;
+  // what is waiting on a busy folder goes underneath it, in THE LINE'S OWN ORDER
+  // rather than the lane's, because a place in a queue is the only order a
+  // waiting card can honestly claim (LANE_SORTS.queued, which is still keyed by
+  // BoardColumn exactly so this call can ask for it).
+  //
+  // Applied AFTER the lane's own sort and by a stable partition, so recency still
+  // orders the running half and no card moves for any other reason.
+  const progress = map.get("in_progress");
+  if (progress && progress.length > 1) {
+    const waiting = progress.filter((t) => isQueued(t));
+    if (waiting.length && waiting.length < progress.length) {
+      map.set("in_progress", [
+        ...progress.filter((t) => !isQueued(t)),
+        ...sortLane(waiting, "queued", now),
+      ]);
+    } else if (waiting.length) {
+      map.set("in_progress", sortLane(waiting, "queued", now));
+    }
+  }
+  // DRAFTS FIRST, inside the other lane that holds two statuses, and by the same
+  // stable partition for the same kind of reason: the lane's order is by next
+  // run and a draft has no run to be ordered by, so without this it would land
+  // wherever "no time" happens to sort. An unfinished task is the most upcoming
+  // thing there is (design.md, Decisions, Akshil 2026-09-11).
+  //
+  // …AND AMONG THEMSELVES BY THEIR OWN CLOCK (Akshil, 2026-09-12), which is
+  // `byDraftClock` — a draft's words are the only clock it has.
+  // The partition alone left them in whatever order `sortLane` had settled on,
+  // and for rows it scores as "no time" that is the server's order: so the List
+  // ranked two drafts newest-words-first and the Board, drawing the same two,
+  // did not. Neither view shows a draft's clock as ink on a card, but both now
+  // print it on the List row beside them (`taskWhen`: "3h ago"), and one
+  // order for one number is the whole of why this reads the same function rather
+  // than sorting here.
+  const upcoming = map.get("upcoming");
+  if (upcoming && upcoming.length > 1) {
+    map.set("upcoming", [
+      ...byDraftClock(upcoming.filter((t) => isDraftTask(t))),
+      ...upcoming.filter((t) => !isDraftTask(t)),
+    ]);
+  }
+  return map;
+}
+
+/**
+ * WHAT A LANE HEADER COUNTS — "7", or "1 running · 2 queued".
+ *
+ * Only In Progress ever says the second thing, and only when it holds both kinds.
+ * That is the price of folding `queued` into this lane (schedule-lib.laneOf): a
+ * bare total over a column holding three running tasks and four waiting ones
+ * answers a question nobody asked, and the ONE thing a person sweeping the board
+ * wants from this lane is how much of it is actually moving.
+ *
+ * Every other lane keeps the plain number it has always had, and so does an In
+ * Progress lane with nothing waiting in it — which is every board on a machine
+ * that has not turned the queue on.
+ */
+export function laneCountLabel(lane: BoardLane, tasks: readonly Task[]): string {
+  if (lane !== "in_progress") return String(tasks.length);
+  const waiting = tasks.filter((t) => isQueued(t)).length;
+  if (!waiting) return String(tasks.length);
+  return runningWaitingLabel(tasks.length - waiting, waiting);
+}
+
+/**
+ * WHERE THE DASHED "queued" DIVIDER GOES inside the In Progress lane, or -1 for
+ * "nothing to divide".
+ *
+ * The index of the first waiting card, and only when running cards precede it:
+ * a lane that is ALL waiting needs no line across the top of itself (the header
+ * already says "3 queued"), and neither does one with nothing waiting at all.
+ * Read off the same array the lane draws, so the divider cannot land anywhere but
+ * on the seam `groupByColumn` put there.
+ */
+export function laneSplitAt(lane: BoardLane, tasks: readonly Task[]): number {
+  if (lane !== "in_progress") return -1;
+  const at = tasks.findIndex((t) => isQueued(t));
+  return at > 0 ? at : -1;
+}
+
+/** The word on that divider. The reader's word, not the enum's — see
+ *  `queuedLabel` for the whole of that distinction. */
+export const LANE_SPLIT_LABEL = "queued";
+
+// ---- which lanes are rolled up -----------------------------------------------
+// A lane is either an open column or a 52px rail. Two things decide which, in
+// this order:
+//
+// AN EMPTY LANE IS ALWAYS ROLLED UP, AND NOTHING ABOUT IT IS REMEMBERED. That is
+// the whole of the empty case, and it is deliberately not a choice the reader
+// can make stick: a column with nothing in it has nothing to show, so opening
+// one is a PEEK — "is there really nothing here?" — and a peek is answered and
+// over. Left persistable, it is the one setting a reader would make once and
+// then be given four empty outlined columns by, for weeks, on a board they use
+// to see what is running.
+//
+// So the two states are stored in two different places, on purpose:
+//
+//   * `choices` — the reader's answer for a lane WITH CARDS IN IT. localStorage,
+//     survives reloads, and is what `laneCollapsed` below reads.
+//   * the peek — a lane opened while empty. Component state in TaskBoard,
+//     survives nothing: not a reload, not a remount, and not the lane filling up
+//     and draining again. `laneRolledUp` is where the two meet.
+//
+// The consequence worth stating, because it is the one a reader will notice: a
+// lane they had OPEN drains, and it rolls up. The expanded choice is not
+// honoured on the way down and it is not deleted either — it is simply not what
+// an empty lane is asked. Cards arrive, and the lane opens again on the choice
+// that was always there.
+//
+// For a lane with cards, two things decide, in this order:
+//
+//   1. What the reader last chose for THAT lane. Explicit choices are the only
+//      thing stored, so a lane nobody has ever touched keeps following the rule
+//      below forever rather than being frozen at whatever it looked like the
+//      first time the page was opened.
+//   2. Otherwise: open.
+//
+// Archive used to be hard-coded closed. It is not special any more (Akshil,
+// 2026-08-18) — an Archive with cards in it is a column like the others, and an
+// Archive with none rolls up like the others.
+
+/** The key the board's lane choices live under. Distinct from the array-shaped
+ * key an earlier build wrote: that one recorded "collapsed now", defaults
+ * included, which cannot be told apart from "the reader chose this". */
+export const LANE_CHOICE_KEY = "fused-render:scheduled-board-lanes";
+
+/** Lane → the reader's own answer to "collapsed?". Absent ⇒ never chosen. */
+export type LaneChoices = Partial<Record<BoardColumn, boolean>>;
+
+/** Same contract as parseListMemory: a stored string is untrusted input, and an
+ * unreadable one means "no choices yet", never a thrown render. */
+export function parseLaneChoices(raw: string | null): LaneChoices {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const row = parsed as Record<string, unknown>;
+  const out: LaneChoices = {};
+  for (const col of BOARD_COLUMNS) {
+    const v = row[col.key];
+    if (typeof v === "boolean") out[col.key] = v;
+  }
+  return out;
+}
+
+/**
+ * The PERSISTENT answer for one lane: what it looks like on a fresh render, with
+ * nothing but the store to go on. `count` is how many cards it holds.
+ *
+ * Empty short-circuits, and that is the whole point — a stored choice is never
+ * consulted for a lane with nothing in it, so nothing a reader does to an empty
+ * lane can outlive the sitting, and a lane that drains reverts here rather than
+ * honouring what it was set to when it still had work in it.
+ */
+export function laneCollapsed(
+  lane: BoardColumn,
+  count: number,
+  choices: LaneChoices,
+): boolean {
+  if (count === 0) return true;
+  const chosen = choices[lane];
+  if (chosen !== undefined) return chosen;
+  return false;
+}
+
+/**
+ * What the board actually draws — `laneCollapsed` plus this sitting's peeks.
+ *
+ * `peeked` is the set of lanes the reader has opened WHILE EMPTY (TaskBoard
+ * holds it in component state and persists none of it). It is consulted only in
+ * the empty case: a peek is an answer to "is there really nothing here?", and it
+ * has nothing to say about a lane that has cards. That is also what keeps a
+ * stale peek from reopening a lane that filled up and drained again — the peek
+ * is ignored for the whole time the lane has cards, and TaskBoard drops it in
+ * that window.
+ */
+export function laneRolledUp(
+  lane: BoardColumn,
+  count: number,
+  choices: LaneChoices,
+  peeked: ReadonlySet<BoardColumn>,
+): boolean {
+  if (count === 0) return !peeked.has(lane);
+  return laneCollapsed(lane, count, choices);
+}
+
+// ---- the List's order --------------------------------------------------------
+// The List and the Board read the same fact — `taskColumn`, so a row that moves
+// lane on the Board moves position here — but the List spends it as a SORT and
+// nothing else (Akshil, 2026-08-18). No headers, no dividers, no counts: one
+// flat list whose rows happen to arrive in status order.
+//
+// IT WAS HEADERS FIRST, and they were wrong on a list. The Board's lanes are a
+// fixed frame, so a lane header is the frame's label and earns its ink; a list
+// has no frame, so five headers over a few dozen rows are five interruptions in
+// the one column a person is scanning — and the ORDER already says everything
+// the headers were saying. Grouping you can see is a claim that the groups are
+// navigable; grouping you can only feel is a claim about priority, which is what
+// this actually is.
+//
+// THE ORDER IS THE BOARD'S, AND IT IS THE BOARD'S FUNCTION (Akshil, 2026-08-18,
+// the final ruling on "swap places for failed and done status in list and kanban
+// board"; design.md §5, 2026-09-14):
+//
+//   Upcoming → In Progress → Needs attention → Blocked → Done → Archive
+//
+// Not a second array that agrees with the board's by inspection — `sortForList`
+// below is `groupByColumn` read left to right, so a change to how a lane sorts
+// is a change to how the list sorts, in one edit. A reader moving between the
+// two views carries ONE mental picture of where a status sits, and the only
+// thing that keeps that picture true is there being one order, once
+// (design-principles §1).
+//
+// TWO RANKS WERE HOISTED ABOVE ALL OF IT, and they are back in their place. The
+// List led with Needs attention and Blocked from 2026-09-03 ("need attention a
+// new status, on top of everything … in list view they should be at top") on the
+// argument that a list has a top and a board does not, so the two ranks that
+// want hands should own it. Sound on its own, and it cost more than it bought:
+// the same six tasks read in two different sequences depending on which tab was
+// open. Urgency is still perfectly legible without the reordering — a waiting
+// run is red, carries the "!", and sits at the head of the Blocked lane in both
+// views — it is simply not a rank of its own here any more.
+//
+// WHAT SURVIVES OF THE LIST'S OWN VOICE is the drafts hoist, and that is because
+// the Board adopted it rather than the List keeping it: a row carrying unsent
+// words is at the head of its lane in both views (`hoistDrafts`). Drafts lead
+// the whole list as a consequence — they hoist inside Upcoming, and Upcoming is
+// first — which is the ruling that put them there to begin with ("an unfinished
+// task is the most upcoming thing there is", design.md, Akshil 2026-09-11).
+//
+// WITHIN a rank the rows run in the lane's own order, `sortLane`, and the
+// reasons live with it: soonest first where the row prints the run ahead, most
+// recent first everywhere else, past due at the top of Upcoming, a row with no
+// such time last, ties keeping the server's order. This was a sort of its own
+// keyed on `taskWhen` — the stamp at the end of the row — and the two agreed
+// almost everywhere, which is what made the corners they disagreed in
+// (Archive sorted here and untouched there; a `last_active` fallback here and
+// none there) impossible to explain from the screen. One lane, one order.
+
+/** Rank order, top to bottom — the BOARD's columns read left to right
+ * (schedule-lib.BOARD_COLUMNS), derived rather than restated so a seventh status
+ * is a seventh rank with nothing to keep in step by hand.
+ *
+ * `draft` is not in it, exactly as it is not on the board: a draft is a status a
+ * row can be in but never a column, and it draws at the head of Upcoming
+ * (`laneOf`, `hoistDrafts`). So nothing may bucket rows by `taskColumn` against
+ * this array — the lane is the bucket, which is what `sortForList` does.
+ *
+ * Kept exported because the Cards wall reads it (CARD_LANES) and because "the
+ * List's order" is a thing worth being able to name in a test. */
+export const LIST_ORDER: BoardColumn[] = BOARD_COLUMNS.map((c) => c.key);
+
+/**
+ * The list's rows: the board, flattened.
+ *
+ * ONE ORDERING FUNCTION, BOTH VIEWS (design.md §5). `groupByColumn` already
+ * holds every decision there is — which lane a row is in, where it sits inside
+ * that lane, drafts at the head of Upcoming, waiting before broken in Blocked —
+ * and a list is that map read in the lanes' own order. The List used to make its
+ * own rank pass and its own within-rank sort; both are gone, and with them the
+ * whole class of bug where two views drew the same tasks in two orders.
+ *
+ * BOARD_LANES rather than LIST_ORDER, because this walks the map that function
+ * returns and the map is keyed by LANE: `needs_attention` has no bucket of its
+ * own (it is the head of Blocked) and neither does `draft` (the head of
+ * Upcoming). LIST_ORDER is the same sequence said in statuses, for the readers
+ * that want it in those terms.
+ *
+ * `now` is read ONCE for the whole list and handed down, so every row is placed
+ * against one instant — a comparator that changes its mind halfway through a sort
+ * straddling a second is a comparator with no defined output (sortLane, rule 2).
+ *
+ * A new array; the input is never mutated (it is the polled list, which React is
+ * still holding).
+ */
+export function sortForList(tasks: Task[], now: number = Date.now()): Task[] {
+  const byLane = groupByColumn(tasks, now);
+  return BOARD_LANES.flatMap((col) => byLane.get(col.key) ?? []);
+}
+
+/** One lane, drafts first, everything in the order it arrived in. Applied by
+ *  `groupByColumn`, which every view's order now comes out of: a row carrying
+ *  unsent words is at the top of its lane wherever it is drawn, so it is inside
+ *  the twenty cards a Board lane renders rather than buried at the depth its
+ *  last run happens to sort to. */
+function hoistDrafts(lane: Task[]): Task[] {
+  const drafts: Task[] = [];
+  const rest: Task[] = [];
+  for (const task of lane) (hasDraft(task) ? drafts : rest).push(task);
+  return drafts.length ? [...drafts, ...rest] : lane;
+}
+
+/** The drafts at the head of Upcoming: newest words first, the server's order
+ *  breaking ties. */
+function byDraftClock(lane: Task[]): Task[] {
+  return lane
+    .map((task, index) => ({ task, index, at: draftUpdatedAt(task) }))
+    .sort((a, b) => b.at - a.at || a.index - b.index)
+    .map((r) => r.task);
+}
+
+// ---- the Cards view's set ----------------------------------------------------
+// The fourth view (Akshil, 2026-09-03: "a eagle eye view of all chats streaming
+// in at the same time"). It is not another arrangement of the same rows — each
+// card shows the task's live conversation rather than a title and a time.
+//
+// EVERY CONVERSATION, EVERY STATUS (Akshil, 2026-09-05, later the same day:
+// "show all status tasks in cards even archived ones"). The wall began as the
+// running set alone, grew to every lane but Archive that morning, and now draws
+// Archive too: an archived conversation is still a conversation worth a glance,
+// and the Status filter — not the view — is where a reader narrows the wall.
+//
+// A CONVERSATION, though, and not a row (Akshil, 2026-09-12: "only in cards we
+// don't show tasks that don't have sessions because we have no history or
+// transcript of claude chat to show"). Every other view draws a line of text
+// about a task and can draw one for a task that has never run; this view draws
+// the task's CHAT, and a card with no session has nothing behind its frame. So
+// the membership test is the row's own `session_id`, which is the one fact that
+// answers it, and the ORDER is the List's — `sortForList`, one call, which since
+// 2026-09-14 is the BOARD's order flattened. Which lane comes first is written
+// down in exactly one place (schedule-lib.BOARD_COLUMNS) and all three views
+// read it; Upcoming's cards are the ones this wall drops, so it opens on In
+// Progress and ends on Archive, under Done.
+//
+// (Akshil, 2026-09-08: "for list as a reference in order the cards".) This view
+// once kept a clock of its own there (`started`) and its cards read out of order
+// against the times printed on their own heads; then it read the List's rank
+// WITHOUT the List's drafts-first pass, and a card holding unsent words sat at
+// the depth its last run sorted to — off the first page entirely. See
+// cardsForTasks, below.
+//
+// So the only decisions it makes — membership, dedupe, the page — are here, out
+// of the component, because they are the ones worth testing and a grid of
+// iframes is the last place to test anything.
+
+/** The lanes a Cards view draws, in the page's rank order — LIST_ORDER minus the
+ *  two with no conversation on file. Kept as its own name so the view's
+ *  membership test reads as a decision rather than as a coincidence of the
+ *  List's table, and DERIVED so the wall still cannot fall out of step with that
+ *  order — the only thing it deliberately does not share is WHICH rows it draws.
+ *
+ *  Read as a SET (`includes`), so what matters here is membership; the sequence
+ *  the cards come out in is `sortForList`'s.
+ *
+ *  `draft` (design.md, Decisions: List and Board only) and `upcoming` (Akshil,
+ *  2026-09-10, E2E R1) are both the same absence stated per lane, and
+ *  `cardsForTasks` now states it per ROW as well — "does it have a session" —
+ *  which is the fact underneath both (Akshil, 2026-09-12: "only in cards we
+ *  don't show tasks that don't have sessions because we have no history or
+ *  transcript of claude chat to show"). */
+export const CARD_LANES: BoardColumn[] = LIST_ORDER.filter(
+  (k) => k !== "draft" && k !== "upcoming",
+);
+
+/**
+ * HOW MANY LIVE CHATS PER PAGE. Each card is an iframe running the chat template,
+ * and that template polls its run every 400ms — so the wall does not draw every
+ * task at once. It draws SIX, and a "Show more" strip under the grid adds the
+ * next six on request (Akshil, 2026-09-05: "have 6 cards loaded instead of
+ * nine, and show 6 more cards when we click on show more"). The budget is the
+ * reader's, taken a page at a time, rather than a ceiling the view imposes.
+ *
+ * Six because the grid is three across and two rows deep before the fold
+ * (task-cards.css): one page is exactly what is in view, and every page after
+ * it two more full rows — so no page ends on a ragged row that would read as a
+ * bug in the grid. (Nine was tried first: the third row sat under the fold,
+ * loading, for a wall nobody had asked to scroll yet.)
+ */
+export const CARD_PAGE = 6;
+
+/** What the Cards view draws: the live tasks within the pages shown so far, and
+ * how many are still behind the fold. `hidden` is 0 whenever nothing was left
+ * out, so the trailing "Show N more" card is drawn on a truthy number and never
+ * on a zero. */
+export interface TaskCardSet {
+  cards: Task[];
+  hidden: number;
+}
+
+/**
+ * What a Cards-view pane says when there is no frame to draw (TaskCards).
+ *
+ * `folderMissing` is a folder the server answered 404 for: nothing will ever be
+ * framed for it, and "Starting…" would be a promise the card cannot keep
+ * (Akshil, 2026-09-06: "some cards are stuck at starting").
+ *
+ * AND THE SAME PROMISE IS BROKEN FROM THE OTHER SIDE. "Starting…" is only
+ * honest while a run is IN FLIGHT — the window between "claimed and sent" and
+ * "we know which chat that is", which the card's own comment calls "a few
+ * seconds to a few minutes long". A task that has SETTLED (blocked / done /
+ * archived) with no session never recorded one and never will: `schedule.py`'s
+ * `_turn_tick` writes `claude_session_id` on the first watcher tick that
+ * reports one, so a child that dies before its first status line leaves it
+ * empty for good. That row is then unreachable from every session-keyed
+ * surface, the explorer does not list it (it lists transcripts), and the card
+ * spun on "Starting…" for a run that ended a day earlier (P4R1-1, diagnosis
+ * FIX-A). Nothing will ever be framed here — the same fact `folderMissing`
+ * carries, arrived at from the other side — so it says so instead.
+ *
+ * `failed` picks WHICH sentence: a run that broke says it broke, and the card
+ * paints it in the error colour. A settled row that simply has no chat on file
+ * (a done entry whose session was never written) is not an error and does not
+ * wear one.
+ */
+export function emptyPaneText(
+  task: EmptyPaneTask,
+  folderMissing: boolean,
+): string {
+  if (folderMissing) return "Folder no longer exists";
+  if (task.status === "upcoming") return "Not started yet";
+  if (isSettledLane(task.status)) {
+    if (task.failed) return "The run failed before it started a chat";
+    // ASK THE ROW, NOT ONLY THE LANE (L1). `tasks.py:_status` ranks
+    // `if filed: return "archived"` above `_waiting`'s `upcoming`, so filing a
+    // task whose message has not run takes it OUT of the lane the test above
+    // keys on — and the settled sentence would then assert a run happened for a
+    // message still sitting in the future. A row holding a pending message has
+    // one thing that has not run, whatever lane it was filed into.
+    if (hasPendingMessage(task)) return "Not started yet";
+    return "No chat was recorded for this run";
+  }
+  return "Starting…";
+}
+
+/** The lanes where "nothing will ever be framed here" is a FACT and not a
+ *  guess, named one by one (L2).
+ *
+ *  It was an exclusion, and it was read off `taskColumn` — two mistakes in the
+ *  same line. `statusColumn` floors every status this bundle does not know into
+ *  `"done"`, so a lane a future server adds that MEANS in-flight ("resuming",
+ *  say) was BOTH outside the two names the exclusion spared and flattened into
+ *  one that is settled — and the card told the reader no chat was ever recorded
+ *  for a run happening as they read it. Hence the RAW status: the flooring is
+ *  right for a board that must file every row into one of its lanes, and
+ *  wrong for a question whose honest answer about an unrecognised lane is "I
+ *  don't know". An unknown lane falls through to "Starting…", which is what
+ *  this card said before FIX-A and is wrong only in being optimistic.
+ *
+ *  One list, asked in both directions, so the sentence and the error colour
+ *  cannot disagree about which lanes are settled. */
+const SETTLED_LANES = new Set<string>(["blocked", "done", "archived"]);
+
+function isSettledLane(status: string): boolean {
+  return SETTLED_LANES.has(status);
+}
+
+/**
+ * Whether the task's RING paints red off `failed`.
+ *
+ * `failed` is history — the newest SETTLED run broke — and `status` is now.
+ * They part in one direction: a blocked task the user just spoke to is
+ * `in_progress` with `failed` still true (the new turn has no verdict yet).
+ * Painting that row red and captioning it "Blocked" put a "just now" row under
+ * every real Blocked row — it sat in the In progress rank, where it belongs,
+ * wearing the wrong ring (Akshil, 2026-09-11, TASK-017). So the flag repaints
+ * SETTLED lanes only: a Done ring gone red says "finished badly", which is the
+ * one thing `status` alone cannot; a live ring says what is happening. Same
+ * gate `emptyPaneFailed` applies to the card's empty pane, for the same reason.
+ */
+export function ringFailed(task: Pick<Task, "status" | "failed">): boolean {
+  return !!task.failed && isSettledLane(task.status);
+}
+
+/** What the two empty-pane readings need of a row: its status, its verdict, and
+ *  whether anything on it has yet to run. */
+type EmptyPaneTask = Pick<Task, "status" | "failed"> & Pick<Partial<Task>, "messages">;
+
+/** Does this row still hold a message that HAS NOT RUN — the question that
+ *  separates "nothing was recorded" from "nothing has happened yet".
+ *
+ *  The listing window (`PREVIEW_MESSAGES`, the three newest) is all there is to
+ *  ask, and that is enough for the case this exists for: a task whose ONLY
+ *  message is the pending entry cannot have it pushed out of a window of
+ *  three. A busier row that has genuinely recorded runs has a session, and a
+ *  row with a session never draws this pane at all. */
+function hasPendingMessage(task: EmptyPaneTask): boolean {
+  return (task.messages ?? []).some((m) => m.state === "pending");
+}
+
+/** Whether the sentence `emptyPaneText` answers with is a FAILURE — the one the
+ *  card draws in the error colour, beside "Folder no longer exists". Kept here,
+ *  next to the sentence it describes, so the class and the words cannot drift:
+ *  the view asks one question of one module rather than re-deriving the lane. */
+export function emptyPaneFailed(task: EmptyPaneTask, folderMissing: boolean): boolean {
+  if (folderMissing) return true;
+  // The same whitelist the sentence uses, over the same raw status (L2), so the
+  // colour can never outrun the words.
+  return !!task.failed && isSettledLane(task.status);
+}
+
+/**
+ * WHAT A CARD IS: the server's row key — the session id once there is one, the
+ * `pending:<entry>` key before it.
+ *
+ * It was the (project, task number) pair from 2026-09-03 to 2026-09-06, so a
+ * scheduled run's card could carry across the pending → session handover
+ * without a remount (`task_id` is moved onto the session key by that
+ * transition — tasks_store.ensure_ids' `rekeys` pass). That rested on ONE NUMBER
+ * NAMING ONE TASK, and a live list showed it does not: four (project, number)
+ * pairs each held two different sessions — an archived "Current worktrees" and
+ * a done "Investigate Python 3.12" both as TASK-007, say — because the rekey is
+ * refused when the session key already holds a number and the pending row's
+ * number is respent. Keyed on the pair, the wall drew ONE of each twin (the
+ * dedupe below kept the first) and the popup, resolving the clicked card by the
+ * same pair, could land on the OTHER — a card saying one task and a modal
+ * opening another (Akshil, 2026-09-06). Showing Archive on the wall is what
+ * surfaced it: that is where the twins live.
+ *
+ * WHAT THE PAIR BOUGHT IS NOT WORTH THAT. The handover it smoothed happens only
+ * while the task has no session — while its card is a "Starting…" placeholder
+ * with nothing to frame — so what is torn down and rebuilt at the handover is a
+ * placeholder, in the same grid slot, and no streaming conversation is ever
+ * touched: a card that has a frame has a session key, and a session key never
+ * changes. The row key, on the other hand, is unique by construction (it IS the
+ * server's row identity), so two sessions are two cards and a click resolves to
+ * the card it landed on and nothing else.
+ *
+ * Still a function of its own rather than `task.key` at the call sites, because
+ * the identity is a decision this view makes and one that has already changed
+ * once; the seams that read it (the React key, the dedupe, the popup's lookup)
+ * should keep reading one name.
+ */
+export function cardKey(task: Pick<Task, "key" | "task_id" | "project">): string {
+  return task.key;
+}
+
+/**
+ * The Cards view's rows: the List's order, one card per row, capped.
+ *
+ * THE LIST'S ORDER, WHOLE (Akshil, 2026-09-08: "for list as a reference in
+ * order the cards"). Not the List's rank with a clock of this view's own — that
+ * is what was here, and it is the bug this fixes. The cards ranked by lane like
+ * the List and then ran by `started` (when the task was created) inside a lane,
+ * while every card's head printed `taskWhen` — the last run, the same stamp a
+ * List row prints. So the wall was ORDERED by one clock and LABELLED with another:
+ * a Done card reading "2h ago" sat above one reading "10m ago", the exact
+ * symptom the List had already cured in itself, and a recurring task
+ * created weeks ago that had just run sat at the top of Done in the List and at
+ * the bottom of Done here. Switching views reshuffled the lane, which is the one
+ * thing the shared LIST_ORDER was there to prevent.
+ *
+ * So the order is `sortForList`, the very function the List calls — and since
+ * 2026-09-14 that is the BOARD's order flattened, so the wall, the list and the
+ * board are one sequence: rank by lane, the rows carrying unsent words first
+ * inside their lane, and inside each half the lane's own clock — last run, most
+ * recent first; Archive as the server lists it; a row with no such time last.
+ * Same rows, same order, in every view, and a card's place on the wall is the
+ * place a reader can check against the stamp on its own head.
+ *
+ * THE DRAFTS-FIRST PASS IS PART OF IT (Akshil, 2026-09-12), not a detail of the
+ * List: the wall shows six cards and a Done lane can be four hundred long, so a
+ * task whose composer is holding a half-written reply was on page eleven if its
+ * last run was a day old — which is to say, gone. The row the reader is most
+ * likely to be looking for is the one they were in the middle of writing.
+ *
+ * WHY `started` WAS HERE, AND WHY THE LIST'S KEY IS SAFE TOO. The wall first ran
+ * by `last_active`, which climbs on every write and reaches this page within a
+ * second (the /api/tasks/changes fast lane), so cards traded places for as long
+ * as anything was talking (Akshil, 2026-09-03: "when i create a new task the
+ * layout shifts multiple times"). `started` never moves, and that was the fix
+ * (PR #984) — but it over-corrected: it froze the wall against a clock nobody
+ * could see. The List's key is `lastRunAt`, a message's `ran_at`, which is
+ * written ONCE when the turn begins and does not tick while the run streams — so
+ * a card still holds still while its conversation talks, and moves only when a
+ * run starts, a run ends, or a lane changes: real events with something to say.
+ * The test that pins this ("does not re-sort when a run merely writes") is kept
+ * and still holds.
+ *
+ * TIES KEEP THE SERVER'S ORDER (sortLane compares the incoming index), which
+ * matters more here than on a row: every card is a live iframe keyed by task,
+ * and two cards trading places between polls is two conversations swapping
+ * seats in front of somebody reading one of them.
+ *
+ * `now` is read ONCE for the whole wall and handed down, for sortLane's own
+ * reason: a comparator that changes its mind halfway through a sort straddling a
+ * second is a comparator with no defined output.
+ *
+ * ONE CARD PER IDENTITY. Deduplicated on `cardKey`, which is what the view keys
+ * its iframes on — two rows resolving to one card would be a React duplicate key
+ * and two iframes fighting over one slot. With the identity the row key (see
+ * cardKey) the server cannot emit such a pair, so this is a guard rather than a
+ * fix, and it keeps the FIRST of the two, which is the one the sort already
+ * placed.
+ *
+ * A new array; the input is never mutated (it is the polled list, which React is
+ * still holding).
+ */
+export function cardsForTasks(
+  tasks: Task[],
+  cap: number = CARD_PAGE,
+  now: number = Date.now(),
+): TaskCardSet {
+  const seen = new Set<string>();
+  const all: Task[] = [];
+  for (const task of sortForList(tasks, now)) {
+    // A CARD IS A TRANSCRIPT, so a row with no session is not a card (Akshil,
+    // 2026-09-12: "only in cards we don't show tasks that don't have sessions
+    // because we have no history or transcript of claude chat to show"). ONE
+    // question, asked of the row itself, and it answers every membership rule
+    // this view used to keep as a list of statuses: a draft has no session, a
+    // pending run that has never started has no session, and a settled row
+    // whose child died before its first status line has none either — that last
+    // one is the card that sat on "Starting…" for a run that ended a day
+    // earlier (cardBlank, FIX-A), and it is now simply not drawn.
+    if (!task.session_id) continue;
+    // …and the lane rule on top of it, because "has a session" is not the whole
+    // of it: an upcoming row CAN carry one (a template that has run before),
+    // and a run that has not happened yet is still not what this wall is for —
+    // the Calendar and the List are where a future run is read. CARD_LANES is
+    // that rule, and asking it by name is what keeps the constant and the
+    // behaviour one decision rather than two.
+    if (!CARD_LANES.includes(taskColumn(task))) continue;
+    const id = cardKey(task);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    all.push(task);
+  }
+  // A cap of 0 or less is "no cap" rather than an empty page: the view passes
+  // pages × CARD_PAGE and a test can shrink it, and the failure mode of a bad
+  // number reaching it should not be a view that shows nothing.
+  if (cap <= 0 || all.length <= cap) return { cards: all, hidden: 0 };
+  return { cards: all.slice(0, cap), hidden: all.length - cap };
+}
+
+// ---- "and it runs again on Tuesday" ------------------------------------------
+// A recurring task whose last run finished sits in DONE now, not Upcoming: the
+// output nobody has read is the thing that needs eyes, and a promise is not a
+// verdict (server routers/tasks.py `_message_verdict`). That is the right lane
+// and it drops one true fact off the row — that the task is not over.
+//
+// So the row says it. A CHIP, not a second time column: `taskWhen` already owns
+// the row's one time and, on a settled task, that time is the last run. This is
+// the other one, marked as such, in the same vocabulary (relativeWhen) with the
+// absolute instant in the tooltip like every other time on the page.
+
+export interface NextRunChip {
+  /** Epoch seconds, so a caller can order or test by it. */
+  at: number;
+  /** What the chip prints: "in 2h". The word "next" went (Akshil, 2026-09-11):
+   *  the chip sits apart from the row's own stamp, and that is what says it. */
+  text: string;
+  /** The tooltip: which run, and exactly when. */
+  title: string;
+  /** Whether that run is an OCCURRENCE of a repeating template — the row draws
+   *  a repeat glyph after the time (Akshil, 2026-09-11: "for repeating tasks we
+   *  say 'in 1h [repeat icon, arrow circle]'"). The server's `next_run_repeats`
+   *  where it sends one; the window's pending occurrence (`template_id`) where
+   *  it does not. */
+  repeats: boolean;
+}
+
+/**
+ * Whether the run `nextRunAt` names repeats. The server decides it over every
+ * pending entry (tasks.py `_next_run`), which is the only place the answer is
+ * always in hand; the window is the fallback for an older server, and it can
+ * only say yes for an occurrence it happens to hold.
+ */
+export function nextRunRepeats(task: Task): boolean {
+  if (typeof task.next_run_repeats === "boolean") return task.next_run_repeats;
+  const at = nextRunAt(task);
+  if (at === null) return false;
+  return (task.messages ?? []).some(
+    (m) => m.state === "pending" && m.at === at && !!m.template_id,
+  );
+}
+
+/**
+ * The next run worth mentioning ON TOP of the row's own time, or null.
+ *
+ * Two conditions, and both are about not saying the same thing twice:
+ *
+ *   * the row's time is NOT already the next run (`taskWhen`, which reads
+ *     LANE_SORTS: Upcoming's rows are ordered and stamped by the run ahead, so
+ *     a chip there would repeat the number beside it);
+ *   * there IS a run ahead — `nextRunAt`, strictly in the future. A pending
+ *     message whose time has passed is not news about what happens next, it is
+ *     the overdue work the Upcoming lane already surfaces.
+ */
+export function nextRunChip(task: Task, now: number = Date.now()): NextRunChip | null {
+  if (taskWhen(task, now).kind === "next") return null;
+  const at = nextRunAt(task);
+  if (at === null || at * 1000 <= now) return null;
+  const repeats = nextRunRepeats(task);
+  // ON A BLOCKED ROW THE CHIP SAYS THE WORD (Akshil, 2026-09-11: "it should
+  // remain blocked because we don't know why it is blocked, but we should show
+  // that there is a scheduled message here"). The task stays in Blocked — a
+  // pending message has no verdict, so the failure still speaks — and the chip
+  // is where the row says a retry is booked. Elsewhere the time alone is
+  // enough; the lane already says the task is not over.
+  const blocked = taskColumn(task) === "blocked";
+  const when = relativeWhen(at, now);
+  return {
+    at,
+    text: blocked ? `scheduled ${when}` : when,
+    title: blocked
+      ? `Stays Blocked until this runs · ${messageStamp(at)}${repeats ? " · repeats" : ""}`
+      : `Next run ${messageStamp(at)}${repeats ? " · repeats" : ""}`,
+    repeats,
+  };
+}
+
+// ---- "and this one is on a schedule" ----------------------------------------
+// The chip above says WHEN the next run is, and only on the rows whose own time
+// is not already that run. What no row said at all is the plainer fact one step
+// up from it: this task has a run booked. That is what a reader scanning a
+// hundred rows for "which of these fire by themselves" is asking, and reading it
+// off a time in the last column means reading every last column.
+//
+// So the List wears a glyph for it (Akshil, 2026-09-10: "for scheduled tasks in
+// the list view, let's show a icon that shows it's scheduled"), beside the file
+// mark, in the slot that already answers "what kind of task is this".
+//
+// A FUTURE RUN is the test, not "has a schedule entry": a task whose every
+// occurrence has fired is not scheduled any more, and a pending run whose time
+// has gone by is overdue work the Upcoming lane surfaces — neither is news about
+// what this task does next. Same rule as nextRunChip, deliberately: two marks on
+// one row must not disagree about whether a run is coming.
+//
+// NOT a second clock on the message rows inside the thread. That pair
+// (ICON_CLOCK/ICON_CHAT, ScheduleTaskViews) was pulled on 2026-08-18 for being a
+// third glyph on a 12.5px line whose first two already carried the state and the
+// id. This is one glyph on the TASK row, where nothing else states it.
+
+export interface ScheduledMark {
+  /** Epoch seconds of the run that makes this task scheduled. */
+  at: number;
+  /** The tooltip: the fact, and exactly when. */
+  title: string;
+  /** The same fact as prose, for anything that cannot see the glyph — no
+   *  middle dot, which a screen reader either names or drops. The file mark
+   *  splits its two strings the same way (path in the hint, sentence in the
+   *  label). */
+  label: string;
+  /** Whether that run is a template's occurrence — circle arrows rather than a
+   *  clock (Akshil, 2026-09-11: "if it is repeating we show repeat icon, if
+   *  scheduled once we show clock icon, we don't show both"). */
+  repeats: boolean;
+}
+
+/**
+ * Whether this task has a run ahead of it, and the instant it is.
+ *
+ * `nextRunAt` is the source — the row's own `next_run` where the server named
+ * one, the window's earliest pending where it did not — so the mark, the chip
+ * and the Upcoming lane's order are all reading the same field.
+ */
+export function scheduledMark(task: Task, now: number = Date.now()): ScheduledMark | null {
+  const at = nextRunAt(task);
+  if (at === null || at * 1000 <= now) return null;
+  const stamp = messageStamp(at);
+  const repeats = nextRunRepeats(task);
+  const word = repeats ? "Repeats" : "Scheduled";
+  // ON A BLOCKED ROW THE TOOLTIP SAYS THE LANE'S RULE (Akshil, 2026-09-11: "it
+  // should remain blocked because we don't know why it is blocked, but we
+  // should show that there is a scheduled message here"). The task stays in
+  // Blocked — a pending message has no verdict, so the failure still speaks —
+  // and this mark is where the row says a retry is booked.
+  if (taskColumn(task) === "blocked") {
+    return {
+      at,
+      title: `${word} · stays Blocked until this runs · ${stamp}`,
+      label: `${word}, stays Blocked until this runs, ${stamp}`,
+      repeats,
+    };
+  }
+  return {
+    at,
+    title: `${word} · next run ${stamp}`,
+    label: `${word}, next run ${stamp}`,
+    repeats,
+  };
+}
+
+// ---- "and that one was stopped" ----------------------------------------------
+// A run the user STOPPED settles in Done, which is the right lane — the stop was
+// asked for, so it is an outcome and not a fault, and a red mark would ask the
+// reader to deal with their own decision. What that lane cannot say is that the
+// work did not finish, and the ring cannot either: it is the same green ring a
+// completed run wears (Akshil, 2026-08-21 — "in done lane there is no tag").
+//
+// So the row and the card say the word. A TAG and not a status of its own: the
+// lane is still Done, the sort is unchanged, and nothing else about the task
+// moves — this is one fact added to a line that was missing it, in the same
+// quiet register as `nextRunChip` beside it.
+//
+// Deliberately NOT a new ring colour or a fourth glyph. Three arrangements of an
+// unread mark have already been through the card's title slot and the head, and
+// the conclusion each time was that a card is three short lines with no room for
+// another symbol to decode. A word costs nothing to read and is the one thing a
+// screen reader gets for free.
+
+export interface OutcomeTag {
+  /** What the tag prints. */
+  text: string;
+  /** The tooltip: the same fact, said in full. */
+  title: string;
+}
+
+// ---- what is happening RIGHT NOW ---------------------------------------------
+// The List has the In Progress section and the Board has the In Progress lane;
+// the calendar has neither, because a calendar is ordered by time and not by
+// state. Its chips sat in the grid saying nothing about which of them was
+// running at that moment — the one fact a person glancing at today most wants.
+//
+// So the chip gets the fact, and the RULE lives here rather than in the view:
+// it is the same reading of `state` and `turn` the server's `_message_running`
+// makes, and the same one messageTone collapses into `in_progress`. Three views
+// asking three questions about "is this going?" is how they start disagreeing.
+
+/** Is this message's own run in flight? `sending` is a send the scheduler has
+ * spawned and not heard back from; `sent` with a turn that has not reported an
+ * end is a turn still working (turnPhase — `unknown` is NOT running, it is a
+ * watcher that stopped being able to tell). */
+export function isMessageRunning(m: TaskMessage): boolean {
+  if (m.state === "sending") return true;
+  return m.state === "sent" && turnPhase(m.turn) === "running";
+}
+
+/**
+ * Has this message's run STARTED — is there a turn behind it at all?
+ *
+ * The three states that mean the scheduler has spent it: `sending` (spawned, no
+ * answer yet), `sent` (gone) and `error` (tried and broke). Everything else has
+ * never run and may never run — `pending` is a promise about the future,
+ * `missed`/`cancelled`/`skipped` are promises that expired. A PROJECTED
+ * occurrence (schedule-lib's ghosts: cron arithmetic, not rows) is only ever
+ * minted `pending` or `missed`, so it cannot pass this either.
+ */
+export function hasStarted(m: TaskMessage): boolean {
+  return m.state === "sending" || m.state === "sent" || m.state === "error";
+}
+
+/**
+ * The message a task's CURRENT work belongs to: the newest one that has actually
+ * started, or null on a task that has never run.
+ */
+export function activeMessage(task: Task): TaskMessage | null {
+  let best: TaskMessage | null = null;
+  for (const m of task.messages ?? []) {
+    if (!hasStarted(m)) continue;
+    // Read off `at` rather than off the array order: the answer wanted here is
+    // "the latest run", and `messages` being newest-first is a convention of the
+    // endpoint rather than something this rule should depend on.
+    if (!best || m.at > best.at) best = m;
+  }
+  return best;
+}
+
+/**
+ * Is THIS message the work this task is doing right now?
+ *
+ * Two ways, and the second is what a live chat turn needs — including the one
+ * a live TRANSCRIPT cannot see. A message can say so itself (above), and
+ * otherwise the ACTIVE message borrows the task's own verdict: `taskColumn`
+ * reads `task.status`, which the server derives in `_status` from THREE
+ * independent signals (`_message_running`, `live`, and `schedule.busy_sessions`)
+ * — not just the two (`state`/`turn`, `task.live`) this function could see on
+ * its own. A `sent` message whose turn the server has already rewritten to
+ * `idle` still files the task `in_progress` while a scheduled send is in
+ * flight (`busy_sessions`); asking `taskColumn` instead of re-deriving that
+ * third signal here is what keeps the calendar chip agreeing with the List
+ * and Board, which read the same `task.status`.
+ *
+ * THE ACTIVE MESSAGE IS NOT THE NEWEST ROW (bugbot, 2026-08-18). `at` is when a
+ * message is DUE, so on a recurring task the newest row is routinely tomorrow's
+ * `pending` occurrence — never run, and impossible as "what this task is doing
+ * now". It is the newest STARTED message (activeMessage). Older started messages
+ * are not running either: their turns ended when the next prompt arrived.
+ */
+export function isRunningNow(task: Task, m: TaskMessage): boolean {
+  if (isMessageRunning(m)) return true;
+  if (!inFlight(taskColumn(task))) return false;
+  // A message with no run behind it cannot be borrowing the task's verdict,
+  // whatever else is true — the belt to activeMessage's braces, and what makes
+  // the rule safe to ask of a projected occurrence.
+  if (!hasStarted(m)) return false;
+  const active = activeMessage(task);
+  return !!active && !!m.message_id && m.message_id === active.message_id;
+}
+
+/**
+ * Is any of these messages the work happening right now?
+ *
+ * What a CALENDAR CHIP has to ask, because a chip is not a message: it is one
+ * task on one DAY, anchored at that day's EARLIEST message with the rest of the
+ * day nested inside it (schedule-lib.taskChips). Asking only about the anchor
+ * asks about the wrong occurrence in both directions — a day whose 05:00 run has
+ * finished and whose 14:00 run is in flight is anchored on the finished one, and
+ * before this rule a task whose newest row was tomorrow's promise put the
+ * shimmer on TOMORROW's chip. A chip is running when anything under it is.
+ */
+export function isRunningIn(task: Task, messages: TaskMessage[]): boolean {
+  return messages.some((m) => isRunningNow(task, m));
+}
+
+/**
+ * ONE DAY OF A REPEATING TASK, as one of the app's five words (Akshil,
+ * 2026-08-20, raised twice).
+ *
+ * A repeating task has NO SINGLE TRUTHFUL STATUS, and that is the whole reason
+ * this function exists rather than some reading of the task. An hourly rule is
+ * simultaneously finished (09:00), working (10:00) and promised (11:00 through
+ * 23:00), so any one word about the RULE is wrong about most of it — which is
+ * how the popover came to say "Upcoming" over a day whose runs had all already
+ * happened. The clicked chip is not the rule: it is the rule ON ONE DAY, and a
+ * day IS a thing a single word can be true of. So the pill answers for the day.
+ *
+ * THE RULE, and it is deliberately three cases about TIME before it is anything
+ * about messages, because the day's position relative to now is what decides
+ * which question is even askable:
+ *
+ *   - A DAY STILL AHEAD -> Upcoming. Nothing on it has happened by definition;
+ *     whatever rows it holds are cron arithmetic or promises, and both are the
+ *     same word.
+ *   - TODAY, with runs still owed -> Upcoming (or In Progress if one is
+ *     actually going). This is the case the old newest-run reading got wrong in
+ *     the other direction too: the newest row on today is the 23:00 slot, so a
+ *     day that had already run nine times read as a pure promise. "Owed" is
+ *     asked of the slot's TIME, not of its row's kind, so a materialized
+ *     pending and a ghost count the same — they are both the day saying it is
+ *     not finished.
+ *   - A DAY THAT IS OVER, or today after its last slot -> the day's OUTCOME,
+ *     rolled up: any failure makes the day Failed (one broken run is the thing
+ *     you need to see, and burying it under nine green ones is how a rule
+ *     silently rots), otherwise anything that ran makes it Done.
+ *
+ * IN PROGRESS OUTRANKS ALL OF IT. `live` is the caller's isRunningIn reading of
+ * this same day — the exact list the grid chip shimmers by — and a run in
+ * flight is a fact about right now that no rollup should be allowed to
+ * overwrite. A row whose own tone is `in_progress` (a `sending` message the
+ * task-level reading has not caught up with) counts the same way.
+ *
+ * THE FALLBACK IS "ARCHIVE", NOT "UPCOMING", and it is the case worth being
+ * explicit about: a past day can hold nothing but slots that went by unrun —
+ * past ghosts (`missed` + template_id) that the rule skipped while the app was
+ * closed, or pendings nobody ever marked. Those are not outcomes, so the two
+ * rollup arms above pass over them; calling the day Upcoming afterwards is the
+ * original bug wearing a different hat. `archived` is already this app's word
+ * for a recurring slot that was due and did not run — it is what
+ * `messageTone` files those rows under and what greys their rings in the
+ * thread right below the pill — so the day inherits it rather than inventing a
+ * sixth state.
+ *
+ * Pure, and every input is an argument (`now` included) so the six cases above
+ * are six unit tests rather than six clock settings.
+ */
+export function dayPill(
+  occurrences: TaskMessage[],
+  day: Date,
+  now: Date,
+  live: boolean,
+): RunStatus {
+  if (live) return taskStatus("in_progress", false);
+
+  const start = startOfDay(day).getTime();
+  const end = startOfDay(addDays(day, 1)).getTime();
+  const at = now.getTime();
+  if (at < start) return taskStatus("upcoming", false);
+
+  const tones = occurrences.map((m) => messageTone(m));
+  if (tones.some((t) => t.column === "in_progress")) {
+    return taskStatus("in_progress", false);
+  }
+
+  // Does the day still owe a run? Only askable while the day is running; after
+  // midnight every slot is behind us and an unrun one is a fact, not a promise.
+  const nowSec = Math.floor(at / 1000);
+  const owed =
+    at < end &&
+    occurrences.some((m, i) => m.at > nowSec && tones[i].column === "upcoming");
+  if (owed) return taskStatus("upcoming", false);
+
+  if (tones.some((t) => t.failed)) return taskStatus("done", true);
+  if (tones.some((t) => t.column === "done")) return taskStatus("done", false);
+  if (tones.some((t) => t.column === "archived")) return taskStatus("archived", false);
+  // Nothing written down and nothing owed: an empty day, which in practice only
+  // happens before the rule's first slot. Upcoming is the honest word for it.
+  return taskStatus("upcoming", false);
+}
+
+/**
+ * The calendar popover header's PILL, in the app's five words (Akshil,
+ * 2026-08-19; day-scoped since 2026-08-20).
+ *
+ * Two different nouns, depending on what kind of task was clicked:
+ *
+ * A ONE-OFF is its task — one run, so "the task's status" and "this
+ * occurrence's status" are the same fact, and the pill keeps saying exactly
+ * what the List's row and the Board's card say: `taskStatus(taskColumn, failed)`.
+ * Untouched by the day rule below, and it should be: a one-off has exactly one
+ * day, so rolling it up could only ever restate the task.
+ *
+ * A REPEATING task is a rule, and a rule's task-level column is nearly always
+ * `upcoming` — the next run is always scheduled — which made the pill useless
+ * on the one grid that is ABOUT individual days: click last Tuesday's failed
+ * run and the pill said "Upcoming". So a recurring task's pill is `dayPill`
+ * over THE CLICKED CHIP'S OWN DAY, whose reasoning lives on that function.
+ *
+ * WHY THIS GREW A `day` AND A `now`. The first cut of this (PR #645) answered
+ * from the NEWEST real row on the day, which is right for a day that is over
+ * and wrong for every day that is not: the newest row on today is tonight's
+ * 23:00 promise, so a rule that had already run nine times today wore
+ * "Upcoming", and a past day whose rows were never marked wore it too. "Newest"
+ * was standing in for a verdict; the verdict needed to know where the day sits
+ * relative to now, so now it is told.
+ *
+ * Always SOLID: whatever the word, the pill never inherits the projected
+ * chip's dashes — a status is a word, not a drawing of a day. `projected` is
+ * therefore not an argument any more either: it was the last thing reaching in
+ * from the chip's DRAWING, and dayPill decides future-ness from the calendar
+ * rather than from whether anything was written down.
+ */
+export function popoverPill(
+  task: Task,
+  recurring: boolean,
+  live: boolean,
+  dayMessages: TaskMessage[],
+  day: Date,
+  now: Date,
+): RunStatus {
+  // ringFailed, not the raw flag: the calendar has no lane header either, so a
+  // live one-off whose LAST settled run broke would otherwise still read
+  // "Blocked" here after the List ring stopped saying so (Bugbot, PR #1105).
+  if (!recurring) return taskStatus(taskColumn(task), ringFailed(task));
+  return dayPill(dayMessages, day, now, live);
+}
+
+// ---- the sidebar's two-number summary of this page ----------------------------
+// The Tasks entry in the global sidebar has to say two things without being the
+// page: something is RUNNING, and something FINISHED that nobody has looked at.
+// Both are read off the very rows the page draws (`taskColumn` — the server's
+// status, narrowed, so the sidebar cannot invent a sixth state), never off a
+// second endpoint of their own.
+//
+// WHY "done and unread" IS NOT JUST "unread". Unread exists on rows that are
+// still going and on rows nobody ever expected to read; the signal being asked
+// for here is the completion of work the reader was waiting on, which is exactly
+// `done` + `unread > 0`. `failed` is deliberately NOT counted: it is a status of
+// its own on this page (see taskColumn), and a green "go and look" mark over a
+// run that broke would be the one place in the app where a hue disagreed with
+// the ring the row wears (design-principles §1).
+
+/** Where the sidebar's dismissal lives. Per COMPLETION, not per task — see
+ *  TasksSeen. */
+export const TASKS_SEEN_KEY = "fused-render:tasks-seen";
+
+/**
+ * Which completions the reader has already been shown, as `task key ->
+ * last_active`.
+ *
+ * The value is what makes "the same completions" a checkable claim. A bare set
+ * of keys would dismiss a task FOREVER — the second time it ran and finished,
+ * the mark it earned would be swallowed by the first visit's dismissal. The
+ * task's `last_active` moves with every new message, so a stored stamp that no
+ * longer matches means "this is a different completion" and the mark comes back.
+ *
+ * A stamp rather than a global watermark for the same reason from the other
+ * side: catch-up runs can finish out of order (Scheduled.tsx's docstring — work
+ * that came due while the app was closed runs when it opens), and one
+ * high-water mark would silently swallow every completion stamped before it.
+ */
+export type TasksSeen = Record<string, number>;
+
+/** What came out of localStorage is a string written by SOMEONE ELSE (an older
+ *  build, a hand-edited devtools row): anything unreadable degrades to "nothing
+ *  dismissed" — one extra dot — rather than throwing inside a render. */
+export function parseTasksSeen(raw: string | null): TasksSeen {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const out: TasksSeen = {};
+  for (const [key, at] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof at === "number" && Number.isFinite(at)) out[key] = at;
+  }
+  return out;
+}
+
+/**
+ * Has this task finished work nobody has READ?
+ *
+ * The state, with no dismissal in it. This is what the expanded sidebar's count
+ * prints, and it falls only when the work is actually read — visiting the page
+ * does not make a number about unread work untrue.
+ */
+export function isDoneUnread(task: TaskPulseTask): boolean {
+  return taskColumn(task) === "done" && task.unread > 0;
+}
+
+/**
+ * The same completion, NOT YET SHOWN to the reader: the state above, minus what
+ * a visit to the page has already stamped (TasksSeen).
+ *
+ * The two exist apart because a count and a dot are different kinds of
+ * statement. A COUNT is a standing fact — "three finished things are waiting" —
+ * and it is still true after you have glanced at the list; it goes away by being
+ * dealt with. A DOT is an interruption, and an interruption that survives the
+ * reader going where it points is just a decoration. So the collapsed rail's dot
+ * clears on the visit and the expanded row's chip does not, and neither is a bug
+ * in the other (Akshil, 2026-08-18).
+ */
+export function isUnseenCompletion(task: TaskPulseTask, seen: TasksSeen): boolean {
+  return isDoneUnread(task) && seen[task.key] !== task.last_active;
+}
+
+export interface TasksPulse {
+  /** Tasks whose work is in flight — the yellow half, in both modes. Waiting
+   *  tasks are IN this count: their run is in flight, and a sidebar that said
+   *  "2 running" while three turns were live would be wrong about the one fact
+   *  the rail exists to carry. `attention` below is a finer reading of the same
+   *  rows, never a separate population. */
+  running: number;
+  /** Of those, the ones that cannot go any further without the reader — a
+   *  permission or question card nobody has answered. Its own number because it
+   *  is its own hue and its own sentence ("1 waiting for you"): "running" is a
+   *  thing to leave alone, and this is a thing to go and do. */
+  attention: number;
+  /** Tasks WAITING on their folder (the project queue). Counted APART from
+   *  `running` and never inside it: a queued task has no turn in flight, no
+   *  process and nothing to watch — the rail's yellow would be a lie about it —
+   *  and the honest sentence is "2 running · 1 queued". Always 0 while the flag
+   *  is off, because the status is never sent. */
+  queued: number;
+  /** Tasks that finished with something unread, dismissal or no dismissal —
+   *  the expanded row's count chip. */
+  doneUnread: number;
+  /** Of those, the ones the reader has not been shown yet — the collapsed
+   *  rail's green dot, which a visit to /tasks clears. */
+  unseen: number;
+}
+
+export const EMPTY_TASKS_PULSE: TasksPulse = {
+  running: 0,
+  attention: 0,
+  queued: 0,
+  doneUnread: 0,
+  unseen: 0,
+};
+
+/** The whole sidebar signal, from the rows the page already has. */
+export function tasksPulse(tasks: TaskPulseTask[], seen: TasksSeen): TasksPulse {
+  let running = 0;
+  let attention = 0;
+  let queued = 0;
+  let doneUnread = 0;
+  let unseen = 0;
+  for (const t of tasks) {
+    const column = taskColumn(t);
+    // BOTH RUNNING WORDS COUNT AS RUNNING, and one of them counts twice. A task
+    // parked on a card has a live turn — it is running, and the rail's yellow is
+    // still true of it — but it is the only kind of running that will not finish
+    // on its own, so it is also counted apart. Two facts about one row, never
+    // two rows.
+    if (inFlight(column)) {
+      running++;
+      if (column === "needs_attention") attention++;
+      continue;
+    }
+    // NOT RUNNING, and the `continue` says so: a queued task is work the reader
+    // asked for that has not started, so it belongs beside the running count
+    // rather than inside it (inFlight, which decides the dot, has never
+    // included it and must not).
+    if (column === "queued") {
+      queued++;
+      continue;
+    }
+    if (!isDoneUnread(t)) continue;
+    doneUnread++;
+    if (isUnseenCompletion(t, seen)) unseen++;
+  }
+  return { running, attention, queued, doneUnread, unseen };
+}
+
+export function samePulse(a: TasksPulse, b: TasksPulse): boolean {
+  return a.running === b.running && a.attention === b.attention
+    && a.queued === b.queued
+    && a.doneUnread === b.doneUnread && a.unseen === b.unseen;
+}
+
+// ---- the notification a waiting run earns ------------------------------------
+// Akshil, 2026-09-03: "in bottom right we have notifications. When the task was
+// blocked I did not see any notifications in there … there should be
+// notifications with blocked tasks as well."
+//
+// A run that has stopped to ask something is the ONE task state that goes
+// nowhere until a person acts, and until now the only surfaces that said so were
+// the Tasks page and the sidebar's own count — neither of which is where this
+// app puts "something is waiting on you". The Notifications section is, so it
+// gets a row, shaped like every other row in it (`.dl-row`, RepoUpdatesDock).
+//
+// A PURE FUNCTION over the pulse rows, not a component's filter: what the row
+// says and where it goes are the only two decisions here, and both are worth a
+// test that does not need a DOM — the same split repo-updates-lib.ts makes for
+// its own rows.
+
+/** One waiting task, as the Notifications section draws it. */
+export interface AttentionRow {
+  /** React key, and the task's identity in the poll: its session/pending key. */
+  key: string;
+  /** The printed id — "TASK-097". */
+  taskId: string;
+  /** The task's own title, for the row's second line. */
+  title: string;
+  /** Where clicking the row lands — always a real destination (see below). */
+  href: string;
+  /** Who raised this row — the row-level counterpart to `Job.origin`/a
+   *  message's `origin` (notifications.ts), reusing that same
+   *  `labelForSource` helper rather than a third labeller: a waiting task's
+   *  own `source` for this purpose is its target/project folder. "" (no
+   *  project/target at all) draws no caption. */
+  origin: string;
+}
+
+/**
+ * The Notifications rows for every task waiting on an answer, in the order the
+ * poll listed them.
+ *
+ * THE SERVER'S ORDER IS KEPT, deliberately un-re-sorted. `/api/tasks` sorts the
+ * whole listing by `last_active` descending, and a waiting run's clock stops the
+ * moment it asks — so "most recently active" here means "asked most recently",
+ * which is the right order for a stack of notifications and costs nothing to
+ * arrive at. Re-sorting on a key the pulse row does not carry (the question's own
+ * time) would be inventing a fact.
+ *
+ * THE HREF FALLS BACK the way the task popover's footer does (schedule-lib
+ * `folderHref`): `taskHref` is null until the run reports a session id, and a run
+ * that has parked on a question inside that window is exactly the one somebody
+ * needs to reach. The folder with the Claude pane on it is where the answer can
+ * be given, so it is a better answer than an inert row. And when the task names
+ * no folder at all, the row still needs a door — every row in the Notifications
+ * panel is clickable, so the last resort is the Tasks page itself, which is
+ * always a correct place to land on "a task needs you".
+ */
+export function attentionRows(tasks: TaskPulseTask[]): AttentionRow[] {
+  const rows: AttentionRow[] = [];
+  for (const task of tasks) {
+    if (taskColumn(task) !== "needs_attention") continue;
+    rows.push({
+      key: task.key,
+      taskId: task.task_id,
+      title: task.title,
+      href: taskHref(task) ?? folderHref(task) ?? "/tasks",
+      // ADDITION 1 (live testing, 2026-09-17): `project` FIRST, matching
+      // `folderHref`'s (schedule-lib.ts) own established order — do NOT swap
+      // this back to `target || project`. A task made from inside an app
+      // targets the app's ENTRY PAGE (".../index.html" — see folderHref's own
+      // comment), so target-first here produced the caption "index" for a
+      // Transcripto task ("Transcripto YouTube transcriber finished" / "index").
+      // `project` names the containing app/folder, which is what a caption is
+      // for; `target` is only a fallback for a task with no project at all.
+      origin: labelForSource(task.project || task.target),
+    });
+  }
+  return rows;
+}
+
+/** What a dismissal of a waiting-task row expires against — the same idea
+ *  `repoDismissSignature` (repo-updates-lib.ts) uses for repo rows. `title` is
+ *  the question itself, so a dismissed row comes back the moment the run asks
+ *  something NEW, rather than staying hidden across an unrelated question
+ *  just because it reused the same key. Dismissing the row is not answering
+ *  it — the task stays parked either way, and the sidebar's Tasks dot keeps
+ *  saying so; this only governs whether the same question keeps a seat in
+ *  Notifications. */
+export function attentionDismissSignature(row: AttentionRow): string {
+  return row.title;
+}
+
+/** Which attention rows a dismissal still hides. */
+export function visibleAttentionRows(
+  rows: AttentionRow[],
+  dismissed: Record<string, string>
+): AttentionRow[] {
+  return rows.filter((row) => dismissed[row.key] !== attentionDismissSignature(row));
+}
+
+/**
+ * The dismissal a visit to /tasks earns: every DONE task on screen, stamped with
+ * the completion that was on screen — MERGED over what was already known.
+ *
+ * Done tasks only. A running task is deliberately not stamped: its completion
+ * has not happened yet, and pre-dismissing it is how the one mark this feature
+ * exists for would never be drawn.
+ *
+ * A MERGE, NOT A REPLACEMENT (bugbot, 2026-08-18). Rebuilding the map out of the
+ * done rows alone silently dropped the stamp of any task that was momentarily
+ * something else — a finished task that has just been re-run reads `in_progress`
+ * for the length of that run, and the old rule threw its stamp away mid-run, so
+ * the PREVIOUS completion popped back as unseen the moment the new one landed.
+ * Anything this answer still lists keeps what was known about it.
+ *
+ * The PRUNE is the answer's own membership: a key absent from `tasks` is
+ * dropped, so the row cannot grow without bound as tasks come and go. That is
+ * only sound against a REAL answer — tasksPulse.markTasksSeen refuses to run
+ * this before the first fetch has landed, because an empty store and an empty
+ * machine are not the same fact.
+ */
+export function seenAfterVisit(tasks: TaskPulseTask[], prev: TasksSeen = {}): TasksSeen {
+  const next: TasksSeen = {};
+  for (const t of tasks) {
+    if (taskColumn(t) === "done") next[t.key] = t.last_active;
+    else if (prev[t.key] !== undefined) next[t.key] = prev[t.key];
+  }
+  return next;
+}
+
+export function sameSeen(a: TasksSeen, b: TasksSeen): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => a[k] === b[k]);
+}
+
+/** "2 running" — the expanded row's yellow readout. Plural because one is the
+ *  common case and "1 running" is what a person would say out loud. */
+export function runningLabel(n: number): string {
+  return `${n} running`;
+}
+
+/** The collapsed dot's tooltip, and the expanded chip's — the sidebar's ONE
+ *  sentence about the page, so the two modes cannot describe it differently. */
+/** "2 blocked" — the attention half of the same readout. The word is the
+ *  Blocked lane's own (Akshil, 2026-09-11: "instead just say 1 blocked"): the
+ *  rail and the board then name one state with one word, and a count with no
+ *  noun needs no singular/plural fork. */
+export function attentionLabel(n: number): string {
+  return `${n} blocked`;
+}
+
+/**
+ * "2 queued" — the project queue's readout, worded like the two above it. No
+ * noun and no plural fork, for `attentionLabel`'s reason: one word names one
+ * state on every surface that says it.
+ *
+ * THE WORD IS "queued" (Akshil, 2026-09-21; it was "waiting" from 2026-09-12).
+ * It is the status word — the enum, the ring, the filter — and the count now
+ * says the same word, so a reader meets one name for one state on the row, in
+ * the rail and in the lane header. Re-exported from
+ * `platform/lib/queue.waitingLabel` so the chat's own card, the lane header
+ * and this rail cannot spell it three ways.
+ */
+export function queuedLabel(n: number): string {
+  return waitingLabel(n);
+}
+
+export function pulseTitle(pulse: TasksPulse): string {
+  const parts: string[] = [];
+  // FIRST, and ahead of the count it is part of: the tooltip is read left to
+  // right, and the one thing in it that asks the reader to act belongs at the
+  // start rather than after two facts they can do nothing about.
+  if (pulse.attention > 0) parts.push(attentionLabel(pulse.attention));
+  if (pulse.running > 0) parts.push(runningLabel(pulse.running));
+  // AFTER the running count, because that is the order the two happen in: the
+  // queued work is what runs when the running work stops.
+  if (pulse.queued > 0) parts.push(queuedLabel(pulse.queued));
+  if (pulse.doneUnread > 0) parts.push(`${pulse.doneUnread} finished, not read`);
+  return parts.join(" · ");
+}
+
+// ---- ONE IDENTITY FOR A ROW THAT CHANGES ITS NAME ----------------------------
+// `key` is the server's row identity and it MOVES under one task exactly once:
+// a message waiting in a folder's line is listed as `pending:<entry-id>`, and
+// the beat its run gets a session the listing files it under the session id
+// instead (routers/tasks.py `_rekeyed_pendings` — the session row and the
+// pending row flagged `gone` ride in ONE payload, so the data is already a clean
+// swap). What was not clean was the PAINT: both lists key their rows on
+// `task.key`, so the swap unmounted the pending row and mounted a session row in
+// its place — the row blinked out for a beat and came back running, worst of all
+// on a task the reader had just skipped, where the blink lands on the very row
+// the press was about (Akshil QA, 2026-09-18).
+//
+// So both halves — the merge that decides replace-vs-append, and the React key —
+// ask ONE question: what is this row's identity. `task_id` is the answer when
+// there is one, because a number is allocated once per task and carried ACROSS
+// the rekey (`tasks_store.ensure_ids`), which is exactly the fact the key lacks.
+//
+// FLAG-GATED, and the gate is at the call sites rather than in here: with the
+// project queue off nothing is ever held in a line, so nothing is ever rekeyed
+// while it is on screen, and the byte-for-byte old behaviour (key by `task.key`,
+// merge by `task.key`) is what those call sites keep.
+//
+// AND `task_id` IS NOT UNIQUE — `cardKey` above carries the incident that proves
+// it: the pending row's number is respent when the rekey is refused, and a live
+// listing held four numbers naming two sessions each. A duplicate React key
+// stops a list updating, which is how the first attempt at this (reverted,
+// 63bddc24d) broke live rows. `taskListKeys` is therefore the only way this is
+// ever spent on a list: it hands back one key per row, unique by construction,
+// and it hands back `task.key` for every row it cannot vouch for.
+
+/** The `draft:<id>` rows' prefix (platform/lib/drafts.taskDraftKey). A draft
+ *  carries a number too — it is allocated at the form, not at the run — but a
+ *  draft is not a conversation and never becomes one in place, so it is left out
+ *  of the rule entirely and keyed on its own key. */
+const DRAFT_KEY_PREFIX = "draft:";
+
+/** The row's NUMBER when it is allowed to stand for the row, "" otherwise —
+ *  the whole of the rule that decides which rows may be tracked across a rekey.
+ *  Private: everything outside asks `taskIdentity` or `taskListKeys`. */
+function taskNumber(task: Pick<Task, "key" | "task_id" | "kind">): string {
+  if (task.kind === "draft" || task.key.startsWith(DRAFT_KEY_PREFIX)) return "";
+  return task.task_id || "";
+}
+
+/**
+ * WHAT THIS ROW IS, across a change of key: its number, else its key.
+ *
+ * The per-row half of the rule. It is a CANDIDATE and not yet a React key — a
+ * list has to answer for two rows claiming one number as well (`taskListKeys`),
+ * and the merge below asks a narrower question again.
+ */
+export function taskIdentity(task: Pick<Task, "key" | "task_id" | "kind">): string {
+  return taskNumber(task) || task.key;
+}
+
+/**
+ * THE REACT KEYS FOR ONE RENDERED LIST, in the rows' own order and unique by
+ * construction — the only sanctioned way to spend `taskIdentity` on a list.
+ *
+ * With the flag down this is `rows.map(t => t.key)` and nothing else.
+ *
+ * With it up, a number is spent by AT MOST ONE row per list:
+ *
+ *   * a number only one row claims is that row's key — the ordinary case, and
+ *     the one the whole fix is about: `pending:<entry>` and the session it
+ *     becomes are one number, so the row keeps its DOM node through the swap;
+ *   * a number TWO rows claim (the respent-number twins of `cardKey`, or a
+ *     pending row still on screen beside the session it became) goes to the one
+ *     with a session and to nobody at all when that is not exactly one row. Not
+ *     "the first one wins": first is a fact about the SORT, and a winner that
+ *     changes when the list re-sorts would remount both rows — the bug, twice;
+ *   * a number that is also some row's own key is nobody's, since spending it
+ *     would collide with that row.
+ *
+ * Anything left over falls back to `task.key`, and a final pass suffixes the
+ * impossible case rather than emitting a duplicate: React silently stops
+ * updating rows that share a key, which is a worse failure than an ugly key.
+ */
+export function taskListKeys(rows: readonly Task[], queueOn: boolean): string[] {
+  if (!queueOn) return rows.map((t) => t.key);
+  const ownKeys = new Set(rows.map((t) => t.key));
+  /** number -> the row indices claiming it. */
+  const claims = new Map<string, number[]>();
+  rows.forEach((t, i) => {
+    const n = taskNumber(t);
+    if (!n || ownKeys.has(n)) return;
+    const held = claims.get(n);
+    if (held) held.push(i);
+    else claims.set(n, [i]);
+  });
+  /** row index -> the number it is allowed to spend. */
+  const spends = new Map<number, string>();
+  for (const [n, ix] of claims) {
+    if (ix.length === 1) {
+      spends.set(ix[0], n);
+      continue;
+    }
+    const withSession = ix.filter((i) => !!rows[i].session_id);
+    if (withSession.length === 1) spends.set(withSession[0], n);
+  }
+  const used = new Set<string>();
+  return rows.map((t, i) => {
+    let key = spends.get(i) ?? t.key;
+    if (used.has(key)) {
+      let n = 2;
+      while (used.has(`${key}#${n}`)) n += 1;
+      key = `${key}#${n}`;
+    }
+    used.add(key);
+    return key;
+  });
+}
+
+/**
+ * Fold a `/api/tasks/changes` answer into the rows on screen: rows in `upserts`
+ * replace (or join) the row with the same key, keys in `gone` leave, and the
+ * result keeps the one ordering promise this client makes — the server's
+ * `last_active` descending — so a session that just woke up rises to the top
+ * the same way it would on the next full poll.
+ *
+ * `queueOn` buys the two halves of the rekey the paint needs, and NOTHING with
+ * the flag down (the default is off, and `dropListingKeys` leaves it off on
+ * purpose — see its call):
+ *
+ *   * REPLACE, NEVER APPEND. A session row carrying the number of a
+ *     `pending:<entry>` row already on screen takes that row's place even when
+ *     the payload forgot to say the pending key is gone, so no frame ever shows
+ *     one task twice;
+ *   * AND NEVER NEITHER. A `pending:<entry>` row told it is gone whose
+ *     replacement is NOT in this payload stays, painted as the run it has just
+ *     become, instead of leaving a hole until the next row lands. Narrow on
+ *     purpose: only a `pending:` key, only one that carries a number, and only
+ *     from a status that means the work was asked for and not yet finished. The
+ *     caller pairs it with a full re-read (shell/tasksPulse), so a `gone` that
+ *     was really a CANCEL is corrected by one round trip rather than standing
+ *     until the 20 s floor.
+ */
+export function mergeTaskChanges(
+  tasks: Task[],
+  upserts: Task[],
+  gone: string[],
+  queueOn = false,
+): Task[] {
+  const drop = new Set(gone);
+  const live = upserts.filter((t) => !drop.has(t.key));
+  const byKey = new Map<string, Task>();
+  for (const t of tasks) if (!drop.has(t.key)) byKey.set(t.key, t);
+  if (queueOn) {
+    /** The numbers arriving under a key that is NOT a pending one — which is
+     *  the only direction a rekey ever goes, and the only pair this may treat
+     *  as one task. (Two settled sessions sharing a respent number are not
+     *  that, and evicting one of them would be data loss.) */
+    const arriving = new Set(
+      live
+        .filter((t) => !t.key.startsWith(PENDING_KEY_PREFIX))
+        .map(taskNumber)
+        .filter((n) => !!n),
+    );
+    for (const [key, t] of [...byKey]) {
+      if (!key.startsWith(PENDING_KEY_PREFIX)) continue;
+      const n = taskNumber(t);
+      if (n && arriving.has(n)) byKey.delete(key);
+    }
+    const standing = new Set([...byKey.values()].map(taskNumber).filter((n) => !!n));
+    for (const t of tasks) {
+      if (!drop.has(t.key) || !t.key.startsWith(PENDING_KEY_PREFIX)) continue;
+      const n = taskNumber(t);
+      if (!n || arriving.has(n) || standing.has(n)) continue;
+      if (t.status !== "queued" && t.status !== "in_progress") continue;
+      // `in_progress`, because the one thing we DO know about a pending row the
+      // server has stopped listing under that name is that its wait is over.
+      byKey.set(t.key, { ...t, status: "in_progress" });
+      standing.add(n);
+    }
+  }
+  for (const t of live) byKey.set(t.key, t);
+  return [...byKey.values()].sort((a, b) => b.last_active - a.last_active);
+}
+
+// ---- painting a queue verb before the poll agrees ----------------------------
+// The other half of `provisionalTasks` below, and deliberately the same idea
+// rather than a second store: that one holds rows the listing has not delivered
+// YET, this one holds fields the listing has not CAUGHT UP with yet. Both are a
+// client claim that the server is about to make, both are keyed by task key, and
+// both are thrown away the moment the server actually speaks about that key.
+//
+// Why it is needed at all: every queue verb is instant on the server (the notify
+// ring wakes `/api/tasks/changes` in milliseconds) and the ROW still cannot move
+// until that answer lands. A press on Skip that left a card reading "#3 in line"
+// for a beat reads as a press that did nothing, and this page's whole vocabulary
+// is that a status is a fact the reader can trust.
+//
+// What it may claim is deliberately narrow: a status and a place in the line,
+// nothing else. It never invents a row, never changes a title, never touches
+// unread — anything it cannot honestly know it simply leaves as the server left
+// it.
+
+export interface QueueOverride {
+  /** The task key this speaks for. */
+  key: string;
+  /** The only two statuses a queue verb can assert. `in_progress` is the
+   *  admitted send (the run is spawning), `queued` is the held one. Nothing here
+   *  may claim `done`, `blocked` or anything else: those are outcomes, and an
+   *  outcome is never something the client saw happen. */
+  status: "in_progress" | "queued";
+  queue_position?: number;
+  queue_ahead?: string;
+  queue_ahead_title?: string;
+  /** …AND WHERE THAT NAME GOES, which a claim has to carry now that a claim can
+   *  change WHO is in front (`skipLineOverrides`). The row it is painted over
+   *  already holds the pair for the OLD holder, so leaving these out left the
+   *  demoted row printing one task's id under another task's link — a pointer to
+   *  the wrong conversation, which is worse than no pointer at all. A claim that
+   *  cannot name them leaves them "" and the id goes back to plain text for the
+   *  moment the claim lives (platform/lib/queue.queueAheadHref). */
+  queue_ahead_session?: string;
+  queue_ahead_target?: string;
+  queue_ahead_key?: string;
+  queue_priority?: boolean;
+}
+
+export type QueueOverrides = Readonly<Record<string, QueueOverride>>;
+
+export const NO_QUEUE_OVERRIDES: QueueOverrides = {};
+
+/** Record one claim. A second claim about the same task REPLACES the first —
+ *  admit-then-skip is two presses about one row and the later one is the truer
+ *  of the two, never a merge of both. */
+export function withQueueOverride(
+  cur: QueueOverrides,
+  next: QueueOverride,
+): QueueOverrides {
+  return { ...cur, [next.key]: next };
+}
+
+/** …and a WHOLE LINE of them at once (`skipLineOverrides`). One press moves
+ *  several rows, and folding them in one at a time would paint the intermediate
+ *  states — which is the "two rows both reading 1st" frame this exists to end.
+ *  Same rule per key: the later claim about a key replaces the earlier one. */
+export function withQueueOverrides(
+  cur: QueueOverrides,
+  next: readonly QueueOverride[],
+): QueueOverrides {
+  if (next.length === 0) return cur;
+  const out: Record<string, QueueOverride> = { ...cur };
+  for (const claim of next) out[claim.key] = claim;
+  return out;
+}
+
+/**
+ * Drop every claim the server has now spoken about — the keys in a full
+ * `/api/tasks` listing, or the `rows` and `gone` of a `/api/tasks/changes`
+ * answer.
+ *
+ * THE SERVER WINS UNCONDITIONALLY, even when it still disagrees. A claim that
+ * outlived the answer that contradicted it would be a row this page could never
+ * correct: the next poll says the same thing, the override survives it again,
+ * and the card is stuck at whatever the click asserted. One answer about a key
+ * is the whole life of a claim about that key.
+ */
+export function expireQueueOverrides(
+  cur: QueueOverrides,
+  delivered: Iterable<string>,
+): QueueOverrides {
+  const keys = Object.keys(cur);
+  if (keys.length === 0) return cur;
+  const seen = new Set(delivered);
+  const kept = keys.filter((k) => !seen.has(k));
+  if (kept.length === keys.length) return cur;
+  const next: Record<string, QueueOverride> = {};
+  for (const k of kept) next[k] = cur[k];
+  return next;
+}
+
+/**
+ * The rows as the reader should see them right now: the server's, with the
+ * standing claims painted over them.
+ *
+ * A NEW ARRAY AND NEW ROWS, never a mutation — the input is the polled list,
+ * which React is still holding (sortLane's rule). Rows with no claim are passed
+ * through by IDENTITY, so the common render (no claims at all) allocates one
+ * array and nothing else, and the memoised views below it see the same objects.
+ *
+ * A claim for a key that is not in the list is DROPPED rather than inventing a
+ * row: the queue never creates a task that was not already there, and a key this
+ * listing has no row for is a task that has left.
+ */
+export function applyQueueOverrides(
+  tasks: Task[],
+  overrides: QueueOverrides,
+): Task[] {
+  if (Object.keys(overrides).length === 0) return tasks;
+  return tasks.map((task) => {
+    const claim = overrides[task.key];
+    if (!claim) return task;
+    return {
+      ...task,
+      status: claim.status,
+      queue_position: claim.queue_position ?? 0,
+      queue_ahead: claim.queue_ahead ?? "",
+      queue_ahead_title: claim.queue_ahead_title ?? "",
+      // THE WHOLE "who is in front" ANSWER COMES FROM THE CLAIM, never half of
+      // it from the row underneath: a claim that moved the line named a new
+      // task, and the row's own pair still points at the old one.
+      queue_ahead_session: claim.queue_ahead_session ?? "",
+      queue_ahead_target: claim.queue_ahead_target ?? "",
+      queue_ahead_key: claim.queue_ahead_key ?? "",
+      queue_priority: claim.queue_priority ?? false,
+    };
+  });
+}
+
+/** The claim a SKIP makes: head of the line, and nothing about the run in
+ *  flight, which skipping never touches. The holder it names is whatever the row
+ *  already said — the folder did not change hands because somebody jumped the
+ *  queue, so the link the id wears is carried over with it. */
+export function skippedOverride(task: Task): QueueOverride {
+  return {
+    key: task.key,
+    status: "queued",
+    queue_position: 1,
+    ...aheadOfRow(task),
+    queue_priority: true,
+  };
+}
+
+/** The four fields that say WHO IS IN FRONT, copied off a row that already
+ *  holds the answer. */
+function aheadOfRow(task: Task): Pick<
+  QueueOverride,
+  "queue_ahead" | "queue_ahead_title" | "queue_ahead_session" | "queue_ahead_target" | "queue_ahead_key"
+> {
+  return {
+    queue_ahead: task.queue_ahead ?? "",
+    queue_ahead_title: task.queue_ahead_title ?? "",
+    queue_ahead_session: task.queue_ahead_session ?? "",
+    queue_ahead_target: task.queue_ahead_target ?? "",
+    queue_ahead_key: task.queue_ahead_key ?? "",
+  };
+}
+
+/** …and the same four naming A ROW ITSELF — what the task behind it should say
+ *  it is behind. `queue_ahead_key` is that row's own listing key, which is the
+ *  door the id opens while its run has no session yet (`pending:<entry>`,
+ *  platform/lib/queue.queueAheadHref). */
+function aheadIsRow(task: Task): Pick<
+  QueueOverride,
+  "queue_ahead" | "queue_ahead_title" | "queue_ahead_session" | "queue_ahead_target" | "queue_ahead_key"
+> {
+  return {
+    queue_ahead: task.task_id ?? "",
+    queue_ahead_title: task.title ?? "",
+    queue_ahead_session: task.session_id ?? "",
+    queue_ahead_target: task.target ?? "",
+    queue_ahead_key: task.key,
+  };
+}
+
+/** The folder a task's work happens in — the server's own `queue_key`, and the
+ *  project for a row (or a server) that carries none. It is what a LINE is a
+ *  line of: two tasks share a queue when they share this. */
+function queueFolderOf(task: Task): string {
+  return (task.queue_key || task.project || "").trim();
+}
+
+/**
+ * ONE PRESS, THE WHOLE LINE REPAINTED — the claims a skip makes about every row
+ * in the folder, not only about the row that was pressed.
+ *
+ * THE BUG THIS ENDS (Akshil, 2026-09-18): pressing ⤒ on the 2nd row promoted it
+ * to "1st in line" and said nothing about the row that was already 1st, so for
+ * the 0.3-0.6 s before the server's listing landed TWO rows read "1st in line"
+ * and the reader could not tell which of them was going to run. A queue is one
+ * order, and a claim about one row's place is a claim about everybody else's:
+ * the whole line has to move in the same paint or it is not a line.
+ *
+ * WHAT MOVES, and nothing else:
+ *
+ *   * the pressed row takes `head` exactly as the caller built it — position 1,
+ *     `queue_priority`, and whatever the server said is still in front of it
+ *     (the RUN holding the folder, which a skip never touches);
+ *   * every row the press jumped OVER — the ones standing between the pressed
+ *     row's new place and its old one — shifts one place back;
+ *   * the row that was standing where the pressed row now stands is the only one
+ *     whose "behind X" changes, because it is the only one whose neighbour
+ *     changed: it is now behind the pressed task, id, title and link;
+ *   * every other queued row in the folder keeps its number and its sentence,
+ *     and only loses `queue_priority` if it was wearing it — the ⤒ glyph is a
+ *     claim on the one spot at the head, and after this press that spot is the
+ *     pressed row's.
+ *
+ * Rows in OTHER folders are never touched: a line is per folder, and a skip in
+ * one says nothing about another. Rows that need no change get no claim, so the
+ * common press on a two-deep line leaves two claims and not twenty.
+ *
+ * PURELY LOCAL AND SHORT-LIVED, exactly as the single claim was: every key here
+ * is a key the next `/api/tasks` answer speaks about, so `expireQueueOverrides`
+ * retires the whole set together and the server's order wins unconditionally.
+ */
+export function skipLineOverrides(
+  tasks: readonly Task[],
+  head: QueueOverride,
+): QueueOverride[] {
+  const out: QueueOverride[] = [head];
+  const pressed = tasks.find((t) => t.key === head.key);
+  if (!pressed) return out;
+  const folder = queueFolderOf(pressed);
+  /** Where the press PUT it (the server's own answer, 1 for an ordinary skip)
+   *  and where it STOOD. A `was` of 0 is "the server never placed it", and the
+   *  honest reading of a row arriving at the head from nowhere is that it is now
+   *  in front of everybody. */
+  const to = Math.max(1, head.queue_position ?? 1);
+  const was = pressed.queue_position ?? 0;
+  const behind = aheadIsRow(pressed);
+  for (const task of tasks) {
+    if (task.key === head.key) continue;
+    if (task.status !== "queued") continue;
+    if (queueFolderOf(task) !== folder) continue;
+    const at = task.queue_position ?? 0;
+    const jumped = at >= to && (was <= 0 || at < was);
+    if (!jumped) {
+      // Untouched — unless it is still wearing the head's claim, which is now
+      // the pressed row's and may not be worn twice.
+      if (task.queue_priority) {
+        out.push({
+          key: task.key,
+          status: "queued",
+          queue_position: at,
+          ...aheadOfRow(task),
+          queue_priority: false,
+        });
+      }
+      continue;
+    }
+    out.push({
+      key: task.key,
+      status: "queued",
+      queue_position: at + 1,
+      // Only the row the pressed one displaced has a new neighbour; the rest
+      // are still behind whatever they were behind.
+      ...(at === to ? behind : aheadOfRow(task)),
+      queue_priority: false,
+    });
+  }
+  return out;
+}
+
+/**
+ * A SKIP FOLDED INTO THE STANDING CLAIMS — the one entry point both lists use.
+ *
+ * THE LINE IS COMPUTED FROM THE ROWS AS PAINTED, not from the raw listing
+ * (Bugbot, PR #1228). A second ⤒ before the first one's listing lands used to
+ * read the server's old positions: the row the first press promoted still sat
+ * at its old place in `tasks`, so the second pass neither shifted it nor took
+ * its head claim away — and its standing override kept it at 1 with the glyph
+ * beside the new head. Two firsts, which is the frame this overlay exists to
+ * end. Applying the claims first makes every press see the line the reader
+ * sees, so each press's answer supersedes the last one's for every row it moves.
+ */
+export function skipLine(
+  cur: QueueOverrides,
+  tasks: readonly Task[],
+  head: QueueOverride,
+): QueueOverrides {
+  const painted = applyQueueOverrides(tasks as Task[], cur);
+  return withQueueOverrides(cur, skipLineOverrides(painted, head));
+}
+
+/**
+ * PAINT BEFORE /api/tasks ANSWERS: the sidebar's compact rows, upcast into the
+ * listing's own shape.
+ *
+ * `_task_rows()` reads every transcript from byte 0 on the first call of a
+ * server process — 2.9s on this machine — and the page spent all of it behind a
+ * skeleton while `/api/tasks/pulse` had already told the sidebar the key,
+ * status, project, title, target, session and times of every task. Those are
+ * most of what a row draws, so a row can be drawn from them.
+ *
+ * Everything pulse does not carry gets a NEUTRAL default, never a guess: no
+ * message window, no count, nothing live, nothing failed, nothing blocked and
+ * no next run. `provisional: true` is how the views tell the two apart — the
+ * message count and the expand caret are the two cells that would otherwise
+ * print one of these defaults as a fact, and they draw placeholders instead
+ * (ScheduleTaskViews). Every row is replaced whole the moment the listing
+ * lands, and the keys are the same, so nothing reorders on the swap.
+ */
+export function provisionalTasks(rows: TaskPulseTask[]): Task[] {
+  return rows.map((row) => ({
+    key: row.key,
+    task_id: row.task_id,
+    project: row.project,
+    target: row.target,
+    session_id: row.session_id,
+    title: row.title,
+    // `message` and not `entry`: the difference between those two only decides
+    // whether a title may be a message being composed right now, and a row
+    // this page did not fetch is not one of those.
+    title_source: "message",
+    description: "",
+    // NEUTRAL, like every other field pulse does not carry — and here neutral
+    // is also the honest answer: "" means "no opinion", which is what a row the
+    // page has not fetched yet can truthfully say about a task's model.
+    model: "",
+    effort: "",
+    status: row.status,
+    failed: false,
+    blocked_reason: "",
+    attention: null,
+    live: false,
+    unread: row.unread,
+    started: 0,
+    last_active: row.last_active,
+    happened_at: row.happened_at,
+    message_count: 0,
+    // From pulse since 2026-09-09: the Board's Upcoming lane sorts by it, and a
+    // default of 0 put every provisional card at the bottom of that lane until
+    // the listing landed and moved it (review, #1079). BOTH fields: namedNextRun
+    // reads the time only when the entry is named too — a time nobody can fire
+    // is not sorted by — so the time alone changed nothing (Bugbot).
+    next_run: row.next_run,
+    next_run_entry: row.next_run_entry,
+    next_run_repeats: row.next_run_repeats,
+    messages: [],
+    provisional: true,
+  }));
+}

@@ -1,0 +1,428 @@
+// Big preview card for the /apps hub. Its thumbnail has three shapes, in
+// precedence order:
+//
+//   1. `preview.png` at the app folder's root — an AUTHORED still, served as
+//      bytes through /api/fs/raw. First because it is the only one the author
+//      chose: a live render shows the page in whatever state it comes up in
+//      (empty, mid-load, asking for a file), and a screenshot shows the app
+//      making its point. It is also by far the cheapest of the three.
+//      Hovering the card swaps the still for the live app (step 2's iframe),
+//      and hover-end swaps it back — see the hover state below.
+//   2. the app itself, live: `entry_html` in a sandboxed iframe at desktop
+//      width (1280px) scaled down to fit the card.
+//   3. no entry file at all — an empty thumb. The box keeps its 16/10 aspect,
+//      background and top border, so the card holds its shape; it just says
+//      nothing about an app that has nothing to show (D365).
+//
+// The precedence is a FALLBACK CHAIN, not a fixed choice, and it has to be:
+// `preview_image` says a file of that name exists and is non-empty, not that it
+// decodes. A corrupt or half-written PNG in an <img> renders as nothing, so a
+// wrongly-confident step 1 would be a permanently blank card — strictly worse
+// than the live render it replaced. An image error drops to step 2.
+//
+// Display-only either way: a pointer-events shield keeps every click on the
+// card, which opens the app. The image is lazy via `loading="lazy"`; the
+// iframe goes further — see useNearViewport below.
+//
+// `loading="lazy"` only defers the FIRST load, it never reclaims an iframe
+// once scrolled past. A workspace with many entry_html apps and no
+// preview.png would still end up with every card that has ever scrolled
+// through the viewport pinned open — each a whole sandboxed page + JS
+// runtime. useNearViewport instead mounts the iframe only while its card is
+// near the viewport and unmounts it once scrolled well past, showing step 3's
+// empty thumb in between — an offloaded card reads the same as an app with no
+// live preview (D365).
+import { useEffect, useRef, useState } from "react";
+import type { AppInfo } from "@platform/lib/api";
+import { appIconUrl, appfilePreviewUrl, rawUrl } from "@platform/lib/api";
+import { isRasterIconUrl, useThemedIconSrc } from "@platform/lib/app-icon-src";
+import { exportAppFileOnly, openShareApp } from "@platform/lib/share-app";
+import { useAppSharingFeature } from "@platform/lib/share-app-flag";
+import { AppStar } from "@platform/ui/AppStar";
+import { MenuIcons } from "@platform/ui/MenuIcons";
+import { thumbFrame } from "@platform/lib/thumb-frame";
+import { embedUrlForFsPath, navigateUrl } from "@platform/lib/router";
+import {
+  appRecency,
+  hrefFor,
+  isBrowserHandledClick,
+  onAppCardClick,
+  openTargetFor,
+} from "@platform/lib/appEntry";
+import { useNearViewport, usePreviewStart } from "@platform/lib/preview-start";
+
+import { timeAgo } from "@platform/lib/format";
+
+// The iframe renders at a fixed desktop width and is scaled to the card by a
+// pure-CSS trick: 400% width/height + scale(0.25) means the visual size is
+// exactly the .app-pcard-thumb box, whatever the grid column resolves to.
+const PREVIEW_SCALE = 0.25;
+
+// The page a card's live thumbnail shows. Plain: everything that makes it a
+// PICTURE rather than a use of the app — the two URL stamps, the sandbox seal,
+// the markup — arrives at the iframe from `thumbFrame` below, which is the one
+// place that description lives (platform/lib/thumb-frame.ts).
+function entryRenderUrl(entryHtml: string): string {
+  return `/render?path=${encodeURIComponent(entryHtml)}`;
+}
+
+export function AppPreviewCard({
+  app,
+  onContextMenu,
+  badge,
+  href,
+}: {
+  app: AppInfo;
+  // Right-click: the card only forwards the event and its own app — the menu
+  // state lives one level up (Apps.tsx), so the whole grid shares one portal.
+  onContextMenu?: (e: React.MouseEvent, app: AppInfo) => void;
+  // Extra word in the meta row (e.g. "cloned" on a showcase app the user has
+  // copied into Fused/local). Decoration only — the card behaves the same.
+  badge?: string;
+  // Overrides where the card LANDS — an entry-page URL that carries a query
+  // string (the Playground's model handoff, D442). hrefFor deliberately
+  // carries none, so a caller with params to hand over supplies the whole
+  // URL; left-click then goes through navigateUrl instead of openApp, and
+  // the browser gestures use the same href, so the two still can't disagree.
+  href?: string;
+}) {
+  // The icon.svg recoloured for the live theme when it names a colour
+  // (picker-written), the raw file otherwise.
+  const iconUrl = app.icon ? appIconUrl(app.icon, app.icon_mtime) : null;
+  const iconSrc = useThemedIconSrc(iconUrl);
+  const title = app.title || app.name;
+  // The same timestamp the grid SORTS by (last opened, modified standing in) —
+  // a card ranked first for being opened just now must not label itself with a
+  // stale modified time. appRecency's 0-for-neither is falsy, so timeAgo still
+  // returns null and the label hides.
+  const ago = timeAgo(appRecency(app));
+  // Set when the authored thumbnail fails to decode — see the fallback chain in
+  // the module comment. One-way: a retry would loop on a file that is broken.
+  const [shotFailed, setShotFailed] = useState(false);
+  // Set from the still <img>'s onLoad — gates the shimmer/fade below. Separate
+  // from `shotFailed`: a still can be slow to decode without ever failing, and
+  // that gap is exactly what used to paint the box background underneath it.
+  const [shotLoaded, setShotLoaded] = useState(false);
+  // Whether the pointer has ever entered the card. The still's ENTRANCE fade
+  // (first decode, below) and the hover crossfade's INSTANT snap-back
+  // (`.app-pcard-shot` in apps.css) land on the same end state — opaque, not
+  // hovered — so a style computed purely from (hovered, liveReady, shotLoaded)
+  // cannot tell the two apart; a CSS transition only looks at the style being
+  // entered, not how it got there. Before the first hover, reaching that state
+  // means the shot just finished loading and gets the transition (the fade
+  // this feature adds); from the first hover on, reaching it again means a
+  // live preview just unmounted underneath, and it has to snap back with none
+  // — a fade there would show the still fading in over the iframe's blank box,
+  // which is the exact regression the original (pre-shimmer) code avoided.
+  const everHoveredRef = useRef(false);
+  // The still's source. An exported .fused card (kind "appfile", D396) has no
+  // folder to hold a preview.png — its still is the payload's, streamed by a
+  // single-member zip read; the endpoint 404s when the file ships without one
+  // and this <img>'s ordinary onError drops the card to the live branch
+  // (an opened file's fusedapp preview — see liveSrc) or the empty thumb.
+  const shotSrc =
+    app.kind === "appfile"
+      ? appfilePreviewUrl(app.path)
+      : app.preview_image
+        ? rawUrl(app.preview_image)
+        : null;
+  // Reset if the still's own URL ever changes under an already-mounted card
+  // (narrow edge case — cards are keyed by `app.path`, so this is a safety net
+  // rather than a path this component normally takes; unlike the live
+  // iframe below, this `<img>` is never conditionally unmounted by scrolling).
+  useEffect(() => {
+    setShotLoaded(false);
+  }, [shotSrc]);
+  // Gates the live-iframe branch only — preview.png costs nothing to keep
+  // mounted and the empty thumb costs nothing at all, so neither needs this.
+  const [thumbRef, nearViewport, onScreen] = useNearViewport<HTMLSpanElement>();
+  // Hover on a png-thumbed card swaps in the live app: the iframe mounts
+  // UNDER the still image on mouseenter and the image only fades once the
+  // iframe has loaded (`liveReady`), so the swap never shows a blank frame
+  // mid-boot. Mouseleave unmounts the iframe and the png is back instantly.
+  const [hovered, setHovered] = useState(false);
+  const [liveReady, setLiveReady] = useState(false);
+  // What the live branch renders. An ordinary app live-renders its entry
+  // page. An exported .fused card (kind "appfile") has no page to point
+  // /render at — its live look is its own fusedapp view under `_preview=1`,
+  // which re-uses the existing extract (never extracts, never records — the
+  // server's reuse_only preview contract, D396) — offered only for a file the
+  // user has OPENED before (`opened_at`): one they never ran stays the empty
+  // thumb rather than a placeholder-in-a-frame, and a peek must not be the
+  // first run of a stranger's pages anyway.
+  const liveSrc = app.entry_html
+    ? entryRenderUrl(app.entry_html)
+    : app.kind === "appfile" && app.opened_at != null
+      ? embedUrlForFsPath(app.path)
+      : null;
+  const wantsLive = Boolean(
+    liveSrc && nearViewport && ((!shotSrc || shotFailed) || hovered),
+  );
+  // The still's hover path keeps the queue's `true` fast lane: a gesture skips
+  // the idle wait and jumps the queue. It only ever flips together with
+  // `wantsLive` above, so the extra effect run it causes is the one that
+  // mounts the hover iframe — no started preview is torn down for it.
+  const hoverPriority = Boolean(shotSrc && !shotFailed && hovered);
+  // Every other card ranks by whether it is ON SCREEN — useNearViewport's
+  // third slot, a STABLE getter the queue reads at admission time
+  // (preview-start's Priority). The 300px lookahead still means a scroll
+  // queues a row or so the reader cannot quite see yet, and with two slots the
+  // cards they ARE looking at used to wait behind those in request order. A getter
+  // rather than a dependency because usePreviewStart's effect restarts the
+  // iframe whenever its deps change: promoting a waiting card through the deps
+  // would tear down a running one.
+  // Whether the hover chip is Share (the sheet) or plain Export — see
+  // share-app-flag.ts; default off.
+  const sharing = useAppSharingFeature();
+  const { started: liveStarted, settled: liveSettled } = usePreviewStart(
+    wantsLive,
+    hoverPriority || onScreen,
+  );
+  // Whether the CURRENTLY MOUNTED body iframe has painted. Resets whenever the
+  // iframe itself is torn down and remounted (`liveStarted` or `liveSrc`
+  // changing): a card that once painted, then scrolled out of view and back
+  // in, must not show its brand-new, not-yet-loaded iframe at FULL opacity —
+  // a blank/booting frame presented as finished, the same bug `loaded` in
+  // BookmarkCards.tsx's LivePreview has this same fix for.
+  const [bodyPainted, setBodyPainted] = useState(false);
+  useEffect(() => {
+    setBodyPainted(false);
+  }, [liveStarted, liveSrc]);
+  // An anchor, not a button — see AppCard. The href is what makes middle-click
+  // and "Open in new tab" land on the same place a left click does.
+  return (
+    <a
+      className="app-pcard"
+      href={href ?? hrefFor(app)}
+      onClick={(e) => {
+        if (!href) return onAppCardClick(e, app);
+        if (e.defaultPrevented || isBrowserHandledClick(e)) return;
+        e.preventDefault();
+        navigateUrl(href, { isDir: false });
+      }}
+      // On the <a>, not on the body: the thumbnail's pointer-events shield sits
+      // INSIDE this element, so a right-click over the preview bubbles up here
+      // (the iframe itself never sees it) and one handler covers the whole card.
+      onContextMenu={onContextMenu && ((e) => onContextMenu(e, app))}
+      // liveReady resets on ENTER as well as leave: a straggler onLoad from the
+      // previous hover's iframe could have re-set it after leave cleared it, and
+      // a stale true would blank the still before the new iframe has painted.
+      onMouseEnter={() => {
+        everHoveredRef.current = true;
+        setHovered(true);
+        setLiveReady(false);
+      }}
+      onMouseLeave={() => {
+        setHovered(false);
+        setLiveReady(false);
+      }}
+      title={openTargetFor(app).path}
+    >
+      <span className="app-pcard-body">
+        {/* The app's own `icon.svg` to the left of its two text lines, tall
+            enough to span both — the same mark
+            the sidebar's Projects row and the app's tab favicon draw, so an
+            app reads as itself wherever it is listed. Drawn AS IS: the
+            author's colours, no mask or tint (owner, 2026-08-27).
+            An app with no icon.svg gets the same generic mark the sidebar row
+            falls back to — the brand's four-point star — so the slot is there
+            on every card and a name never shifts left for the want of a file.
+            `draggable={false}` for the reason the still's shield exists — an
+            <img> carries the browser's native drag-the-image gesture, which
+            starts a drag instead of the click that opens the card. */}
+        {iconSrc ? (
+          // An icon.png — the raster fallback — is clipped to the slot's
+          // rounded square (`is-raster`, apps.css); an svg is drawn as is.
+          <img
+            className={"app-pcard-icon" + (isRasterIconUrl(iconUrl) ? " is-raster" : "")}
+            src={iconSrc}
+            alt=""
+            draggable={false}
+          />
+        ) : (
+          // The generic mark (AppStar — the same drawing the sidebar row and
+          // the app page's header show), on currentColor so it takes the
+          // card's muted tone rather than competing with the name beside it.
+          <AppStar className="app-pcard-star" />
+        )}
+        {/* The two text lines, stacked beside the icon rather than under it —
+            the icon is a column of the head, spanning both (owner). Their own
+            element because the icon has to be a SIBLING of the pair for that:
+            with the icon inside the first line it could only ever be as tall
+            as the name. */}
+        <span className="app-pcard-lines">
+          <span className="app-pcard-title">{title}</span>
+          <span className="app-pcard-meta">
+            {/* Where the app lives, as one path — `local/short-builder` — in
+                place of a bordered tag chip beside the folder name (owner:
+                the chip was visual noise). Always the full path, even when the
+                title is the folder name: the tag alone is only half an
+                address. */}
+            <span className="app-pcard-name">
+              {app.tag}/{app.name}
+            </span>
+            {badge && <span className="app-pcard-name">{badge}</span>}
+            {ago && <span className="app-pcard-ago">{ago}</span>}
+          </span>
+        </span>
+      </span>
+      <span className="app-pcard-thumb" aria-hidden="true" ref={thumbRef}>
+        {/* Shimmer while something is actually COMING: an authored still not
+            yet decoded, or a live iframe the card wants but has not painted.
+            Never for the "nothing to show" case (D365, the module comment) —
+            that's `liveSrc == null`, which keeps `wantsLive` false and this
+            condition with it, so a card with no entry file stays the plain
+            empty box it always was rather than shimmering forever.
+            The second clause's "has it painted yet" signal depends on WHICH
+            live branch is live: a still-thumbed card's hover preview sets
+            `liveReady` (below) and never touches `bodyPainted` — that branch
+            doesn't render at all when there's a still — so testing
+            `bodyPainted` here would stay permanently true-less and shimmer
+            for the entire duration of every hover on a still-thumbed card. */}
+        {((shotSrc && !shotFailed && !shotLoaded) ||
+          (wantsLive &&
+            (!liveStarted || !(shotSrc && !shotFailed ? liveReady : bodyPainted)))) && (
+          <span className="app-pcard-skel" />
+        )}
+        {shotSrc && !shotFailed ? (
+          <>
+            {/* Hover live preview, mounted BELOW the img in the stacking
+                order so the still stays on top until the app has painted.
+                No `loading="lazy"`: mounting is already gated by
+                `useNearViewport`/`liveStarted`, so lazy adds no savings, and
+                the UA's lazy heuristics read the layout box — which here is
+                400% wide and `scale(0.25)`-ed — and can defer past the point
+                a `load` event ever fires, which would leave `liveReady` (and
+                the shimmer above) stuck forever and a scheduler slot held
+                until the 10s timeout. */}
+            {hovered && liveSrc && nearViewport && liveStarted && (
+              <iframe
+                {...thumbFrame(liveSrc)}
+                style={{
+                  width: `${100 / PREVIEW_SCALE}%`,
+                  height: `${100 / PREVIEW_SCALE}%`,
+                  transform: `scale(${PREVIEW_SCALE})`,
+                }}
+                onLoad={() => {
+                  liveSettled();
+                  setLiveReady(true);
+                }}
+                // An error is still a painted result (the frame shows the
+                // app's own error page) — `onError={liveSettled}` alone freed
+                // the scheduler slot but left `liveReady` false forever, so
+                // the still never faded out and the shimmer clause above
+                // never cleared either.
+                onError={() => {
+                  liveSettled();
+                  setLiveReady(true);
+                }}
+              />
+            )}
+            <img
+              className="app-pcard-shot"
+              src={shotSrc}
+              alt=""
+              loading="lazy"
+              onLoad={() => setShotLoaded(true)}
+              onError={() => setShotFailed(true)}
+              // Transition inline with the opacity: hover-end removes the whole
+              // style, so the still snaps back instantly instead of fading in
+              // over the unmounted iframe's blank. The `!shotLoaded` branch is
+              // the one new case (the entrance fade over the skeleton above);
+              // `everHoveredRef` is why it can share this ternary with the
+              // hover crossfade without the two fighting over the same
+              // opacity:1-not-hovered end state — see its declaration above.
+              style={
+                hovered && liveReady
+                  ? { opacity: 0, transition: "opacity 0.15s ease" }
+                  : !shotLoaded
+                    ? { opacity: 0, transition: "opacity 0.15s ease" }
+                    : everHoveredRef.current
+                      ? undefined
+                      : { opacity: 1, transition: "opacity 0.15s ease" }
+              }
+            />
+            {/* The same shield the iframe gets. An <img> swallows no clicks of
+                its own, but it DOES carry the browser's native drag-the-image
+                gesture, which starts a drag on the card instead of the click
+                that opens it. */}
+            <span className="app-pcard-shield" />
+          </>
+        ) : liveSrc && nearViewport && liveStarted ? (
+          <>
+            {/* No `loading="lazy"` — see the comment on the hover iframe
+                above; the same failure mode applies here to `bodyPainted`. */}
+            <iframe
+              {...thumbFrame(liveSrc)}
+              style={{
+                width: `${100 / PREVIEW_SCALE}%`,
+                height: `${100 / PREVIEW_SCALE}%`,
+                transform: `scale(${PREVIEW_SCALE})`,
+                // Fades in over the skeleton above rather than popping in
+                // mid-boot.
+                opacity: bodyPainted ? 1 : 0,
+                transition: "opacity 0.15s ease",
+              }}
+              // `bodyPainted` as well as the queue's release: settling frees
+              // the NEXT card's start slot, which says nothing about whether
+              // this frame painted.
+              onLoad={() => {
+                liveSettled();
+                setBodyPainted(true);
+              }}
+              // An error is still a painted result (the frame shows the app's
+              // own error page) — `onError={liveSettled}` alone freed the
+              // scheduler slot but left `bodyPainted` false forever, so the
+              // shimmer never cleared and the frame never faded in.
+              onError={() => {
+                liveSettled();
+                setBodyPainted(true);
+              }}
+            />
+            {/* No shield span here. `.app-pcard-thumb iframe` is already
+                `pointer-events: none` (apps.css), which retargets every press —
+                middle-click included — onto the card's own <a>. The `<img>`
+                branch above keeps its shield for a different reason: an image
+                carries the browser's native drag gesture, which pointer-events
+                does not stop. */}
+          </>
+        ) : null}
+      </span>
+      {/* Hover-revealed Share (SPEC §43 AF-4, D391): the same action as the
+          right-click menu's "Share…", surfaced so it is one visible click.
+          The sheet behind it (ShareAppModal) holds both ways out — the public
+          link and the .fused download — so this is the ONE chip on the card.
+          A SIBLING of the thumb, not a child: the thumb span is aria-hidden
+          (it is decoration), and a focusable button inside an aria-hidden
+          subtree is announced as nothing by assistive tech while still taking
+          tab focus. Positioned over the thumb via the card's own positioning
+          context. A <button> inside the card's <a>: it must both
+          preventDefault (or the card link opens the app) and stopPropagation
+          (or the click ALSO bubbles to onAppCardClick). Not rendered on an
+          exported .fused card (kind "appfile", D396): its path is the file
+          itself and the export route only takes app folders. */}
+      {app.kind !== "appfile" && (
+      <button
+        type="button"
+        className="app-pcard-share"
+        title={
+          sharing
+            ? "Share " + (app.title || app.name) + " — public link or .fused file"
+            : "Export " + (app.title || app.name) + " as a .fused app file"
+        }
+        aria-label={sharing ? "Share app" : "Export app file"}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          // Flag off (share-app-flag.ts, the default): the chip is the plain
+          // Export it was before the sheet — straight to Downloads + a toast.
+          if (sharing) openShareApp(app);
+          else void exportAppFileOnly(app);
+        }}
+      >
+        {sharing ? MenuIcons.share : MenuIcons.download}
+      </button>
+      )}
+    </a>
+  );
+}

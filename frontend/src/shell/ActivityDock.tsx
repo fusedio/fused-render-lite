@@ -1,0 +1,314 @@
+// The shell's composer for the status bar's Activity chip. This is the ONE
+// place `<DownloadManager>` is instantiated, and it is the sole reason
+// `shell/QueueDock.tsx` and `shell/EnginesDock.tsx` — two separate composers,
+// one per chip that used to exist — are gone. `DownloadManager`
+// (platform/ui/DownloadManager.tsx) draws the Running section (job rows) and
+// the Background tasks section (running engines). Its header comment has the
+// panel layout; this file only owns getting the two DATA SOURCES to it.
+// (Models — resident AI models — made this same trip during the merge and
+// then split back out into its own chip, `shell/ModelsDock.tsx`, once its own
+// filled/outlined dot needed to answer a question this chip's shared "is
+// there work right now" dot could not.)
+//
+// A SCHEDULED MESSAGE'S OWN RUN DRAWS NO ROW HERE AT ALL (D661, user: "a task
+// is not something I even want in the activity. that was added
+// unintentionally"). This file used to poll `/api/schedule-queue` itself and
+// hand `DownloadManager` a `queue` slot of scheduled-message rows merged in
+// beside the job rows — that whole poll, `useQueue`, `QueueRowView`, and
+// `shell/queue-dock-lib.ts` (its pure row-shaping half) are DELETED, not
+// merely unused. `jobs.ts`'s `jobRows` now excludes `sys:schedule:*` jobs
+// unconditionally (no more "exempt only while queued" carve-out), so a
+// scheduled run cannot draw a row here no matter what state it is in. A run
+// that was missed or failed still gets a toast (`toastForEvent`,
+// platform/lib/schedule-toast.ts, consuming `useScheduleEvents` in App.tsx);
+// a successful run gets none — `toastForEvent` returns null for
+// `kind === "done"` — so its only surface is the Scheduled/Tasks page.
+// `fused_render/schedule.py`'s own `_emit`/`_report` are untouched, since its
+// poll loop still reads its own report back to notice a live cancel request.
+//
+// A KNOWN LOSS FROM THIS (documented prominently in DECISIONS.md): the old
+// queue card could cancel an ALREADY-RUNNING scheduled turn (`cancelJob` on
+// its `sys:schedule:` job id) — `shell/Scheduled.tsx` only cancels an
+// entry that has not been sent yet. There is currently no surface for
+// stopping a turn already in flight. Accepted rather than worked around: the
+// user's own words were that this row should not exist at all, and rebuilding
+// a narrower "cancel only" control just to keep that one capability would be
+// reintroducing the exact row they asked to have removed.
+//
+// WHY THE ENGINE SOURCE STAYS HERE, NOT IN PLATFORM — the same boundary
+// argument StatusBar.tsx has always made for RepoUpdatesDock/ModelsDock:
+// `DownloadManager`'s job is to RENDER rows from data, not to fetch it, and
+// this component is the shell's one place that fetches for it.
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getRunningEngines, stopEngine, type RunningEngine } from "@platform/lib/api";
+import {
+  EMPTY_GROUP_POPUP_STATE,
+  groupPopupTick,
+  isRunning,
+  popupTick,
+  terminalNotifications,
+  type Job,
+} from "@platform/lib/jobs";
+import { notify } from "@platform/lib/notifications";
+import { snapshotIsOpenAnywhere } from "@platform/lib/presence";
+import DownloadManager, { engineLabel } from "@platform/ui/DownloadManager";
+
+import { noteProgressMayHaveMoved } from "./onboarding/progress";
+
+// Matches the (former) Engines chip's own cadence: a "what is running" readout,
+// not progress, so it does not need to tick every second.
+const ENGINES_POLL_MS = 10_000;
+
+// How long a `markStopping` marker suppresses the retire toast for (C5 fix).
+// Comfortably more than one `ENGINES_POLL_MS` round trip, so the very next
+// poll after a Stop click — the case this exists for — still finds its
+// marker. NOT forever: a marker used to be consumed only by the first later
+// snapshot that dropped the id, so a rejected `stopEngine()` call, or an
+// engine a `main =` app's `restart()` revives, left the marker standing with
+// nothing to consume it — and the id's eventual GENUINE idle retirement,
+// possibly minutes later, silently ate the D664 toast that retirement earned.
+// Expiring the marker bounds the suppression to the window the user's own
+// click could plausibly still be resolving in, so a later real retirement is
+// never mistaken for an echo of that one click.
+const STOPPING_GRACE_MS = 30_000;
+
+/**
+ * Which engines from `prev` disappeared in `next` and were NOT a user-
+ * initiated stop — the set D664's toast fires for. Pure and exported so C9's
+ * gap (D664 shipped with no test at all) can be closed without mounting the
+ * whole poll effect: `stopping` is mutated in place exactly as the poll loop
+ * mutates its own ref, consuming a marker the moment its window is checked
+ * (whether or not it still suppressed anything) so a stale one never lingers
+ * to swallow a later retirement.
+ */
+export function retiredEngines(
+  prev: RunningEngine[],
+  next: RunningEngine[],
+  stopping: Map<string, number>,
+  now: number,
+): RunningEngine[] {
+  const nextIds = new Set(next.map((e) => e.engine_id));
+  const retired: RunningEngine[] = [];
+  for (const p of prev) {
+    if (nextIds.has(p.engine_id)) continue;
+    const stoppedAt = stopping.get(p.engine_id);
+    if (stoppedAt !== undefined) {
+      stopping.delete(p.engine_id);
+      if (now - stoppedAt < STOPPING_GRACE_MS) continue; // user-initiated, within grace
+    }
+    retired.push(p);
+  }
+  return retired;
+}
+
+function useRunningEngines(): {
+  engines: RunningEngine[];
+  refresh: () => void;
+  /** Mark an engine as being stopped BY THE USER, so the next snapshot that no
+   *  longer carries it is not read as an idle retirement (below). Exposed
+   *  from the hook because the stop request and the poll that will notice the
+   *  engine gone are two different call sites. */
+  markStopping: (engineId: string) => void;
+} {
+  const [engines, setEngines] = useState<RunningEngine[]>([]);
+  const pollRef = useRef<() => void>(() => {});
+  // Engine ids a user-initiated Stop is in flight for — read once, on the
+  // NEXT snapshot that drops them, then discarded. A `Set` mutated in place
+  // rather than state: it is consulted only inside the poll effect below and
+  // must never itself trigger a render.
+  const stoppingRef = useRef<Map<string, number>>(new Map());
+  // The PREVIOUS snapshot itself, so a snapshot that drops an engine can tell
+  // an idle retirement (ENGINE-STOP TOAST, below) from ordinary churn. A ref,
+  // not the `engines` state variable: the poll effect below runs once (empty
+  // deps) and would otherwise always see the FIRST render's stale closure.
+  const prevEnginesRef = useRef<RunningEngine[]>([]);
+  const sawFirst = useRef(false);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+    // Only the newest invocation may schedule — the same generation guard
+    // `useRepoUpdates`/the old EnginesDock poll carry: `clearTimeout` cancels a
+    // PENDING timer, but a `refresh()` landing while an earlier poll awaits
+    // leaves both in flight, and each would assign `timer` on the way out,
+    // leaking one unclearable chain.
+    let generation = 0;
+    const poll = async () => {
+      const mine = ++generation;
+      window.clearTimeout(timer);
+      try {
+        const data = await getRunningEngines();
+        if (!disposed && mine === generation) {
+          const next = data.engines || [];
+          // AN ENGINE RETIRED ON ITS OWN GETS A TOAST (D664): the only way to
+          // learn a background daemon/worker went away idle is to notice it
+          // missing from consecutive snapshots — nothing calls this out as an
+          // event server-side. Skipped on the very FIRST snapshot (nothing to
+          // diff against yet — every engine already running would otherwise
+          // read as having just retired) and skipped for any id this hook was
+          // told a user just stopped themselves.
+          if (sawFirst.current) {
+            for (const prev of retiredEngines(prevEnginesRef.current, next, stoppingRef.current, Date.now())) {
+              notify({ title: `${engineLabel(prev)} retired (idle)`, tone: "info" });
+            }
+          }
+          sawFirst.current = true;
+          prevEnginesRef.current = next;
+          setEngines(next);
+        }
+      } catch {
+        // Best-effort: a failed read leaves the last snapshot standing.
+      }
+      if (!disposed && mine === generation) timer = window.setTimeout(poll, ENGINES_POLL_MS);
+    };
+    pollRef.current = poll;
+    poll();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  const refresh = useCallback(() => pollRef.current(), []);
+  const markStopping = useCallback((engineId: string) => {
+    stoppingRef.current.set(engineId, Date.now());
+  }, []);
+  return { engines, refresh, markStopping };
+}
+
+export default function ActivityDock({
+  onTerminalJobs,
+  onJobPopup,
+}: {
+  onTerminalJobs?: (jobs: Job[]) => void;
+  /** A job just crossed into terminal and should pop its card (SPEC
+   *  actionable-notifications) — "latest wins" is already enforced by
+   *  `popupTick` below, so this fires at most once per poll. */
+  onJobPopup?: (job: Job) => void;
+} = {}) {
+  const { engines, refresh: refreshEngines, markStopping } = useRunningEngines();
+
+  // TERMINAL JOBS, ON THEIR WAY FROM Activity TO Notifications (D586,
+  // broadened by D662 to every terminal state, not only `error`).
+  // `DownloadManager` already hands this the FULL, unfiltered snapshot on
+  // every poll (`onJobsReported`); this only needs to re-derive the terminal
+  // subset and call up when the id SET actually changes, so a poll that finds
+  // nothing new does not re-render the shell.
+  //
+  // `terminalNotifications` (jobs.ts) is `mergedRows` then `jobRows` then
+  // `terminalJobs` — see its own doc for why that order matters (a scheduled
+  // run's own job draws no row in Activity in any state — D661, SPEC
+  // actionable-notifications — because `jobRows` excludes its
+  // `sys:schedule:*` id by PREFIX, a check independent of `tier`: the tier
+  // only ever governs a TERMINAL row, so a scheduled run's own RUNNING tick
+  // would still draw here without the prefix check, and its `tier:
+  // "transient"` is not even what keeps a failed/cancelled tick out —
+  // `effectiveTier`'s error/cancelled override turns those `attention`,
+  // which the prefix check overrides right back to excluded. Removing the
+  // prefix check because "the tier already covers it" reopens D661; and a
+  // render merged with a shared model load must not surface the load's
+  // completion as a second Notifications entry, SPEC §36).
+  const onTerminalRef = useRef(onTerminalJobs);
+  onTerminalRef.current = onTerminalJobs;
+  const terminalIdsRef = useRef("");
+  // THE POP-UP'S OWN SEEN-SET (SPEC actionable-notifications) — separate
+  // from `terminalIdsRef` above, which tracks the Notifications PANEL's own
+  // id set (already `effectiveTier`-filtered, `jobRows`) and is not the set
+  // this needs: a `transient` job pops here even though `terminalIdsRef`
+  // never counts it. `popupJobsSeenRef`/`popupFirstTickRef` are `popupTick`'s
+  // own state, carried across polls in a ref because this callback is
+  // memoized with `[]` deps and must not re-create on every poll.
+  const popupJobsSeenRef = useRef<Set<string>>(new Set());
+  const popupFirstTickRef = useRef(true);
+  // D-C's own state (SPEC-quiet-notifications.md §3) — a MULTI-member
+  // group's failure pop-rule tracking, entirely separate from
+  // `popupJobsSeenRef` above (which now excludes multi-member group members
+  // outright; see `popupJobs`'s own doc). Carried the same way, in a ref,
+  // for the same "this callback is memoized with `[]` deps" reason.
+  const groupPopupStateRef = useRef(EMPTY_GROUP_POPUP_STATE);
+  const onJobPopupRef = useRef(onJobPopup);
+  onJobPopupRef.current = onJobPopup;
+  // The setup meter (onboarding/progress.ts) reads stage statuses the server
+  // observes on each read — and a model download starting or finishing is
+  // exactly when the Models stage moves. This poll is the shell's one view of
+  // every job, so it is the cheapest place to know that moment: re-read the
+  // meter when the set of RUNNING jobs or the set of terminal ones changes,
+  // not on every tick.
+  const runningIdsRef = useRef("");
+  const onJobsReported = useCallback((next: Job[]) => {
+    // Finding 6: read the presence registry ONCE per tick rather than once
+    // per job (and once per group member) below. `isOpenAnywhere` itself
+    // does a synchronous localStorage read + JSON.parse on every call;
+    // `snapshotIsOpenAnywhere` does that read/parse a single time here and
+    // hands back a same-shaped predicate closed over the one snapshot, so
+    // every call site below reuses it instead of re-reading storage.
+    const isOpenAnywhere = snapshotIsOpenAnywhere();
+    const running = next.filter(isRunning).map((j) => j.id).join(" ");
+    let moved = false;
+    if (running !== runningIdsRef.current) {
+      runningIdsRef.current = running;
+      moved = true;
+    }
+    const terminal = terminalNotifications(next, isOpenAnywhere);
+    const key = terminal.map((j) => j.id).join(" ");
+    if (key !== terminalIdsRef.current) {
+      terminalIdsRef.current = key;
+      onTerminalRef.current?.(terminal);
+      moved = true;
+    }
+    // THE POP-UP, computed off the FULL `next` snapshot rather than
+    // `terminal` above — `popupTick`/`popupJobs` run their own
+    // `mergedRows`/`sys:schedule:*` handling and must see every job to do
+    // it, not the panel's already-tier-filtered subset (see `popupJobs`'s
+    // own doc for why: a `transient` job here has to pop even though
+    // `terminalNotifications` never counts it terminal-for-the-panel).
+    // No presence check here any more (2026-09-23, D888): `popupJobs`
+    // already excludes every successful `done` job outright, so the only
+    // candidates reaching this are `error`/`cancelled`, which are never
+    // suppressed regardless of where the user is.
+    // Finding 8: pass the PRIOR tick's group-failure keys so a group that
+    // just shrank to one member (a sibling dismissed/swept) doesn't have its
+    // already-popped failure treated as a brand-new candidate the instant it
+    // becomes a `popupJobs` singleton — see `popupTick`'s own doc on
+    // `alreadyPoppedByGroup`.
+    const { seen, popped } = popupTick(
+      next,
+      popupJobsSeenRef.current,
+      popupFirstTickRef.current,
+      groupPopupStateRef.current.failedSeen,
+    );
+    popupJobsSeenRef.current = seen;
+    // D-C (§3): a MULTI-member group's own failure pop, computed off the
+    // same full `next` snapshot and the same `isFirstTick` flag (so a
+    // page-load backlog seeds silently here too, not just in `popupTick`).
+    // "Latest wins, no stacking" is enforced ACROSS both sources by
+    // comparing whichever moment each candidate actually represents (a
+    // single job's own `finished_at`, a group failure's `finished_at`) —
+    // see each function's own doc for why that pairing is the right one.
+    const groupResult = groupPopupTick(next, groupPopupStateRef.current, popupFirstTickRef.current);
+    groupPopupStateRef.current = groupResult.state;
+    popupFirstTickRef.current = false;
+    const momentOf = (j: Job) => j.finished_at ?? j.started_at ?? 0;
+    const winner =
+      popped && groupResult.popped
+        ? momentOf(groupResult.popped) > momentOf(popped)
+          ? groupResult.popped
+          : popped
+        : popped ?? groupResult.popped;
+    if (winner) onJobPopupRef.current?.(winner);
+    if (moved) noteProgressMayHaveMoved();
+  }, []);
+
+  const onStopEngine = async (engineId: string) => {
+    markStopping(engineId);
+    await stopEngine(engineId);
+    refreshEngines();
+  };
+
+  return (
+    <DownloadManager
+      engines={{ engines, onStop: onStopEngine }}
+      onJobsReported={onJobsReported}
+    />
+  );
+}
