@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.10.1 | 45.57 MB (45,568,355 B) | +1.72 MB | 108 MB | Claude sessions/tasks: `templates/claude` + React shell `static/shell-dist/` (bun build) ship in the wheel; `~/Fused/local` folder apps (no packaging change to the Python side) |
 | 0.10.0 | 43.85 MB (43,845,977 B) | +0.41 MB | 103 MB | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0; title-bar Edit button (editlink.py) |
 | 0.9.5 | 43.43 MB (43,434,486 B) | −0.00 MB | 99 MB | legacy env drops pyarrow/duckdb; DoodleShooter + OpenRelax regain pyproject.toml (+361 B); no packaging change |
 | 0.9.4 | 43.44 MB (43,438,706 B) | +0.41 MB | 99 MB | legacy env deps (pyarrow/duckdb/httpx); refreshed DoodleShooter + OpenRelax showcase files (OpenRelax ~130 KB → ~432 KB); no packaging change |
