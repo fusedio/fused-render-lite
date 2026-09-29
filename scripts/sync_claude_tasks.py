@@ -162,6 +162,18 @@ def sync_runtime(src_root: str) -> None:
 #: Render App's own files in `frontend/`: never overwritten by a sync.
 FRONTEND_OWN = ("lite.html", "src/lite.tsx", "src/LiteApp.tsx", "vite.config.js")
 
+#: Render App's patches on the verbatim frontend copy, re-applied after a sync.
+FRONTEND_PATCHES = {
+    # fused-render #1344 hides the "Open in Explorer" door inside a framed
+    # `/tasks?embed=1`; Render App has no Explorer to open, so the door is
+    # off everywhere (the row's press still opens the peek; ⌘-click still
+    # lands on the chat).
+    os.path.join("src", "shell", "tasks-lib.ts"): [
+        ("export const SHOW_PAGE_DOOR = !IS_QUERY_EMBED;",
+         "export const SHOW_PAGE_DOOR = false; // Render App: no Explorer to open (fused-render #1344)"),
+    ],
+}
+
 
 def sync_frontend(src_root: str) -> None:
     """Copy fused-render's `frontend/` verbatim (its React shell: the Tasks
@@ -176,6 +188,19 @@ def sync_frontend(src_root: str) -> None:
         cmd += ["--exclude", own]
     subprocess.run(cmd + [src, dst], check=True)
     print("dir frontend/ (kept: %s)" % ", ".join(FRONTEND_OWN))
+    for rel, patches in FRONTEND_PATCHES.items():
+        path = os.path.join(dst, rel)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        for old, new in patches:
+            if new in text:
+                continue
+            if old not in text:
+                sys.exit(f"frontend patch anchor missing in {rel}: {old!r}")
+            text = text.replace(old, new)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        print("patched frontend/" + rel)
 
 
 if __name__ == "__main__":
