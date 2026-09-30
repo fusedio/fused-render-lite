@@ -122,8 +122,11 @@ def sync(src_root: str) -> None:
     tdst = os.path.join(DST, "templates", "claude")
     if os.path.isdir(tdst):
         shutil.rmtree(tdst)
+    # The legacy chat page (template.html + vendor/) stays behind: Render App
+    # serves the React shell, and those ~20k lines are not tracked here.
     shutil.copytree(os.path.join(src, "templates", "claude"), tdst,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc",
+                                                  "template.html", "vendor"))
     print("dir templates/claude")
     rel = os.path.join("templates", "claude", "agent.py")
     with open(os.path.join(DST, rel), encoding="utf-8") as f:
