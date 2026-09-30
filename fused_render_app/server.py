@@ -1140,6 +1140,17 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
     # marks and session settings rather than writing into each other's
     # `~/.fused-render/claude-sessions/`.
     os.environ["FUSED_RENDER_HOME"] = paths.home()
+    # The skill plugin root every session we spawn is handed (fused-render's
+    # skill_plugin.py, D216): the packaged skills (`fused_render_app/skills/`,
+    # synced from fused-render) assembled under this app's home and published
+    # as FUSED_RENDER_SKILL_PLUGIN_DIR, which agent.py's `_plugin_argv` turns
+    # into `claude --plugin-dir`. Filesystem-only, so it belongs here before
+    # the bind; a failure leaves the var unset and the session starts plain.
+    try:
+        from fused_render_app import skill_plugin
+        skill_plugin.export_skill_plugin_env()
+    except Exception:  # noqa: BLE001 — a chat without skills still works
+        logger.warning("skill plugin not exported", exc_info=True)
     # agent.py resolves the CLI through FUSED_RENDER_CLAUDE_BIN, then PATH;
     # the relay through FUSED_RENDER_APP_CLAUDE_BIN first. Export the one
     # binary this process resolved so both spawn the same `claude`.
@@ -1210,6 +1221,21 @@ def _start_tasks() -> None:
     threading.Thread(target=tasks_routes.warm, daemon=True, name="fused-tasks-warm").start()
 
 
+def _start_user_plugin() -> None:
+    """The published `fusedio/fused-render` plugin, installed or refreshed in
+    the user's own Claude config (fused-render's user_plugin.py, D492) — for
+    the sessions Render App did NOT launch: the user's own `claude` in a
+    terminal or in their app folder, which `--plugin-dir` cannot reach. The
+    ones we launch get the local plugin root from `make_server` and owe
+    nothing to this. Same plugin id as full fused-render, so both apps on one
+    machine share one install and one `enabledPlugins` opt-out. A daemon
+    thread, rate-limited by its own stamp: it spawns `claude` and clones over
+    the network."""
+    from fused_render_app import user_plugin
+
+    user_plugin.start()
+
+
 def start_ai() -> None:
     """The AI subsystem's background threads, as fused-render wires them at
     startup: the warm Claude process, the idle-model reaper, hardware and
@@ -1220,7 +1246,8 @@ def start_ai() -> None:
                      ("hardware", ai_routes.supervisor.start_hardware_refresh),
                      ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
                      ("background-apps", _start_background_apps),
-                     ("tasks", _start_tasks)):
+                     ("tasks", _start_tasks),
+                     ("user-plugin", _start_user_plugin)):
         try:
             fn()
         except Exception:  # noqa: BLE001

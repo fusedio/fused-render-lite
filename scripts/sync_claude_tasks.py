@@ -11,9 +11,12 @@ Render App patches (the runs dir name in agent.py, the LaunchAgent label).
 With `--runtime` it also splices fused-render's `fused.tasks` block
 (runtime.js, between `// --- fused.tasks` and `// --- fused.capture`) into
 Render App's runtime.js between the `fused-tasks:begin` / `fused-tasks:end`
-markers. Lite-only modules (the stubs in `current_apps`, `app_listing`,
-`index_ignore`, `shell/mounts`, `claude_config/`, and the pages) are never
-touched. Review `git diff` afterwards; run `pytest`.
+markers. With `--skills` (or `--only-skills` for just that step) it re-copies
+fused-render's `skills/` + plugin manifest into `fused_render_app/skills/`
+and the three skill-delivery modules (`sync_skills`). Lite-only modules (the
+stubs in `current_apps`, `app_listing`, `index_ignore`, `shell/mounts`,
+`claude_config/`, and the pages) are never touched. Review `git diff`
+afterwards; run `pytest`.
 """
 from __future__ import annotations
 
@@ -26,11 +29,17 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DST = os.path.join(os.path.dirname(HERE), "fused_render_app")
 
+# The skill delivery (fused-render's D216 / D492): the plugin root every
+# spawned session is handed, the published-plugin install for the user's own
+# sessions, and the scan both read the skill set from. Copied verbatim like
+# the rest; `claude_config/lib.py` carries the two helpers they reach for.
+SKILL_MODULES = ["skill_sources.py", "skill_plugin.py", "user_plugin.py"]
+
 MODULES = [
     "schedule.py", "cron.py", "recur.py", "schedule_wake.py", "drafts.py",
     "project_queue.py", "queue_manager.py", "tasks_store.py", "tasks_watch.py",
     "session_liveness.py", "claude_spawn.py", "claude_session_move.py",
-    "claude_artifacts.py",
+    "claude_artifacts.py", *SKILL_MODULES,
 ]
 ROUTERS = ["tasks.py", "claude_sessions.py", "queue_events.py", "schedule.py",
            "drafts.py", "claude_artifacts.py"]
@@ -57,6 +66,13 @@ REWRITES = [
 PATCHES = {
     os.path.join("templates", "claude", "agent.py"): [
         ('"fused_render_claude" + suffix, "runs")', '"fused_render_app_claude" + suffix, "runs")'),
+        # The pane prompt names the authoring skill; the skill's Render App
+        # paragraph says what this runtime lacks, but only a session that
+        # knows it is ON Render App reads that paragraph.
+        ('"use it rather than inferring the API. "',
+         '"use it rather than inferring the API, and read its Render App paragraph: "\n'
+         '            "this session runs on Render App (fused-render-app), a subset runtime "\n'
+         '            "with no fused.fileIndex or fused.snapshot. "'),
     ],
     "schedule_wake.py": [
         ('LABEL = "io.fused.render.schedule-wake"', 'LABEL = "io.fused.render.app.schedule-wake"'),
@@ -142,6 +158,35 @@ def sync(src_root: str) -> None:
         shutil.copy2(os.path.join(src, "templates", "shared", name),
                      os.path.join(DST, "templates", "shared", name))
         print("tpl templates/shared/" + name)
+
+
+def sync_skills(src_root: str) -> None:
+    """Copy fused-render's canonical skills into the package, in the shape its
+    build hook (`scripts/hatch_build.py:_copy_starter_skills`) writes into its
+    own wheel: one dir per `skills/<name>/` that has a SKILL.md, plus the
+    plugin manifest as a FLAT `skills/plugin.json` (nothing in a wheel may
+    live under a dotted path; `skill_plugin.py` mkdirs `.claude-plugin/` in
+    its assembled output instead). Committed here rather than built: Render
+    App has no build hook and no repo-level `skills/`, so this packaged copy
+    is the only source `skill_sources.py` ever resolves. The skill TEXT is
+    never edited here — Render App's differences are written into the skills
+    themselves, upstream (the authoring skill's Render App paragraph).
+
+    The three delivery modules come along (`SKILL_MODULES`), so `--skills`
+    alone is a complete skills refresh."""
+    src = os.path.join(src_root, "skills")
+    dst = os.path.join(DST, "skills")
+    shutil.rmtree(dst, ignore_errors=True)
+    names = sorted(n for n in os.listdir(src)
+                   if os.path.isfile(os.path.join(src, n, "SKILL.md")))
+    for name in names:
+        shutil.copytree(os.path.join(src, name), os.path.join(dst, name),
+                        ignore=shutil.ignore_patterns("__pycache__", ".DS_Store"))
+    shutil.copyfile(os.path.join(src_root, ".claude-plugin", "plugin.json"),
+                    os.path.join(dst, "plugin.json"))
+    print("dir skills (%d skills + plugin.json)" % len(names))
+    for name in SKILL_MODULES:
+        copy_py(os.path.join(src_root, "fused_render", name), name)
 
 
 def sync_runtime(src_root: str) -> None:
@@ -354,8 +399,17 @@ if __name__ == "__main__":
     ap.add_argument("--runtime", action="store_true", help="also re-splice the fused.tasks runtime.js block")
     ap.add_argument("--frontend", action="store_true",
                     help="also re-copy frontend/ (fused-render's React shell), keeping Render App's entry files")
+    ap.add_argument("--skills", action="store_true",
+                    help="also re-copy skills/ + plugin.json into fused_render_app/skills/")
+    ap.add_argument("--only-skills", action="store_true",
+                    help="just the skills refresh (skills/, plugin.json, the three delivery modules)")
     args = ap.parse_args()
+    if args.only_skills:
+        sync_skills(os.path.abspath(args.fused_render))
+        sys.exit(0)
     sync(os.path.abspath(args.fused_render))
+    if args.skills:
+        sync_skills(os.path.abspath(args.fused_render))
     if args.runtime:
         sync_runtime(os.path.abspath(args.fused_render))
     if args.frontend:

@@ -69,6 +69,17 @@ def _isolated_claude_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_user_plugin_sync(monkeypatch):
+    """`start_ai` (reached through `serve_in_thread`) starts the published
+    plugin sync, which would spawn `claude plugin marketplace add …` against
+    the config dir and write a stamp under the home. Marked already-started
+    for every test; tests/test_user_plugin.py resets the flag itself."""
+    from fused_render_app import user_plugin
+
+    monkeypatch.setattr(user_plugin, "_started", True)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_cli(monkeypatch, tmp_path):
     """No test spawns the developer's real `claude`: `make_server` exports the
     resolved binary as FUSED_RENDER_CLAUDE_BIN for the chat engine, and a

@@ -77,7 +77,21 @@ programmatically as `fused.tasks.*` (fused-render D890). State lives under
 `~/.fused-render-app/claude-sessions/`, apart from fused-render's own; the
 transcripts are Claude Code's, under `~/.claude/projects`. Re-sync from a
 fused-render checkout with `scripts/sync_claude_tasks.py <path> --runtime
---frontend`.
+--frontend --skills`.
+
+Every session Render App spawns is handed fused-render's skills
+(`fused-render-authoring`, `fused-render-ai`, …) the way fused-render does it:
+the packaged copy under `fused_render_app/skills/` (synced verbatim from
+fused-render's `skills/`; Render App's differences — no `fileIndex`, no
+`snapshot`, `autoReload(true)` throws — are written into the skills
+themselves) is assembled into `~/.fused-render-app/skill-plugin/` at startup
+and passed as `claude --plugin-dir` (`skill_plugin.py`). For the user's own
+`claude` in a terminal or app folder, which that flag cannot reach, the
+published `fusedio/fused-render` plugin is installed or refreshed in their
+Claude config on a background thread (`user_plugin.py`) — same plugin id as
+full fused-render, so one machine running both keeps one install; an explicit
+`"fused-render@fused-render": false` under `enabledPlugins` in Claude's
+`settings.json` turns that off for good, and an uninstall is never undone.
 
 ⌥Space (change it in Settings — the gear on the home page — or from the
 search panel's footer; right-click the menu-bar item → "Search Apps…" opens
