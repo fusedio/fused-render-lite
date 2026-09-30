@@ -41,9 +41,14 @@ def claude_cli(*args: str, timeout: int = 25) -> dict:
     if binary is None:
         return {"ok": False, "stdout": "", "stderr": "claude CLI not found"}
     try:
+        # Headless: stdin is /dev/null so a CLI that decides to prompt gets
+        # EOF instead of a TTY it could wait on (the callers pass `-y` and run
+        # from a daemon thread), and no console window on Windows.
         res = subprocess.run(
             [binary, *args], capture_output=True, timeout=timeout,
-            close_fds=False, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, close_fds=False,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return {
             "ok": res.returncode == 0,
