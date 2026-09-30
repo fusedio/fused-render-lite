@@ -1,13 +1,64 @@
 """Claude Code's user settings file, minimally: where it is and how to read /
-write it atomically. Honours `CLAUDE_CONFIG_DIR` like the CLI does."""
+write it atomically. Honours `CLAUDE_CONFIG_DIR` like the CLI does.
+
+Also the two helpers fused-render's `user_plugin.py` (copied verbatim by
+`scripts/sync_claude_tasks.py`) reaches through `claude_config.lib`:
+`read_json` and `claude_cli`, with the same signatures and contracts as
+fused-render's `claude_config/lib.py` so the copy needs no patch."""
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import threading
+from typing import Any
 
 _LOCK = threading.Lock()
+
+
+def read_json(path: str, fallback: Any) -> Any:
+    """Return `fallback` only when the file is ABSENT. Malformed JSON raises —
+    corruption must surface, never be silently swallowed (fused-render's
+    config-store rule; `user_plugin.sync_user_plugin` catches it)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return fallback
+
+
+def claude_cli(*args: str, timeout: int = 25) -> dict:
+    """Run the `claude` binary with an argv array (never a shell string).
+    The binary is the one this app resolved (`claude_health.resolve`: the
+    `FUSED_RENDER_*_CLAUDE_BIN` overrides, then PATH, then the known install
+    dirs) so a Finder-launched process with launchd's PATH still finds it.
+    Best-effort: `{ok, stdout, stderr}`, bounded so a hung CLI cannot pin the
+    caller's thread."""
+    from fused_render_app import claude_health
+
+    binary, _source = claude_health.resolve()
+    if binary is None:
+        return {"ok": False, "stdout": "", "stderr": "claude CLI not found"}
+    try:
+        # Headless: stdin is /dev/null so a CLI that decides to prompt gets
+        # EOF instead of a TTY it could wait on (the callers pass `-y` and run
+        # from a daemon thread), and no console window on Windows.
+        res = subprocess.run(
+            [binary, *args], capture_output=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, close_fds=False,
+            text=True, encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return {
+            "ok": res.returncode == 0,
+            "stdout": res.stdout.strip(),
+            "stderr": res.stderr.strip(),
+        }
+    except FileNotFoundError:
+        return {"ok": False, "stdout": "", "stderr": "claude CLI not found on PATH"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "stdout": "", "stderr": f"claude {args[0]} timed out"}
 
 
 def config_dir() -> str:
