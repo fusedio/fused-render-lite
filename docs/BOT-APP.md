@@ -389,15 +389,40 @@ boundaries) green; `bun test` for the ported pure libs (`md`, `format`,
 Landed and checked live against a dev server on 2799 (Chrome driven through
 Argent over CDP; OpenBot open in FusedRender.app in the next tab):
 
-- Backend: 970 pytest green. Real `claude` (haiku) + real Chrome through the
-  agent engine: goto → thought/action/done with step thumbnails; `ask` with
-  options answered from the chat; the approval gate on a "Buy now" click,
-  deny path, and the denied-action memory (a refused action is not re-asked
-  until the user speaks again — added after haiku retried a denied click);
-  Stop mid-approval ends the task with `system "Stopped"` and leaves no
-  `claude` / `botmcp.py` process behind; the usage ledger records cost and
-  the turn's full input context (fresh + cache-write + cache-read tokens).
-- Frontend: 77 bun tests green, `bun run build` green. Bot list, New bot
+- Backend: 1048 pytest green (2 skipped). Real `claude` (haiku) + real
+  Chrome through the agent engine: goto → thought/action/done with step
+  thumbnails; `ask` with options answered from the chat; the approval gate
+  on a "Buy now" click, deny path, and the denied-action memory (a refused
+  action is not re-asked until the user speaks again — added after haiku
+  retried a denied click); Stop mid-approval ends the task with `system
+  "Stopped"` and leaves no `claude` / `botmcp.py` process behind; the usage
+  ledger records cost and the turn's full input context (fresh +
+  cache-write + cache-read tokens).
+- Apps as data and functionality (the point of the product): `py <app>`
+  loads an app's SKILL.md onto that same tool result (the first message is
+  never rebuilt — fixed after the load silently never surfaced), and the bot
+  answers from it (tip-calculator's `bill` / `tip` params and defaults);
+  `tool` runs an app's mcp.toml tools natively (no FusedRender module
+  needed: AST-derived params, the app's own venv via `env.run_python` with
+  the manifest's entrypoint) — `linkedin_list_pending` ran read-only with
+  no approval card, `linkedin_add_messages` raised the approval card, ran on
+  "Approve" and reported the new queue item; `show` opens a built app beside
+  the chat; a real `build` through fused.tasks ends in the "ready" card; an
+  `offer` can be declined; an instruction typed mid-task reaches the model
+  on the next tool result; `save` lands in the Inbox folder.
+- Theme: the shell's appearance reaches every rendered page — lite's
+  runtime.js now carries fused-render's theme block (a bot's own build had
+  reported "the runtime ignores the theme attribute"); the tip-calculator
+  embed renders light/dark with the shell and flips live across tabs.
+- Local tier (steps engine, Gemma 4 E4B through fused_ai on this Mac): a
+  cold model asks "download now?" from the first task, not the greeting
+  (the greeting had swallowed the first message as the answer); download
+  progress ticks are accepted from the model worker (they were refused as
+  page writes and the row went stalled); the model's habit of filing
+  goto's address under `to` is repaired before the step runs. The 4.8 GB
+  weights were removed again afterwards (disk), so the first local task on
+  this Mac downloads.
+- Frontend: 95 bun tests green, `bun run build` green. Bot list, New bot
   dialog (+ Advanced), Settings, row context menu, preview pane with inbox /
   routines / usage strip, live view (screencast, Take over, URL bar
   navigation, tab strip, Hand back), Builds panel (filtered to builds — fixed
@@ -411,6 +436,5 @@ Argent over CDP; OpenBot open in FusedRender.app in the next tab):
   button, 0.11.0 in `server.json`.
 
 Not exercised live: dictation (needs a microphone grant), iMessage (needs
-Full Disk Access), a real `build`, the local Gemma tier (steps engine; unit
-tested), Chrome profile import and encryption at rest (unit tested in
-browser.py).
+Full Disk Access), Chrome profile import and encryption at rest (unit
+tested in browser.py).
