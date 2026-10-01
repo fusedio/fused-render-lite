@@ -166,24 +166,6 @@ def test_api_fetch_then_open(client, origin, app_home):
     assert json.loads(body)["name"] == "demo"
 
 
-def test_open_page_accepts_url(client):
-    status, _, body = client.get("/open?_url=" + urllib.parse.quote("https://example.com/a.fused", safe=""))
-    assert status == 200
-    text = body.decode()
-    assert '"https://example.com/a.fused"' in text and "/api/fetch" in text
-    # A URL open downloads at once (no confirmation step) and, once
-    # downloaded, opens by a real navigation to /open?_file= so the native
-    # window learns which .fused it shows.
-    assert "confirmDownload" not in text and "return download();" in text
-    assert 'location.replace("/open?_file="' in text and "replaceState" not in text
-    # A query value must not be able to close the inline <script> block.
-    evil = "https://x/</script><script>alert(1)</script>"
-    status, _, body = client.get("/open?_url=" + urllib.parse.quote(evil, safe=""))
-    assert status == 200
-    line = [l for l in body.decode().splitlines() if "const URL_ =" in l][0]
-    assert "<" not in line and "\\u003c/script" in line
-
-
 def test_url_from_link_scheme_and_bare_http():
     link = "https://x.io/a.fused?v=1"
     enc = urllib.parse.quote(link, safe="")

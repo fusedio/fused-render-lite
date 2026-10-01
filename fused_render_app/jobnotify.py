@@ -15,9 +15,8 @@ of three things, and each has one sensible answer:
 
 1. An extracted app folder (`envinstall` names the folder whose environment
    it is building): bring that app's window forward if one is open, else
-   open the .fused it came from if the menu-bar Dock remembers it, else Home.
-   The folder does not record its source file, so the reverse lookup runs
-   the open windows' (and the Dock's) files through `appfile.extract_dir_for`.
+   Home. The folder does not record its source file, so the reverse lookup
+   runs the open windows' files through `appfile.extract_dir_for`.
 2. A file the job produced (an image or video render, a transcript): reveal
    it in Finder — there is no window to show a PNG in.
 3. A shell route with no page in this app (`/ai-models/local` is
@@ -33,7 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 from fused_render_app import jobs, notify_policy, webnotify
 
@@ -44,8 +43,8 @@ def page_target(page: str, apps_root: str,
                 candidates: Iterable[tuple[str, str | None]]) -> tuple[str, str]:
     """What a click on a banner for a row whose `page` is ``page`` should do.
 
-    ``candidates`` are ``(fused_path, extract_dir)`` pairs — open windows
-    first, then the Dock's remembered apps — and the first whose
+    ``candidates`` are ``(fused_path, extract_dir)`` pairs — the open
+    windows' app files — and the first whose
     ``extract_dir`` is ``page`` (or contains it) wins. Returns one of
     ``("window", fused_path)``, ``("reveal", fs_path)``, ``("home", "")``.
     """
@@ -69,12 +68,10 @@ def page_target(page: str, apps_root: str,
     return ("home", "")
 
 
-def install(manager, apps_root: str,
-            remembered_files: Callable[[], list[str]] | None = None) -> None:
+def install(manager, apps_root: str) -> None:
     """Wire jobs → policy → banners, and banner clicks → ``manager``
     (a `mainwindow.WindowManager`). Call once, from the main thread, after
-    the window manager exists. ``remembered_files`` answers the Dock's
-    known .fused paths (`dock_store`), consulted when no window matches."""
+    the window manager exists."""
     from fused_render_app import appfile
 
     # identifier → the `page` its last banner carried. A click can land long
@@ -103,13 +100,6 @@ def install(manager, apps_root: str,
         for w in list(getattr(manager, "_windows", [])):
             if w.app_file and w.app_file not in files:
                 files.append(w.app_file)
-        if remembered_files is not None:
-            try:
-                for f in remembered_files():
-                    if f not in files:
-                        files.append(f)
-            except Exception:  # noqa: BLE001 — the Dock's memory is a nicety here
-                logger.exception("job banner click: reading remembered apps failed")
         candidates = ((f, _extract_dir(appfile, f)) for f in files)
         kind, arg = page_target(page, apps_root, candidates)
         logger.info("job banner %s clicked → %s %s", identifier, kind, arg)

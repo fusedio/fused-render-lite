@@ -418,9 +418,13 @@ def _usage(bot, sess: TaskSession, ev: dict, ok: bool) -> None:
         cost = max(0.0, float(total) - sess.cost_seen)  # the CLI reports the session's running total
         sess.cost_seen = max(sess.cost_seen, float(total))
     usage = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+    # The CLI splits input into fresh / cache-write / cache-read tokens; the
+    # sum is the context the turn actually carried (docs §6: measured, not guessed).
+    parts = [usage.get(k) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    in_tok = sum(p for p in parts if isinstance(p, (int, float))) if any(isinstance(p, (int, float)) for p in parts) else None
     try:
         store.usage_log(bot.id, sess.model, getattr(bot, "task_origin", "manual"), bot.meta.get("task") or sess.task, ok,
-                        name=bot.meta.get("name"), cost=cost, input_tokens=usage.get("input_tokens"))
+                        name=bot.meta.get("name"), cost=cost, input_tokens=in_tok)
     except Exception:  # noqa: BLE001 — the ledger never sinks a task
         pass
 

@@ -7,7 +7,7 @@ import urllib.parse
 
 import pytest
 
-from fused_render_app import appfile, dock_store, editlink, env, jobnotify, launcher, localapps, paths, server, showcase
+from fused_render_app import appfile, env, jobnotify, localapps, paths, server
 from tests.conftest import CALC_PY, ENTRY_HTML, ICON_PNG, ICON_SVG
 
 MARKED = ENTRY_HTML.replace("<title>t</title>", "<title>Calc &amp; Co</title>")
@@ -19,7 +19,6 @@ def stdlib_python(monkeypatch):
     monkeypatch.setattr(env, "base_python", lambda: sys.executable)
     monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
     monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
-    dock_store._icon_cache.clear()
 
 
 @pytest.fixture
@@ -111,11 +110,6 @@ def test_open_in_place_keeps_state_local(client, workspace, app_home):
     # status re-resolves the same folder
     status, _h, body = client.get("/api/open/status?file=" + urllib.parse.quote(app, safe="/"))
     assert status == 200 and json.loads(body)["status"] == "done"
-    # the dock remembers it by folder path, and keeps it across reads
-    apps = dock_store.list_apps()
-    assert [a["file"] for a in apps] == [app]
-    assert apps[0]["name"] == "Calc & Co"
-    assert apps[0]["hasIcon"] is True and apps[0]["hasPreview"] is True
 
 
 def test_open_rejects_a_plain_folder(client, workspace):
@@ -138,69 +132,6 @@ def test_run_resolves_nested_py_to_the_folder(client, workspace, monkeypatch):
     assert status == 200, body
     assert seen["path"] == os.path.join(app, "lib", "deep.py")
     assert seen["app_dir"] == os.path.realpath(app)
-
-
-def test_home_lists_local_then_moves_it_to_recent(client, workspace):
-    app = workspace["app"]
-    status, _h, body = client.get("/api/showcase")
-    data = json.loads(body)
-    assert status == 200
-    assert data["recent"] == []
-    assert data["local_dir"] == str(workspace["local"])
-    assert [r["file"] for r in data["local"]] == [app]
-    row = data["local"][0]
-    assert row["title"] == "Calc Pro" and row["local"] is True
-    assert row["preview"].startswith("/api/dock/preview?file=" + urllib.parse.quote(app, safe="/"))
-    assert app not in [r["file"] for r in data["showcase"]]
-    # the preview URL serves the folder's preview.png
-    status, headers, png = client.get(row["preview"])
-    assert status == 200 and png == ICON_PNG and headers["Content-Type"] == "image/png"
-    # icon too
-    status, _h, svg = client.get("/api/dock/icon?file=" + urllib.parse.quote(app, safe="/"))
-    assert status == 200 and b"<svg" in svg
-    # open it: it leaves the local rail for Recent, keeping the local title
-    assert client.post("/api/open", {"file": app})[0] == 200
-    data = json.loads(client.get("/api/showcase")[2])
-    assert data["local"] == []
-    assert [r["file"] for r in data["recent"]] == [app]
-    rec = data["recent"][0]
-    assert rec["title"] == "Calc Pro" and rec["description"] == "Adds things."
-    assert rec["local"] is True and rec["showcase_id"] is None
-    assert rec["preview"]
-
-
-def test_dock_keeps_a_folder_and_drops_it_when_unmarked(workspace):
-    app = workspace["app"]
-    dock_store.record_open(app, "Calc")
-    assert [a["file"] for a in dock_store.list_apps()] == [app]
-    with open(os.path.join(app, "index.html"), "w", encoding="utf-8") as f:
-        f.write(UNMARKED)
-    assert dock_store.list_apps() == []  # no marked page: gone, like a deleted .fused
-
-
-def test_dock_open_route_accepts_a_folder(client, workspace):
-    app = workspace["app"]
-    status, _h, body = client.post("/api/dock/open", {"file": app})
-    data = json.loads(body)
-    assert status == 200 and data["native"] is False
-    assert data["view"] == "/open?_file=" + urllib.parse.quote(app, safe="/")
-    status, _h, body = client.post("/api/dock/open", {"file": workspace["plain"]})
-    assert status == 400
-
-
-def test_launcher_registry_and_search_include_local(workspace):
-    app = workspace["app"]
-    rows = launcher.registry()
-    mine = [r for r in rows if r["file"] == app]
-    assert len(mine) == 1
-    assert mine[0]["title"] == "Calc Pro" and mine[0]["showcase"] is False
-    assert mine[0]["hasIcon"] is True
-    assert app in [r["file"] for r in launcher.search("calc", rows)]
-    # once in the dock it appears once, with the local title
-    dock_store.record_open(app, "Calc & Co")
-    rows = launcher.registry()
-    assert [r["file"] for r in rows].count(app) == 1
-    assert [r for r in rows if r["file"] == app][0]["title"] == "Calc Pro"
 
 
 def test_folder_readers(workspace):
@@ -240,9 +171,3 @@ def test_symlinked_workspace_agrees_on_one_dir(workspace, tmp_path, monkeypatch)
     assert jobnotify.page_target(page, str(tmp_path / "apps"), candidates) == ("window", via_link)
     # and the other way round: an abspath candidate against a real page
     assert jobnotify.page_target(page, str(tmp_path / "apps"), [(via_link, via_link)]) == ("window", via_link)
-
-
-def test_edit_button_only_for_fused_files(workspace, v2_fused):
-    assert editlink.can_edit(v2_fused) is True
-    assert editlink.can_edit(workspace["app"]) is False
-    assert editlink.can_edit(None) is False

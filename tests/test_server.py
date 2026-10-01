@@ -42,8 +42,11 @@ def test_placeholder_and_open_page(client):
         else:
             assert status == 503 and b"Run scripts/build_shell.sh" in body
         assert headers["Content-Type"].startswith("text/html")
-    status, _, body = client.get("/open" + q(_file="/nope/x.fused"))
-    assert status == 200 and b'"/nope/x.fused"' in body
+    # The old product surface is gone: the `.fused` opener, the showcase home,
+    # the menu-bar dock, the launcher and its settings page.
+    for route in ("/open?_file=/nope/x.fused", "/api/showcase", "/dock", "/launcher",
+                  "/settings", "/api/dock", "/api/launcher"):
+        assert client.get(route)[0] == 404, route
 
 
 def test_embed_route(client, tmp_path):
