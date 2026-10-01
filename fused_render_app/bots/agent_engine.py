@@ -129,6 +129,7 @@ class TaskSession:
         self.tool_uses = 0                   # tool_use blocks read off stdout
         self.steps = 0                       # tool calls handled
         self.ran_calls: dict = {}            # call key -> RESULT text, since the user last spoke
+        self.denied: set = set()             # approval previews the user said no to, since they last spoke
         self.current_result = None
         self.last_label, self.repeats = None, 0
         self.recent: list = []
@@ -692,6 +693,7 @@ def _handle(bot, sess: TaskSession, name: str, args: dict) -> dict:
     for m in bot._drain_inbox():
         notes.append(f"USER INSTRUCTION (mid-task, overrides the task): {m}")
         sess.ran_calls.clear()  # a new instruction may legitimately ask for the same call again
+        sess.denied.clear()     # … or allow what was refused a moment ago
         sess.current_result = None
     sess.steps += 1
     n = sess.steps
@@ -824,6 +826,13 @@ def _act(bot, sess: TaskSession, name: str, args: dict) -> dict:
     why = tools.risk(bot, name, args, obs)
     if why and (bot.meta.get("approval") or "ask") != "auto":
         preview = tools.describe(bot, name, args, obs)
+        if preview in sess.denied:
+            # Seen live: haiku re-issued a denied click one step later ("the task
+            # says to click it"). The user is never asked the same thing twice on
+            # one instruction; a new message from them clears this (see _handle).
+            bot.emit("thought", f"Not asking again: the user already declined to {preview}.")
+            return _result(f"DENIED EARLIER by the user: {preview}. It was not run and the user was not asked again. "
+                           "Do not retry it: do something else, or finish and say what you could not do.", error=True)
         bot.emit("approval", f"About to {preview}. {why} Approve?", detail=preview)
         bot.set_status("waiting")
         _wait_inbox(bot)
@@ -833,6 +842,7 @@ def _act(bot, sess: TaskSession, name: str, args: dict) -> dict:
         bot.set_status("running")
         if not any(YES.match(a) for a in answers):
             bot.emit("system", "Denied; the bot will try something else.")
+            sess.denied.add(preview)
             said = " ".join(f"USER: {a}" for a in answers if not NO.match(a))
             return _result(f"DENIED by the user: {preview}. Do not retry it; " + said)
         pre.append(f"APPROVED by the user: {preview}")

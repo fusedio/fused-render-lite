@@ -1,8 +1,8 @@
-"""Render App's windows — native NSWindows hosting the pages, not browser tabs.
+"""Browser Bots' windows — native NSWindows hosting the pages, not browser tabs.
 
 Before this module the macOS app was a menu-bar process that pushed every
-surface into the default browser: the placeholder, a Finder-opened .fused, a
-Dock click. Now each opens (or focuses) a window of this app: an `NSWindow`
+surface into the default browser. Now each (the Browser Bots page at `/`,
+the Tasks page, an app a page opens) is a window of this app: an `NSWindow`
 whose content view is a `WKWebView` pointed at the one in-process server.
 Any number of windows, all on that one server, sharing one
 `WKWebsiteDataStore` (an app's localStorage is one set across windows, and
@@ -95,12 +95,12 @@ from WebKit import (
     WKWebViewConfiguration,
 )
 
-from fused_render_app import __version__, appfile, editlink, paths, webnotify, window_policy
+from fused_render_app import __version__, appfile, paths, webnotify, window_policy
 from fused_render_app.cli import open_url
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "Render App"
+APP_NAME = "Browser Bots"
 DEFAULT_SIZE = (1200, 800)
 MIN_SIZE = (560, 360)
 # Rides on WebKit's own UA so a page can tell "inside the app" from "a browser".
@@ -116,11 +116,10 @@ def _nsurl(url: str):
 
 
 def app_file_of(url: str | None) -> str | None:
-    """The absolute .fused path a window URL is showing (``/open?_file=…``),
-    or None for the launcher and everything else. `/open` keeps `_file` in
-    the address for the life of the app page (the app itself runs in an
-    iframe below it), so this is a stable identity for the window — the menu
-    bar Dock's running dot and focus-or-open key on it."""
+    """The absolute app path a window URL names (``/open?_file=…``), or None
+    for the Browser Bots page and everything else. The ``/open`` page is
+    gone, so today every window answers None; kept because `jobnotify`'s
+    banner click and `focus_or_open` key windows on it."""
     if not url:
         return None
     try:
@@ -284,7 +283,6 @@ class _WebDelegate(NSObject):
                 # Plain Python attribute, main thread: the server thread reads
                 # it (WindowManager.open_files) without touching WebKit.
                 self._window.app_file = app_file_of(url)
-                self._window.sync_edit_button()
             decision(WKNavigationActionPolicyAllow)
         elif verdict == "download":
             decision(WKNavigationActionPolicyDownload)
@@ -552,19 +550,14 @@ class _Window:
             self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
 
     def _add_titlebar_button(self) -> None:
-        """"Edit", "Open in Browser" and "Home" buttons at the right end of
-        the title bar — Home rightmost, Browser to its left, Edit leftmost.
+        """An "Open in Browser" button at the right end of the title bar.
 
         A titlebar accessory keeps the standard titled window (title stays
         centred, traffic lights untouched) — no toolbar row, no
-        full-size-content-view mask. Same actions as the ⌘⇧E / ⌘⇧L / ⌘⇧H
-        menu items. Edit only means something for a window showing a
-        ``.fused``: it is disabled on Home (`sync_edit_button`).
+        full-size-content-view mask. Same action as the ⌘⇧L menu item.
         """
         specs = (  # left to right
-            ("square.and.pencil", "Edit", "Edit in fused-render (⌘⇧E)", b"editInFusedRender:"),
             ("safari", "Open in Browser", "Open in Browser (⌘⇧L)", b"openInBrowser:"),
-            ("house", "Home", "Home (⌘⇧H)", b"goHome:"),
         )
         buttons = []
         for symbol, desc, tip, action in specs:
@@ -577,8 +570,6 @@ class _Window:
             button.setControlSize_(NSControlSizeLarge)
             button.sizeToFit()
             buttons.append(button)
-        self.edit_button = buttons[0]
-        self.sync_edit_button()
         gap = 6   # between buttons
         pad = 10  # breathing room from the window's right edge
         bh = max(b.frame().size.height for b in buttons)
@@ -598,14 +589,6 @@ class _Window:
         vc.setView_(holder)
         vc.setLayoutAttribute_(NSLayoutAttributeTrailing)
         self.ns.addTitlebarAccessoryViewController_(vc)
-
-    def sync_edit_button(self) -> None:
-        """Edit follows the page: enabled while the window shows a ``.fused``,
-        disabled on Home. Called at creation and on every main-frame
-        navigation (`app_file` moves with the page)."""
-        button = getattr(self, "edit_button", None)
-        if button is not None:
-            button.setEnabled_(editlink.can_edit(self.app_file))
 
     def _place(self) -> None:
         """Size and position the new window.
@@ -758,17 +741,6 @@ class _MenuTarget(NSObject):
     def newWindow_(self, _s):
         self._m.open(self._m.home_url)
 
-    def openDocument_(self, _s):
-        panel = NSOpenPanel.openPanel()
-        panel.setCanChooseFiles_(True)
-        panel.setCanChooseDirectories_(False)
-        panel.setAllowsMultipleSelection_(True)
-        panel.setAllowedFileTypes_(["fused"])
-        panel.setTitle_(f"Open in {APP_NAME}")
-        if panel.runModal() == NSModalResponseOK:
-            for u in panel.URLs():
-                self._m.open_file(str(u.path()))
-
     def reload_(self, _s):
         if (w := self._m.key()) is not None:
             w.webview.reload()
@@ -781,50 +753,12 @@ class _MenuTarget(NSObject):
         if (w := self._m.key()) is not None:
             w.webview.goForward()
 
-    def goHome_(self, _s):
-        if (w := self._m.key()) is not None:
-            w.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(self._m.home_url)))
-        else:
-            self._m.open(self._m.home_url)
-
     def showTasks_(self, _s):
         self._m.show_tasks()
 
     def openInBrowser_(self, _s):
         w = self._m.key()
         webbrowser.open((w and w.current_url()) or self._m.home_url)
-
-    def editInFusedRender_(self, _s):
-        """Hand the front window's ``.fused`` to fused-render for editing
-        (title-bar Edit, ⌘⇧E). fused-render clones it into its workspace and
-        opens the copy; nothing here touches the file. Without fused-render
-        installed, offer its latest DMG instead."""
-        w = self._m.key()
-        app_file = w.app_file if w is not None else None
-        if not editlink.can_edit(app_file):
-            return  # Home, or no window: the button is disabled there anyway
-        workspace = NSWorkspace.sharedWorkspace()
-        handler = workspace.URLForApplicationToOpenURL_(_nsurl(editlink.PROBE_URL))
-        if handler is None:
-            logger.info("no handler for %s://; offering the fused-render download", editlink.SCHEME)
-            self._offer_fused_render_download()
-            return
-        url = editlink.edit_url(app_file)
-        logger.info("edit in fused-render (%s): %s", handler.path(), url)
-        if not workspace.openURL_(_nsurl(url)):
-            logger.warning("NSWorkspace refused %s", url)
-            self._offer_fused_render_download()
-
-    def _offer_fused_render_download(self) -> None:
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("fused-render is not installed")
-        alert.setInformativeText_(
-            "Editing an app needs fused-render, the full editor. Download and "
-            "install the latest version, then click Edit again.")
-        alert.addButtonWithTitle_("Download fused-render")
-        alert.addButtonWithTitle_("Cancel")
-        if alert.runModal() == NSAlertFirstButtonReturn:
-            _open_external(editlink.download_url())
 
     def copyUrl_(self, _s):
         w = self._m.key()
@@ -932,13 +866,10 @@ class WindowManager:
         win.show()
         return win
 
-    def open_file(self, fs_path: str) -> _Window:
-        return self.open(open_url(self.port, fs_path))
-
     def reopen(self) -> None:
         """A macOS Dock-icon click on the running app: the front window if
         there is one (whatever it shows — the user put it there), else a
-        fresh Home window."""
+        fresh Browser Bots window."""
         front = self.front()
         if front is not None:
             front.show()
@@ -962,9 +893,9 @@ class WindowManager:
         self.open(self.tasks_url)
 
     def show_home(self) -> None:
-        """Dock semantics for the Home tile: a window already showing Home
-        (no .fused file) comes to the front — the key/front one if several —
-        otherwise a fresh Home window opens, even if app windows are open."""
+        """The menu-bar "Open in app": a window not showing an app file (the
+        Browser Bots page, Tasks, …) comes to the front — the key/front one
+        if several — otherwise a fresh Browser Bots window opens."""
         homes = [w for w in self._windows if not w.app_file]
         if homes:
             win = homes[-1]
@@ -979,7 +910,7 @@ class WindowManager:
     def has_windows(self) -> bool:
         return bool(self._windows)
 
-    # ---- what the menu-bar Dock asks (see menubar_dock.py, server.native_hooks)
+    # ---- app-file windows (jobnotify's banner click, server.native_hooks) ---
 
     def open_files(self) -> set[str]:
         """The .fused files currently showing in a window. Safe from ANY
@@ -996,20 +927,15 @@ class WindowManager:
         return None
 
     def focus_or_open(self, fs_path: str) -> _Window:
-        """Dock semantics: an app already open comes to the front (its most
-        recently used window if several), otherwise it opens fresh."""
+        """An app already open comes to the front (its most recently used
+        window if several). Otherwise the Browser Bots window: there is no
+        page that opens a .fused any more."""
         win = self.window_for(fs_path)
         if win is not None:
             win.show()
             return win
-        return self.open_file(fs_path)
-
-    def choose_file(self) -> None:
-        """The Dock's "Open…" slot: pick .fused files. The tray is a
-        non-activating panel, so this app may not be active when the click
-        lands — activate first or the modal panel opens behind other apps."""
-        NSApp.activateIgnoringOtherApps_(True)
-        self._menu_target.openDocument_(None)
+        self.show_home()
+        return self.front()
 
     def front(self) -> _Window | None:
         return self.key() or (self._windows[-1] if self._windows else None)
@@ -1093,7 +1019,6 @@ def _build_main_menu(target) -> NSMenu:
 
     submenu("File", [
         item("New Window", b"newWindow:", "n"),
-        item("Open…", b"openDocument:", "o"),
         sep(),
         item("Close Window", b"performClose:", "w", tgt=None),
         sep(),
@@ -1117,9 +1042,7 @@ def _build_main_menu(target) -> NSMenu:
         item("Reload Page", b"reload:", "r"),
         item("Back", b"goBack:", "["),
         item("Forward", b"goForward:", "]"),
-        item("Home", b"goHome:", "H", CMD | _SHIFT),
         sep(),
-        item("Edit in fused-render", b"editInFusedRender:", "E", CMD | _SHIFT),
         item("Open in Browser", b"openInBrowser:", "L", CMD | _SHIFT),
         item("Copy URL", b"copyUrl:", "C", CMD | _SHIFT),
         sep(),

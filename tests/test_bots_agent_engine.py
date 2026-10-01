@@ -415,6 +415,23 @@ def test_risky_click_denied(server, fake_cli, monkeypatch):
     assert any(e["role"] == "system" and e["text"].startswith("Denied") for e in bot.events)
 
 
+def test_denied_click_is_not_asked_again(server, fake_cli, monkeypatch):
+    """Seen live: the model re-issued a denied click one step later. The second
+    identical call is refused without a second card; a new user message clears it."""
+    bot = FakeBot()
+    t = start(bot, [{"tool": "goto", "args": {"url": "https://shop.test/"}},
+                    {"tool": "click", "args": {"ref": "sb2"}},
+                    {"tool": "click", "args": {"ref": "sb2"}},
+                    {"result": "Did not buy."}], monkeypatch)
+    assert bot.wait_event("approval")
+    bot.say("no")
+    finish(t)
+    assert ("click", "sb2", "Buy now") not in bot.browser.calls
+    assert sum(1 for e in bot.events if e["role"] == "approval") == 1
+    results = [r["result"] for r in fake_cli("call")]
+    assert any(r.startswith("DENIED EARLIER by the user") for r in results)
+
+
 def test_auto_approval_skips_the_gate(server, fake_cli, monkeypatch):
     bot = FakeBot()
     bot.meta["approval"] = "auto"

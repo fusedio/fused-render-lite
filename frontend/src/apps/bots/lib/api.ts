@@ -60,6 +60,7 @@ export interface Routine {
   next?: number;
   last?: number;
   last_result?: string;
+  last_message?: string;
   fails?: number;
 }
 
