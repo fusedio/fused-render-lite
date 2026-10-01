@@ -14,6 +14,7 @@ CURRENT RESULT block, VISITED PAGES) is exactly OpenBot's `Bot._run`.
     run(bot, task, label)        the task thread's body
     _prompt(bot, task, …)        one step's user prompt
     _parse(raw)                  the model's reply -> the action dict, or None
+    _repair(d)                   a field filed under the wrong key -> where the action reads it
 """
 from __future__ import annotations
 
@@ -184,7 +185,7 @@ def run(bot, task, label=None):
                     raise
                 time.sleep(2)
                 continue
-            decision = _parse(raw)
+            decision = _repair(_parse(raw))
             if not decision:
                 # Keep the offending reply: the relay does not log it, so this
                 # file is the only place the actual text can be read back later.
@@ -474,6 +475,34 @@ def _prompt(bot, task, history, obs, visited=None, past=None, result=None):
             f"INTERACTIVE ELEMENTS ({len(els)}):\n" + ("\n".join(el_lines) or "(none)") +
             f"\n\nVISIBLE TEXT:\n{text}\n\nRespond with the JSON for your next single action "
             f"(plain text, no tool calls; actions goto/click/type/press/select/hover/scroll/wait/read/back/tab/upload/save/tool/py/remember/learn/offer/show/build/done/ask are available).")
+
+
+# A bare web address: a scheme, or "www.", or host.tld with an optional path.
+_URLISH = re.compile(r"^(?:https?://\S+|www\.\S+|[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?)$", re.I)
+
+
+def _repair(d):
+    """Put a field the model filed under the wrong key back where the action reads it.
+
+    Small local models (Gemma 4 E4B) answer `goto` with the address under `"to"`
+    — the schema line right above `"url"` — or inside `args`, every single time:
+    the step fails with "no url", the model repeats itself, and the stuck
+    detector ends the task. Only an empty `url` on a `goto` / `tab new` is
+    filled, and only from a value that IS a web address, so `to` keeps meaning
+    a contact for `text` / `texts`."""
+    if not isinstance(d, dict):
+        return d
+    act = str(d.get("action") or "").strip().lower()
+    if act == "goto" or (act == "tab" and str(d.get("tab") or "").strip().lower() == "new"):
+        if not str(d.get("url") or "").strip():
+            args = d.get("args") if isinstance(d.get("args"), dict) else {}
+            for v in (args.get("url"), d.get("to"), d.get("href"), d.get("link"), d.get("text"),
+                      d.get("value"), d.get("name"), args.get("to")):
+                if isinstance(v, str) and _URLISH.match(v.strip()):
+                    v = v.strip()
+                    d["url"] = v if re.match(r"^https?://", v, re.I) else "https://" + v
+                    break
+    return d
 
 
 def _parse(raw):

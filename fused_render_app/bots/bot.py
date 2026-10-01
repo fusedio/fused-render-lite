@@ -632,8 +632,18 @@ class Bot:
 
         def go():
             ai = _fused_ai()
-            if not self._ensure_model_ready(ai, ""):
-                return
+            alias = self.meta.get("model") or DEFAULT_MODEL
+            real = LOCAL_MODELS.get(alias)
+            if real and alias not in self.model_ready:
+                info = self._local_model_info(ai, real)
+                if info is None or not info.get("downloaded"):
+                    # A local model not on disk yet: no greeting. The "download
+                    # first?" question belongs to the first task — asked here it
+                    # would block this thread, and `send` would hand the user's
+                    # first task to it as the answer (and swallow it).
+                    self.set_status("idle", note="")
+                    return
+                self.model_ready.add(alias)
             self.set_status("idle", note="")
             text = None
             try:

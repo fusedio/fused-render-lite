@@ -36,6 +36,33 @@ def test_parse_rejects_non_objects(raw):
     assert _parse(raw) is None
 
 
+@pytest.mark.parametrize("d,url", [
+    # what Gemma 4 E4B actually sends for "go to https://example.com"
+    ({"action": "goto", "to": "https://example.com", "seconds": 0, "message": ""}, "https://example.com"),
+    ({"action": "goto", "args": {"url": "https://a.test/x"}}, "https://a.test/x"),
+    ({"action": "goto", "text": "www.example.com"}, "https://www.example.com"),
+    ({"action": "tab", "tab": "new", "to": "example.org/page?q=1"}, "https://example.org/page?q=1"),
+    ({"action": "goto", "url": "https://kept.test", "to": "https://other.test"}, "https://kept.test"),
+])
+def test_repair_moves_a_misfiled_url(d, url):
+    assert steps_engine._repair(d)["url"] == url
+
+
+@pytest.mark.parametrize("d", [
+    {"action": "text", "to": "Mom", "text": "hi"},              # `to` is a contact here
+    {"action": "texts", "to": "+15551234567"},
+    {"action": "goto", "to": "the example page"},              # not an address: left for "no url"
+    {"action": "tab", "tab": "switch", "to": "https://a.test"},
+])
+def test_repair_leaves_other_actions_alone(d):
+    before = dict(d)
+    assert steps_engine._repair(d) == before
+
+
+def test_repair_passes_none_through():
+    assert steps_engine._repair(None) is None
+
+
 def test_system_prompt_fills_the_apps_root(tmp_path, monkeypatch):
     monkeypatch.setenv("FUSED_RENDER_DIR", str(tmp_path / "ws"))
     sp = steps_engine.system_prompt()
@@ -241,6 +268,112 @@ def test_a_denied_click_does_not_run(steps_bot, monkeypatch):
     assert "DENIED by the user: click \"Buy now\". Do not retry it; USER: no, just check the price" not in ai.calls[1][0]  # _NO drops the no-line
     assert "DENIED by the user: click \"Buy now\"" in ai.calls[1][0]
     assert evs[-1]["role"] == "done"
+
+
+# ---- the local tier: greet, the download question, a cold model -----------------
+class FakeModels:
+    """`fused_ai.models`: a catalog that knows the local-4b repo, and a download."""
+
+    def __init__(self, downloaded=False):
+        self.downloaded = downloaded
+        self.downloads = []
+
+    def catalog(self):
+        return {"capabilities": [{"capability": "text-generation", "models": [
+            {"id": botmod.LOCAL_MODELS["local-4b"], "size_gb": 5.2, "downloaded": self.downloaded}]}]}
+
+    def download(self, model_id, capability=None, on_progress=None, timeout=None):
+        self.downloads.append((model_id, capability))
+        for done in (0, 40, 100):
+            on_progress({"id": "job-1", "state": "running", "done": done, "total": 100})
+        self.downloaded = True
+        return {"id": "job-1", "state": "done"}
+
+
+class _Loading(Exception):
+    type = "model_loading"
+
+
+def _local(b, ai):
+    b.meta["model"] = "local-4b"
+    b.save()
+    ai.models = FakeModels()
+    return ai
+
+
+def test_greet_on_an_undownloaded_local_model_asks_nothing(steps_bot, monkeypatch):
+    b = steps_bot
+    ai = _local(b, FakeAI([]))
+    monkeypatch.setattr(botmod, "_fused_ai", lambda: ai)
+    b.greet()
+    b.thread.join(5)
+    assert not b.thread.is_alive()
+    assert _events(b) == [] and ai.calls == [] and ai.models.downloads == []
+    assert b.meta["status"] == "idle"
+    # ...so the user's first message starts a task instead of answering a hidden question
+    b.send("what is on example.com?")
+    assert _wait_for(lambda: any(e["role"] == "question" for e in _events(b)))
+    assert b.engine == "steps" and b.meta["task"] == "what is on example.com?"
+
+
+def test_greet_on_a_downloaded_local_model_says_hi(steps_bot, monkeypatch):
+    b = steps_bot
+    ai = _local(b, FakeAI(["Hi, I'm Shopper."]))
+    ai.models.downloaded = True
+    monkeypatch.setattr(botmod, "_fused_ai", lambda: ai)
+    b.greet()
+    b.thread.join(5)
+    assert [(e["role"], e["text"]) for e in _events(b)] == [("done", "Hi, I'm Shopper.")]
+    assert "local-4b" in b.model_ready
+
+
+def test_local_task_downloads_on_yes_then_waits_for_a_cold_model(steps_bot, monkeypatch):
+    b = steps_bot
+    ai = _local(b, FakeAI([
+        json.dumps({"thought": "Opening it.", "action": "goto", "url": "https://example.com"}),
+        json.dumps({"thought": "Got it.", "action": "done", "message": "The title is Example Domain."}),
+    ]))
+    loads = []
+    real_text = ai.text
+
+    def text(prompt, **kw):  # the first call after the download finds the model still loading
+        if not loads:
+            loads.append(1)
+            raise _Loading("model is loading")
+        return real_text(prompt, **kw)
+    ai.text = text
+    monkeypatch.setattr(botmod, "_fused_ai", lambda: ai)
+    monkeypatch.setattr(botmod, "MODEL_LOADING_SLEEP_S", 0)
+    b.start_task("title of example.com")
+    assert _wait_for(lambda: b.asking)
+    q = next(e for e in _events(b) if e["role"] == "question")
+    assert q["text"] == "This bot's model needs to download (~5.2 GB) before it can run locally. Download it now?"
+    assert q["options"] == ["Download now", "Cancel"] and b.meta["status"] == "waiting"
+    b.send("Download now")
+    b.thread.join(15)
+    assert not b.thread.is_alive()
+    assert ai.models.downloads == [(botmod.LOCAL_MODELS["local-4b"], "text-generation")]
+    evs = _events(b)
+    sys_lines = [e["text"] for e in evs if e["role"] == "system"]
+    assert sys_lines == ["Task started: title of example.com", "Downloading model… 0%", "Downloading model… 40%",
+                         "Downloading model… 100%", "Model downloaded.", "Local model is loading into memory; waiting…"]
+    assert [e["text"] for e in evs if e["role"] == "action"] == ["goto https://example.com"]
+    assert evs[-1]["role"] == "done" and evs[-1]["text"] == "The title is Example Domain."
+    assert b.meta.get("dl_pct") is None and b.meta["status"] == "idle"
+    # every model call resolved the alias to the repo id
+    assert {kw["model"] for _, kw in ai.calls} == {botmod.LOCAL_MODELS["local-4b"]}
+
+
+def test_local_task_cancel_does_not_download(steps_bot, monkeypatch):
+    b = steps_bot
+    ai = _local(b, FakeAI([]))
+    monkeypatch.setattr(botmod, "_fused_ai", lambda: ai)
+    b.start_task("anything")
+    assert _wait_for(lambda: b.asking)
+    b.send("Cancel")
+    b.thread.join(5)
+    assert ai.models.downloads == [] and ai.calls == []
+    assert _events(b)[-1]["text"].startswith("OK, I won't download the model.")
 
 
 def test_bad_json_three_times_errors_the_task(steps_bot, monkeypatch):

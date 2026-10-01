@@ -571,8 +571,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = self._json_body()
         page = urllib.parse.unquote(self.headers.get("X-Fused-Page") or "")
+        # A model worker reports its own download/load progress here under a
+        # reserved `sys:` id that pages may not write. `X-Fused-Worker` carries
+        # the token the supervisor passed into that worker's environment; only
+        # an exact match against a LIVE worker unlocks the prefix (upstream
+        # routers/jobs.py). Without it every byte tick of a weights fetch was
+        # refused, the row went `stalled`, and `fused_ai.models.download`
+        # gave up on a download that was still running.
+        from fused_render_app.ai import supervisor
+        is_worker = supervisor.is_worker_token(self.headers.get("X-Fused-Worker") or "")
+        if not page and is_worker and isinstance(body, dict) and isinstance(body.get("page"), str):
+            page = body["page"]
         try:
-            self._json(jobs.upsert(body if body is not None else {}, page=page))
+            self._json(jobs.upsert(body if body is not None else {}, page=page, server=is_worker))
         except jobs.JobError as exc:
             self._error(str(exc))
 
