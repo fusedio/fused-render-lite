@@ -478,6 +478,27 @@ def test_message_after_last_tool_gets_its_own_turn(server, fake_cli, monkeypatch
     assert bot.events[-1]["role"] == "done"
 
 
+def test_py_app_without_file_puts_the_skill_in_the_result(server, fake_cli, monkeypatch):
+    """The first message is sent once, so a SKILL.md that `py app` loads mid-task
+    must reach the model in that call's result (the steps engine re-renders
+    APP SKILLS instead)."""
+    bot = FakeBot()
+    bot.py_ref = lambda d: ("/apps/ledger" if d.get("app") == "ledger" else None, str(d.get("file") or ""), d.get("args") or {})
+    bot.run_py = lambda d: ("py ledger", "RESULT:\nLoaded ledger's SKILL.md. Callable files: totals.py."
+                            if not d.get("file") else "RESULT:\n{\"total\": 3}")
+    mounted = []
+    monkeypatch.setattr(apptools, "skill_section",
+                        lambda dirs: mounted.append(list(dirs)) or "\n\nAPP SKILLS (...):\n=== ledger ===\n## totals.py\nargs: none")
+    run_task(bot, [{"tool": "py", "args": {"app": "ledger"}},
+                   {"tool": "py", "args": {"app": "ledger", "file": "totals.py"}},
+                   {"result": "Total 3."}], monkeypatch)
+    calls = fake_cli("call")
+    assert "Loaded ledger's SKILL.md" in calls[0]["result"] and "=== ledger ===\n## totals.py" in calls[0]["result"]
+    assert "=== ledger ===" not in calls[1]["result"]  # a file run carries only its value
+    assert [m for m in mounted if m] == [["/apps/ledger"]]  # (the first message mounts [] here)
+    assert [e["text"] for e in bot.events if e["role"] == "action"] == ["py ledger", "py ledger"]
+
+
 def test_screenshot_returns_an_image(server, fake_cli, monkeypatch):
     bot = FakeBot()
     run_task(bot, [{"tool": "goto", "args": {"url": "https://shop.test/"}},

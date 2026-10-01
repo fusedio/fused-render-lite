@@ -817,6 +817,18 @@ def _offer(bot, sess: TaskSession, args: dict):
     return _result("\n".join(history) or "offer -> no answer")
 
 
+def _loaded_skill(bot, args: dict) -> list:
+    """`py app` with no file loaded an app's SKILL.md. The steps engine re-renders
+    its prompt every step, so APP SKILLS grows there; here the first message is
+    sent once, so the skill rides on this result instead (else the model is told
+    the files exist but never sees their args)."""
+    app_dir, file, _ = bot.py_ref(args)
+    if not app_dir or file:
+        return []
+    sec = _call(lambda: apptools.skill_section([app_dir]), "").strip()
+    return [sec] if sec else []
+
+
 def _act(bot, sess: TaskSession, name: str, args: dict) -> dict:
     obs = sess.last_obs if sess.last_obs is not None else _observe(bot, sess)
     ckey = tools.call_key(bot, name, args)
@@ -871,6 +883,8 @@ def _act(bot, sess: TaskSession, name: str, args: dict) -> dict:
     bot.emit("action", label, result=result[:1500] if name in ("read", "tool", "py") else result[:400], thumb=thumb)
 
     parts = pre + [result]
+    if name == "py" and result.startswith("RESULT:"):
+        parts.extend(_loaded_skill(bot, args))
     if ckey is not None and result.startswith("RESULT:"):
         sess.ran_calls[ckey] = result
         sess.current_result = {"label": label, "args": args.get("args") if isinstance(args.get("args"), dict) else {},
