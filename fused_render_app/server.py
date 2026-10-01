@@ -105,6 +105,8 @@ from fused_render_app.routes import drafts as drafts_routes
 from fused_render_app.routes import queue_events as queue_events_routes
 from fused_render_app.routes import schedule as schedule_routes
 from fused_render_app.routes import tasks as tasks_routes
+from fused_render_app.bots import routes as bots_routes  # noqa: E402
+import fused_render_app.bots.registry as bots_registry  # noqa: E402
 
 AI_ROUTER = APIRouter()
 AI_ROUTER.include_router(ai_relay.router)
@@ -121,6 +123,8 @@ AI_ROUTER.include_router(queue_events_routes.router)
 AI_ROUTER.include_router(schedule_routes.router)
 AI_ROUTER.include_router(drafts_routes.router)
 AI_ROUTER.include_router(claude_artifacts_routes.router)
+# Browser Bots: /api/bots/* and /api/apps/* (docs/BOT-APP.md §3).
+AI_ROUTER.include_router(bots_routes.router)
 
 logger = logging.getLogger(__name__)
 
@@ -1297,7 +1301,8 @@ def start_ai() -> None:
                      ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
                      ("background-apps", _start_background_apps),
                      ("tasks", _start_tasks),
-                     ("user-plugin", _start_user_plugin)):
+                     ("user-plugin", _start_user_plugin),
+                     ("bots", bots_registry.start)):
         try:
             fn()
         except Exception:  # noqa: BLE001
@@ -1308,6 +1313,10 @@ def stop_ai() -> None:
     """Evict resident models (kills their worker processes), the warm Claude
     instance, and every background-app daemon (fused.daemon). Called on quit."""
     _bg_shutdown.set()
+    try:
+        bots_registry.shutdown()  # every bot's task and Chrome
+    except Exception:  # noqa: BLE001
+        logger.exception("bots shutdown failed")
     remove_server_json()
     try:
         engine_host.stop_all()
