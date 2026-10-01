@@ -115,9 +115,18 @@ entry (`bots.html`).
   and the menu-bar "Open in app" show `/`. A Finder or `render-app://` open of
   a `.fused` is logged and shows the Browser Bots window; the document type
   and URL scheme stay registered for now.
-- **Updates**: the in-app updater still checks and can install
-  (`/api/update*`), but its banner lived on the removed home page, so no page
-  shows it yet.
+- **Updates**: the in-app updater (`/api/update*`) shows its banner on the
+  Browser Bots page (Update / Cancel / Restart / Retry;
+  `FUSED_RENDER_APP_UPDATE_DEV_VERSION` lets a dev-manager run show it).
+  Fixed in the packaged app: every update check failed with
+  `CERTIFICATE_VERIFY_FAILED` because Python 3.12's HTTPSHandler loads the
+  CA bundle when an opener is *built*, and two openers were built before
+  `paths.fix_process_env()` repaired py2app's dangling `SSL_CERT_FILE` (the
+  updater's at import, urllib's global one on the launcher's health probe).
+  The updater now builds its opener per call, `fix_process_env()` also
+  drops urllib's global opener, and the launcher repairs the environment
+  before its first request. The same frozen store would have broken hub
+  metadata and model downloads from the server process.
 
 ## 0.10.3
 

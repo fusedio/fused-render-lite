@@ -68,11 +68,18 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(HttpsOnlyRedirect)
-
-
 def urlopen(url: str, timeout: float):
-    return _opener.open(url, timeout=timeout)
+    """A fresh opener per call, never a module-level one.
+
+    Python 3.12's HTTPSHandler builds its SSLContext — and so loads the CA
+    bundle — when the opener is CONSTRUCTED, not per request. An opener built
+    at import time inside the .app bundle froze a context that had loaded no
+    certificates at all (py2app's bootstrap points SSL_CERT_FILE at a
+    `no-such-file` path until paths.fix_process_env() repairs it, and macapp
+    imports this module before the server starts), so every update check in
+    the packaged app failed with CERTIFICATE_VERIFY_FAILED for the life of
+    the process. A handful of fetches per hour do not need a cached opener."""
+    return urllib.request.build_opener(HttpsOnlyRedirect).open(url, timeout=timeout)
 
 
 def signing_message(version: str, sha256: str) -> bytes:

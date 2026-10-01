@@ -122,6 +122,12 @@ def main() -> None:
     if argv_ignored:
         logger.info("opening .fused files is no longer a feature; ignoring %s", argv_ignored)
 
+    # Before the first urlopen (find_running_server's health probe): py2app's
+    # bootstrap leaves SSL_CERT_FILE pointing at a file that does not exist,
+    # and urllib freezes its CA bundle into the first opener it builds. The
+    # server's own make_server() repeats this; running it here first keeps the
+    # launcher's probe from poisoning every later HTTPS call in the process.
+    paths.fix_process_env()
     existing = find_running_server()
     if existing is not None:
         # Hand over to the RUNNING app: LaunchServices delivers a reopen
