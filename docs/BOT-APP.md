@@ -418,10 +418,12 @@ Argent over CDP; OpenBot open in FusedRender.app in the next tab):
   cold model asks "download now?" from the first task, not the greeting
   (the greeting had swallowed the first message as the answer); download
   progress ticks are accepted from the model worker (they were refused as
-  page writes and the row went stalled); the model's habit of filing
-  goto's address under `to` is repaired before the step runs. The 4.8 GB
-  weights were removed again afterwards (disk), so the first local task on
-  this Mac downloads.
+  page writes and the row went stalled). Seen live too: the model files
+  goto's address under `to` every time, so every goto failed with "no url"
+  and no Gemma browsing run ever completed; the repair that moves it to
+  `url` is unit-tested only — the 4.8 GB weights were removed afterwards
+  (disk), so the first local task on this Mac downloads, and a Gemma task
+  that browses end to end is still unverified.
 - Frontend: 95 bun tests green, `bun run build` green. Bot list, New bot
   dialog (+ Advanced), Settings, row context menu, preview pane with inbox /
   routines / usage strip, live view (screencast, Take over, URL bar
