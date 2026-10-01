@@ -467,8 +467,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
-        if not os.path.isabs(path) or not os.path.isfile(path):
+        if not os.path.isabs(path):
             return self._error(f"no such file: {path}", 404)
+        if not os.path.isfile(path):
+            # An app FOLDER names its entry page: redirect (not serve inline)
+            # so the page's own URL carries the .html path — the runtime
+            # resolves relative .py / rawUrl against it, which a folder would
+            # put one level up. Rest of the query rides along.
+            entry = os.path.join(path, "index.html")
+            if not os.path.isfile(entry):
+                return self._error(f"no such file: {path}", 404)
+            rest = [(k, v) for k, v in urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+                if k != "path"]
+            location = "/render?" + urllib.parse.urlencode([("path", entry), *rest])
+            return self._send(307, b"", "text/plain", {"Location": location})
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             html = f.read()
         injection = '<script src="/static/runtime.js"></script>'
