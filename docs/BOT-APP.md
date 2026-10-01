@@ -108,8 +108,9 @@ POST   /api/bots/<id>/tab             {tab: new|switch|close, url?, index?} -> {
 POST   /api/bots/<id>/attach          {name, data: <base64>}                -> {ok, name}   (8 MB cap)
 POST   /api/bots/<id>/react           {seq, emoji}                          -> {ok, reactions}
 POST   /api/bots/<id>/flag            {pinned?, hidden?, face?}             -> {ok}
-PATCH  /api/bots/<id>                 {name?, model?, effort?, instructions?, memory?, approval?, build_access?,
-                                       encrypt?, imessage_handle?, imessage_to?}  -> {ok}   ("rename" in OpenBot)
+POST   /api/bots/<id>/settings        {name?, model?, effort?, instructions?, memory?, approval?, build_access?,
+                                       encrypt?, imessage_handle?, imessage_to?}  -> {ok}   ("rename" in OpenBot;
+                                       POST because the server has no do_PATCH)
 POST   /api/bots/<id>/profile         {profile}                             -> {ok}   (import a Chrome profile; background)
 POST   /api/bots/<id>/clone           {name?}                               -> {ok, id}
 DELETE /api/bots/<id>                                                       -> {ok}
@@ -120,7 +121,10 @@ GET    /api/bots/<id>/export          -> {ok, name, text}  (transcript as Markdo
 POST   /api/bots/<id>/reveal          {path?}                               -> {ok, path}
 GET    /api/bots/<id>/shot?t=         -> image/png (the latest screenshot; 404 when none)
 GET    /api/bots/<id>/steps/<n>.jpg   -> image/jpeg (a step thumbnail; 404 when gone)
+GET    /api/bots/<id>/tools?token=    -> {tools: [{name, description, inputSchema}]}   (botmcp's roster; section 6)
 POST   /api/bots/<id>/tool            {name, args, token}                   -> {content: [...], isError}   (botmcp only; section 6)
+GET    /api/bots/builds               -> {builds: [{entryId, name, dir, createdAt, doneAt?}]}   (<home>/bots/builds.json)
+POST   /api/bots/builds               {builds: [...]}                       -> {ok}
 
 GET    /api/apps                      -> {root, apps: [{folder, dir, name, desc, tools, skill, icon, mtime}]}
 POST   /api/apps/import               {name, data: <base64>}                -> {dir, folder, files, fusedApp}  (64 MB cap)
@@ -139,7 +143,12 @@ Routes `/`, `/index.html` serve `static/shell-dist/bots.html`. `/tasks`,
 `/chat`, `/explorer/*` keep serving `lite.html` (the Builds iframe and the
 task peek). A `GET /embed?path=<abs html>&…` route serves the page like
 `/render` does (runtime injected) so the apps gallery and cards can frame an
-app without `/explorer/embed`.
+app without `/explorer/embed`. `runtime.js`'s `findTarget()` returns the
+frame's own `window` when `_preview=1` is on its URL, so a gallery
+thumbnail's params never land on the host page's URL (twelve sandboxed
+thumbnails would otherwise fight over `?bot=`); the viewer, the side app and
+the inline card carry no `_preview`, so their params write to the host URL
+exactly as in OpenBot (HOST_KEYS = `bot`, "Copy state" reads them back).
 
 ## 4. Frontend (`frontend/src/apps/bots/`)
 
@@ -251,27 +260,54 @@ Tool table (`tools.py`; names are the MCP tool names, so the model sees
 returns `ok, now at <url>` + a CHANGE REPORT (url/title/dialog diff, N new /
 gone controls by role+name, "nothing visible changed") + the fresh
 observation (elements with refs, text excerpt capped at 3000 chars, TABS,
-POPUP OPEN). `observe` returns the full observation (6000 chars of text).
+POPUP OPEN). Context is the budget: an action result carries the COMPACT view (at most
+40 elements, viewport-first, 1200 chars of text); `observe` returns the full
+observation (160 elements, 6000 chars of text) and is one call away.
 `screenshot` returns the current frame as image content (JPEG, 1280 wide,
 quality 60) and is auto-attached to an action result when the harness sees
 the second repeat of the same action label or a page with fewer than 3
-interactive elements (canvas apps). `read` returns up to 6000 chars.
+interactive elements (canvas apps). `read` returns up to 6000 chars. The
+ledger records `usage.input_tokens` per assistant turn so context growth is
+measured, not guessed; `--autocompact` is left at its default as a net.
 
 Observation = `browser.snapshot()`: `Accessibility.getFullAXTree` on the
 main frame (plus same-process child frames from `Page.getFrameTree`),
 interactive roles + headings/dialogs/tabs/menus/named images, states
-(expanded/checked/selected/disabled/focused), refs `sb<n>` mapped to
-`backendDOMNodeId` for the observation's lifetime (click resolves through
-`DOM.getBoxModel` → real mouse events, with `DOM.scrollIntoViewIfNeeded`
-first), supplemented by the existing `SNAPSHOT_JS` DOM scan for role-less
-`cursor:pointer` clickables and for `<select>` options / file inputs. Falls
-back to `SNAPSHOT_JS` alone when the AX call fails. Cap 160 elements, viewport
+(expanded/checked/selected/disabled/focused). Refs stay MECHANICAL: for each
+kept AX node the snapshot resolves `backendDOMNodeId` with `DOM.resolveNode`
+and stamps `data-sb-ref="sb<n>"` on the element via `Runtime.callFunctionOn`,
+so `_find_js` and every existing click/type/press/select/hover/scroll/upload
+path keep working unchanged. A node `document.querySelector` cannot reach
+(a closed shadow root) keeps its `backendDOMNodeId` in the observation and
+falls back to a `DOM.getBoxModel` centre click with
+`DOM.scrollIntoViewIfNeeded` first (the click path already dispatches real
+mouse events at a computed centre). The existing `SNAPSHOT_JS` DOM scan
+still runs and supplements the AX list with role-less `cursor:pointer`
+clickables, `<select>` options and file inputs; the whole thing falls back
+to `SNAPSHOT_JS` alone when the AX call fails. Cap 160 elements, viewport
 first. The element line format stays OpenBot's (`sb12 button "Sign in" …`).
+
+Spawn details: `--include-partial-messages` is NOT passed (thoughts are
+emitted per assistant text block, not streamed; the flag floods stdout).
+`--replay-user-messages` echoes (user events whose content is text, not
+tool_result) are skipped when building events. Assistant content blocks are
+deduplicated by message id + block index. Effort `low` on a model that
+ignores `--effort` (haiku) gets the relay's trick: a
+`set_max_thinking_tokens: 0` control request right after `system/init`.
+The roster is built per task by the server (`GET /api/bots/<id>/tools`):
+`tool` is omitted when `apptools.available()` is False, `text`/`texts` when
+the bot has no contacts, `upload` when it has no files and no attachments;
+a tool that can only error gets called anyway. The task token is registered
+BEFORE mcp.json is written and the process spawned, because `tools/list`
+fires at connect.
 
 Control flow inside the tools (the harness's job, in the server process):
 
 - Pause: every tool waits on `pause_flag` before and after running.
-- Stop: `interrupt` control request, then SIGTERM after 5 s, then SIGKILL.
+- Stop: set `stop_flag` FIRST (it releases every blocked wait: approval,
+  ask, login, offer), then the `interrupt` control request, then SIGTERM
+  after 5 s, then SIGKILL. The `error_during_execution` result that the
+  interrupt produces is not an error while stopping.
 - Mid-task user messages: drained from `bot.inbox` and appended to the NEXT
   tool result as `USER INSTRUCTION (mid-task, overrides the task): …`; an
   instruction clears the `py`/`tool` one-run ledger as in OpenBot.
@@ -325,13 +361,17 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
 - `mainwindow.py`: drop the Edit and Home title-bar buttons and menu items
   (keep Open in Browser, Tasks ⌘⇧T, Edit menu, Window menu); the window title
   is "Browser Bots".
-- Deleted: `showcase.py`, `showcase/`, `dock_store.py`, `menubar_dock.py`,
-  `launcher.py`, `launcher_panel.py`, `hotkey.py`, `editlink.py`,
-  `localapps.py`, `icon_color.py`, `static/{index,open,dock,launcher,settings}.html`,
-  `static/menubar.png` (check), their tests (`test_showcase`, `test_dock`,
-  `test_launcher`, `test_editlink`, `test_localapps`), `scripts/sync_claude_tasks.py`
-  stays. `appfile.py`/`container.py` stay (importing `.fused` exports in the
-  Apps panel reuses `container`).
+- Deleted (UI surfaces only): `showcase.py`, `showcase/`, `dock_store.py`,
+  `menubar_dock.py`, `launcher.py`, `launcher_panel.py`, `hotkey.py`,
+  `editlink.py`, `icon_color.py`, `static/{index,open,dock,launcher,settings}.html`,
+  their tests (`test_showcase`, `test_dock`, `test_launcher`, `test_editlink`).
+  KEPT as plumbing: `appfile.py`, `container.py`, `localapps.py` (the task
+  peek's `current_apps` and `app_dir_for` use it), `/api/open` (and
+  `test_server.py::test_open_run_and_fs`, which covers `/render`, `/api/run`
+  and `/api/fs/*` through it). `test_placeholder_and_open_page` changes: `/`
+  now serves the bots page. Run `pytest -q` after EACH deletion. Before
+  deleting a module, grep `scripts/setup_py2app.py`, `scripts/build_dmg.sh`
+  and `.github/workflows/*.yml` for it.
 - `README.md` rewritten for the bot app; `STATUS.md` gets a `## 0.11.0`
   section. Version bump to `0.11.0` in `fused_render_app/__init__.py`.
 
