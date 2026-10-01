@@ -13,6 +13,7 @@ users download.
 | version | shipped DMG | Δ vs previous | .app unpacked | what changed |
 | --- | --- | --- | --- | --- |
 | fused-render (full) | ~hundreds of MB | — | ~400 MB installed packages | reference point |
+| 0.10.3 | 45.62 MB (45,619,736 B) | +0.05 MB | 108 MB | fused-render skills + plugin manifest ship in `fused_render_app/skills/` (PR #44); server origin in session prompt (#43); `/render` folder redirect (#46); no packaging change |
 | 0.10.2 | 45.57 MB (45,571,639 B) | +0.00 MB | 108 MB | `/api/fs/list` + `FUSED_RENDER_CLAUDE_BIN` tuple fix (PR #42); no packaging change |
 | 0.10.1 | 45.57 MB (45,568,355 B) | +1.72 MB | 108 MB | Claude sessions/tasks: `templates/claude` + React shell `static/shell-dist/` (bun build) ship in the wheel; `~/Fused/local` folder apps (no packaging change to the Python side) |
 | 0.10.0 | 43.85 MB (43,845,977 B) | +0.41 MB | 103 MB | `fused.capture` native macOS capture (ScreenCaptureKit + AVFoundation) + pyobjc ScreenCaptureKit/AVFoundation frameworks in the `[app]` extra and py2app packages — first packaging change since 0.6.0; title-bar Edit button (editlink.py) |
