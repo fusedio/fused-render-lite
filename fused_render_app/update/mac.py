@@ -61,6 +61,12 @@ STARTUP_DELAY_S = 1.0
 # (`check_only`), so the banner hides its Update button. Never read by a
 # packaged app.
 DEV_MANAGER_ENV = "FUSED_RENDER_APP_UPDATE_DEV_MANAGER"
+# DEV-ONLY, and only honoured together with DEV_MANAGER_ENV: the version the
+# check-only manager PRETENDS to be running, so a source run (whose real
+# `__version__` is the newest) can see the "available" banner against the live
+# manifest. Read only inside start()'s dev-manager branch; a packaged app and a
+# dev run without DEV_MANAGER_ENV never look at it.
+DEV_VERSION_ENV = "FUSED_RENDER_APP_UPDATE_DEV_VERSION"
 NO_AUTO_UPDATE_ENV = "FUSED_RENDER_APP_NO_AUTO_UPDATE"
 # Floor between two checks that actually hit the network. A page may check
 # on its own when the app comes back to the front, and a run of focus flips
@@ -573,14 +579,16 @@ def start() -> UpdateManager | None:
     """Create the singleton and start its background checks. Called once from
     macapp's server bootstrap; idempotent. No-op (returns None) when not
     running from a bundle, unless DEV_MANAGER_ENV asks for a check-only
-    manager."""
+    manager (which DEV_VERSION_ENV may give a pretend current version)."""
     global _manager
     with _manager_lock:
         if _manager is None:
             if bundle_path() is None:
                 if not os.environ.get(DEV_MANAGER_ENV):
                     return None
-                _manager = UpdateManager(bundle=None, check_only=True)
+                pretend = os.environ.get(DEV_VERSION_ENV)
+                _manager = (UpdateManager(bundle=None, check_only=True, current_version=pretend)
+                            if pretend else UpdateManager(bundle=None, check_only=True))
             else:
                 _manager = UpdateManager()
             _manager.start_auto_checks()

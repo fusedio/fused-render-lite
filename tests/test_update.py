@@ -426,6 +426,30 @@ def test_start_is_a_no_op_outside_a_bundle(monkeypatch):
     mac_update.reset_for_tests()
 
 
+def test_dev_version_env_only_applies_to_the_dev_manager(monkeypatch):
+    monkeypatch.setenv(mac_update.NO_AUTO_UPDATE_ENV, "1")
+    # Dev flag + version: the check-only manager pretends to be that version.
+    mac_update.reset_for_tests()
+    monkeypatch.setenv(mac_update.DEV_MANAGER_ENV, "1")
+    monkeypatch.setenv(mac_update.DEV_VERSION_ENV, "0.9.0")
+    try:
+        st = mac_update.start().status()
+        assert st["current_version"] == "0.9.0" and st["check_only"] is True
+    finally:
+        mac_update.reset_for_tests()
+    # Dev flag without the version: the real version.
+    monkeypatch.delenv(mac_update.DEV_VERSION_ENV)
+    try:
+        assert mac_update.start().status()["current_version"] == mac_update.__version__
+    finally:
+        mac_update.reset_for_tests()
+    # Version without the dev flag: ignored, no manager at all outside a bundle.
+    monkeypatch.delenv(mac_update.DEV_MANAGER_ENV)
+    monkeypatch.setenv(mac_update.DEV_VERSION_ENV, "0.9.0")
+    assert mac_update.start() is None and mac_update.manager() is None
+    mac_update.reset_for_tests()
+
+
 # ---- routes -----------------------------------------------------------------
 
 def test_update_routes_without_a_manager(client):
