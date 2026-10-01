@@ -35,12 +35,168 @@
  *     `pending:<entry>` to its session id and whose `done` settles when the
  *     task finishes.
  *
+ * The runtime also carries the shell's appearance theme into every rendered
+ * page: `data-theme` on <html> for pages that opt in with `data-fused-theme`,
+ * and `color-scheme` (browser defaults only) for the rest — the theme block
+ * at the top of the IIFE, copied from fused-render (SPEC §30, D134).
+ *
  * Everything else the full fused-render runtime exposes (fileIndex,
  * snapshot) is NOT
  * supported: touching it throws "<name> is not supported on Render App".
  */
 (function () {
   "use strict";
+
+  // --- Appearance (SPEC §30, D134) -----------------------------------------
+  //
+  // A built-in template that authored a light palette marks its <html> with
+  // `data-fused-theme`; this then keeps `data-theme` on that same element in
+  // step with the shell's appearance setting, which is all its
+  // `:root[data-theme="light"]` block needs. Everything else — every
+  // user-authored .html view, and every built-in view not yet converted — is
+  // left completely alone: no attribute, no signal, CSS stays theirs.
+  //
+  // The opt-in has to be an ATTRIBUTE ON <html>, not a <meta>: this script is
+  // injected at the very top of <head> (server.py `/render`) and is
+  // parser-blocking, so it runs before anything further down the head has been
+  // parsed. That ordering is also why there is no flash — the attribute lands
+  // before the document's own stylesheet, let alone its first paint.
+  //
+  // The theme is READ here rather than pushed in from the shell: reading the
+  // same localStorage key (same origin), a same-origin ancestor's resolved
+  // theme, or failing both this document's own matchMedia
+  // means the shell never has to reach into a view, so a theme change is never
+  // a re-render and can never remount or reload a live iframe. Cross-window
+  // convergence rides the `storage` event, which fires in every other
+  // same-origin browsing context — including this iframe — when the shell
+  // writes the key.
+  //
+  // Must stay in sync with frontend/bots.html (the shell's pre-paint bootstrap
+  // reads the same key and sets `data-theme`); tests/test_bots_theme.py pins
+  // the two spellings of the key together.
+  var THEME_KEY = "fused-render:theme";
+  var DARK_QUERY = "(prefers-color-scheme: dark)";
+
+  // With the preference on System, only a TOP-LEVEL document may ask
+  // matchMedia. Inside an iframe, `prefers-color-scheme` is not the OS: the
+  // browser derives it from the computed `color-scheme` of the parent's
+  // <iframe> element (CSS Color Adjust §"preferred color scheme"). This
+  // script is parser-blocking at the very top of the child's <head>, so in a
+  // nested chain (embed shell → fusedapp template → entry page) it can run
+  // before an ancestor's own color-scheme has been applied — the query then
+  // answers with a transient default, and Chrome does not fire the matchMedia
+  // `change` event when the inherited value settles, so the wrong answer
+  // froze until the next refresh, winning or losing the race at random.
+  // Instead a framed document INHERITS the nearest same-origin ancestor's
+  // already-resolved theme (they run this same script, or are the shell whose
+  // index.html bootstrap sets `data-theme` pre-paint), and the mutation
+  // observer in startTheme keeps it following later flips.
+  // The inherit is race-free where matchMedia was not: an ancestor's copy of
+  // this script is parser-blocking at the top of ITS <head>, and its iframes
+  // are created by content that parses after it — so by the time this child
+  // document exists, every same-origin ancestor already carries `data-theme`
+  // or `style.colorScheme` (the embed shell sets `data-theme` in index.html's
+  // pre-paint bootstrap, likewise before any iframe mounts).
+  //
+  // Returns { theme, win } — `win` is the ancestor the value came from, so
+  // startTheme can observe THAT document for later flips (observing a nearer
+  // non-participating ancestor would freeze the theme on an OS flip).
+  function inheritedTheme() {
+    var w = window;
+    try {
+      while (w.parent !== w) {
+        w = w.parent;
+        var el = w.document.documentElement;
+        var t = el.getAttribute("data-theme") || el.style.colorScheme;
+        if (t === "light" || t === "dark") return { theme: t, win: w };
+      }
+    } catch (e) {
+      /* cross-origin ancestor — stop climbing, resolve on our own */
+    }
+    return null;
+  }
+
+  function resolvedTheme() {
+    var pref = null;
+    try {
+      pref = localStorage.getItem(THEME_KEY);
+    } catch (e) {
+      /* private mode / blocked storage — fall through to the OS preference */
+    }
+    if (pref === "light" || pref === "dark") return pref;
+    var inherited = inheritedTheme();
+    if (inherited) return inherited.theme;
+    try {
+      return window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
+    } catch (e) {
+      return "dark"; // no matchMedia — keep today's appearance
+    }
+  }
+
+  function startTheme() {
+    var root = document.documentElement;
+    if (!root) return;
+    // Two kinds of document, one resolved theme:
+    //
+    //   OPTED IN (`data-fused-theme`) — the attribute goes on, its own
+    //   `:root[data-theme="light"]` block does the rest. Its CSS owns every
+    //   colour it paints.
+    //
+    //   NOT OPTED IN — a user-authored view, or a built-in not yet converted.
+    //   Its CSS still stays entirely its own; what it gets is `color-scheme`,
+    //   which changes no author colour at all — it only tells the browser
+    //   which set of DEFAULTS to use. That matters because the shell paints
+    //   its frames on its own backdrop (styles/base.css), so a document that
+    //   sets no background of its own is transparent over a dark surface while
+    //   its unstyled text stays UA black. Canvas and default text colour are a
+    //   pair and have to flip together: with color-scheme set, the browser
+    //   supplies a dark canvas AND light text, and the page reads exactly as
+    //   it does standalone in a dark-mode browser. A page that DOES set its
+    //   own background is unaffected — author colours always win.
+    // `color-scheme` goes on EVERY document, opted in or not. It changes no
+    // author colour — it only picks which set of browser defaults applies —
+    // and it is the only thing that can paint the canvas correctly before the
+    // document's own stylesheet has been parsed, which is exactly the window
+    // the white flash lived in. (This script is parser-blocking at the top of
+    // <head>, so "before" here means before anything else in the document.)
+    var optedIn = root.hasAttribute("data-fused-theme");
+    var apply = function () {
+      var theme = resolvedTheme();
+      root.style.colorScheme = theme;
+      if (optedIn) root.setAttribute("data-theme", theme);
+    };
+    apply();
+    // Another window changed the setting (a `clear()` reports key === null).
+    window.addEventListener("storage", function (event) {
+      if (event.key === null || event.key === THEME_KEY) apply();
+    });
+    // The OS flipped while the setting is System — including macOS's automatic
+    // sunset switch. Harmless when the setting is pinned: apply() re-reads the
+    // preference, which still wins.
+    try {
+      window.matchMedia(DARK_QUERY).addEventListener("change", apply);
+    } catch (e) {
+      /* no matchMedia — a pinned Light/Dark still works */
+    }
+    // Framed documents inherit their theme (see inheritedTheme) — but a
+    // System-mode OS flip only reaches the top-level document's matchMedia,
+    // and no `storage` event fires for it. Follow the resolving ancestor's
+    // theme by observing the attributes it writes; each frame does this, so
+    // the flip cascades down a nested chain one document at a time.
+    try {
+      var source = inheritedTheme();
+      if (source) {
+        new MutationObserver(apply).observe(source.win.document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-theme", "style"],
+        });
+      }
+    } catch (e) {
+      /* cross-origin parent — matchMedia above is all we have */
+    }
+  }
+
+  startTheme();
 
   // Unsupported API. Any call, and any member access on an
   // unsupported namespace, throws — the page fails loudly at the exact line
