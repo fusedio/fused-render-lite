@@ -69,8 +69,11 @@ export async function saveBuilds(): Promise<void> {
 const panelShown = (): boolean => getState().ui.panel === "builds";
 
 // A task is a build when we recorded it, or when its prompt carries the build marker (adopted into builds.json on sight).
+// A row without an entry id (a bare session) must never match a recorded build whose id is "" — seen live: one such
+// record made EVERY session row a build, and the panel showed the whole task list.
+const sameEntry = (b: BuildRow, t: TaskRow): boolean => !!t.entry_id && b.entryId === t.entry_id;
 export const isBuild = (t: TaskRow): boolean =>
-  builds.some((b) => b.entryId === t.entry_id) || marked(t.title) || (t.messages || []).some((m) => marked(m.body));
+  builds.some((b) => sameEntry(b, t)) || marked(t.title) || (t.messages || []).some((m) => marked(m.body));
 export const mine = (): TaskRow[] => buildRows.filter(isBuild);
 /** The name/folder a build prompt (or its title) carries. */
 export const BUILD_RE = /(?:named|Build) "([^"]+)"(?: in the folder | · (?:new fused-render app|update to the fused-render app) in )(\S+)/;
@@ -84,7 +87,7 @@ export function adoptBuilds(open: boolean = panelShown()): boolean {
   if (seen && open) for (const t of buildRows) if (!seen.has(t.entry_id || "") && !isBuild(t) && near(t)) {
     builds.push({ entryId: t.entry_id || "", name: t.title || "Task", dir: "", createdAt: Date.now() }); changed = true;
   }
-  for (const t of mine()) if (!builds.some((b) => b.entryId === t.entry_id)) {
+  for (const t of mine()) if (!builds.some((b) => sameEntry(b, t))) {
     const m = BUILD_RE.exec([t.title, ...(t.messages || []).map((x) => x.body)].join("\n")) || [];
     builds.push({ entryId: t.entry_id || "", name: m[1] || t.title || "Build", dir: m[2] || "", createdAt: (t.started || Date.now() / 1000) * 1000 }); changed = true;
   }
