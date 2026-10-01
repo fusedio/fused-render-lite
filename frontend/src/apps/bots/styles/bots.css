@@ -1,0 +1,690 @@
+/* Browser Bots (Render App) — generated layout:
+     1. Tailwind + shadcn base (styles/tailwind.css), imported first so everything below wins.
+     2. OpenBot src/app.css, VERBATIM (same tokens on :root / :root[data-theme="light"], same class names), so ported
+        markup matches one to one. Edit OpenBot's file and re-copy rather than editing that section here.
+     3. The port's adjustments (bottom): shadcn token mapping, [data-slot] restyles to OpenBot's look, #root.
+   Imported by src/bots.tsx; never alongside shell.css. */
+@import "../../../styles/tailwind.css";
+
+/* ==================================================================== OpenBot app.css (verbatim) ==== */
+/* Browser Bots — all styles. Loaded by index.html through fused.rawUrl. */
+/* Tokens. Dark = brand: near-black canvas, lime accent. Same names in both blocks. */
+:root       { color-scheme: dark;
+  --bg: #000000; --panel: #0d0d0f; --panel2: #1c1c1e; --card: #262628; --raised: #2c2c2e; --hover: #3a3a3c; --inset: #1c1c1e;
+  --text: #ffffff; --muted: #8e8e93; --line: #1f1f21;
+  --accent: #eafe68; --accent-ink: #0d0d0f; --accent-text: #eafe68; --bubble-user: #3b4030; --bubble-user-ink: #ffffff;
+  --ok: #38d591; --warn: #ffb020; --err: #ff5667; --shadow: 0 12px 40px rgba(0,0,0,.7); }
+:root[data-theme="light"]
+            { color-scheme: light;
+  --bg: #fcfcfc; --panel: #f4f5f1; --panel2: #eaece4; --card: #eef0e8; --raised: #e2e5da; --hover: #d7dbcc; --inset: #f0f1ec;
+  --text: #1b1d21; --muted: #5d6270; --line: #dfe2d8;
+  --accent: #d9f036; --accent-ink: #1b1d21; --accent-text: #66740c; --bubble-user: #1b1d21; --bubble-user-ink: #fcfcfc;
+  --ok: #1f9d5a; --warn: #b7791a; --err: #d13b3b; --shadow: 0 12px 40px rgba(0,0,0,.18); }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; display: flex; flex-direction: column; font-family: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px; line-height: 1.45; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
+button { background: var(--raised); color: var(--text); border: none; border-radius: 999px; padding: 6px 12px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 300; }
+button:hover { background: var(--hover); }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 400; }
+button.primary:hover { filter: brightness(1.06); }
+button.primary:disabled { background: var(--raised); color: var(--muted); opacity: 1; }
+button.primary:disabled:hover { filter: none; }
+button.danger:hover { background: var(--err); color: #fff; }
+input, textarea { font: inherit; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; padding: 8px 12px; }
+input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:focus-visible, textarea:focus-visible { outline: none; }
+b, strong, h1, h2, h3, h4, h5, h6 { font-weight: 400; }  /* nothing on the page goes heavier than 500; browser-default bold reads too heavy */
+::-webkit-scrollbar { width: 8px; height: 8px; } ::-webkit-scrollbar-thumb { background: var(--raised); border-radius: 8px; } ::-webkit-scrollbar-track { background: transparent; }
+.muted { color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+/* Green = in progress. An idle bot shows no dot on its avatar; unread messages use the accent badge on the card's right. */
+.dot.running { background: var(--ok); animation: pulse 1s infinite; }
+.dot.waiting { background: var(--err); animation: pulse 1.4s infinite; }
+.dot.paused  { background: var(--warn); }
+.dot.error   { background: var(--err); }
+.av .dot.idle { display: none; }
+@keyframes pulse { 50% { opacity: .3; } }
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* A button doing slow work (Chrome relaunch) swaps its icon for a spinning ring and stays put until the call settles. */
+button.busy { pointer-events: none; }
+button.busy > svg { display: none; }
+button.busy::before { content: ""; width: 12px; height: 12px; flex: none; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* Columns: --lw/--rw are panel widths (set by the resize handles), --mid the thread's floor, --rmin the preview's; the middle is minmax(0,1fr) so content never pushes the preview off-screen. */
+body { --lw: 280px; --rw: 400px; --mid: 450px; --rmin: 280px; --lweff: min(var(--lw), 40vw); }
+/* .lcol = user collapsed the sidebar; .lfit = the window is too narrow for it, so it collapses itself (before the preview hides). */
+body:is(.lcol, .lfit) { --lweff: 72px; }
+main { flex: 1; display: grid; grid-template-columns: var(--lweff) 6px minmax(0, 1fr) 6px min(var(--rw), 50vw, max(var(--rmin), calc(100% - var(--lweff) - 12px - var(--mid)))); min-height: 0; }
+/* Panels slide open/shut: the tracks animate, so both states keep five of them (the hidden preview is a 0px track, clipped, not display:none). */
+main { transition: grid-template-columns .3s cubic-bezier(.22,1,.36,1); }
+body.dragging main { transition: none; }  /* a drag must track the pointer exactly... */
+body.dragging.lanim main { transition: grid-template-columns .3s cubic-bezier(.22,1,.36,1); }  /* ...except when it snaps the sidebar shut or open: same slide as the button */
+body.lfast main, body.dragging.lfast main, body.lfast.lanim .bot { transition-duration: .1s; }  /* closing the sidebar: quick slide, then the slow icon adjustment */
+/* .rcol = user hid the preview; .rfit = the window is too narrow for sidebar + thread floor + preview floor, so it hides itself. */
+body:is(.rcol, .rfit) main { grid-template-columns: var(--lweff) 6px minmax(0, 1fr) 6px 0px; }
+/* The preview slides, it does not reflow: while it opens or closes, --rwlock (set by lockPreview) pins the section to its open width, so it
+   overflows its shrinking grid track and rides off past the window's right edge as one piece. main clips that overflow. */
+main { overflow: hidden; }
+.preview { min-width: var(--rwlock, 0px); }
+body:is(.rcol, .rfit) .preview { visibility: hidden; transition: visibility 0s .3s; }  /* untabbable once shut; the delay keeps it visible while it slides away */
+body:is(.rcol, .rfit) .gutter.r { background: var(--panel); pointer-events: none; }
+body.rcol .gutter.r { pointer-events: auto; }
+.gutter { cursor: col-resize; position: relative; }
+.gutter::after { content: ""; position: absolute; inset: 0 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+.gutter:hover::after, .gutter.drag::after { background: var(--accent); }
+body.dragging { cursor: col-resize; user-select: none; }
+body.dragging img { pointer-events: none; }
+/* Icons-only sidebar (collapsed, or forced on very narrow windows). */
+body:is(.lcol, .lfit) .bots header h1, body:is(.lcol, .lfit) .bot > div, body:is(.lcol, .lfit) .bot .meta .time { display: none; }
+/* .meta stays in the grid (zero-size) so the unread badge can still sit on the circle's top-right corner. */
+body:is(.lcol, .lfit) .bot .meta { display: contents; }
+body:is(.lcol, .lfit) .bots header { flex-direction: column; gap: 6px; padding: 10px 0 4px; }
+/* Collapsed: expand toggle on top, then a + sized exactly like a bot avatar so it stacks over the list. */
+body:is(.lcol, .lfit) .bots header #lcol { order: 1; }
+body:is(.lcol, .lfit) .bots header #add { order: 2; width: 44px; height: 44px; border-radius: 50%; }
+body:is(.lcol, .lfit) .bots header #add svg { width: 24px; height: 24px; }
+/* Collapsed rows are 60px circles so the hover/selected fill sits concentric with the 44px avatar (min-width, not width: the row hugs the panel while it slides, so it never floats centered mid-way). */
+body:is(.lcol, .lfit) .bot { grid-template-columns: 44px; justify-content: center; min-width: 60px; height: 60px; padding: 8px; margin: 0 auto 2px; border-radius: 50%; }
+body:is(.lcol, .lfit) .bot.sel { background: var(--hover); }  /* brighter than the expanded row's fill, which reads faint behind a lone avatar */
+/* Collapsed rail: no second badge on the circle. Unread turns the status dot itself solid yellow (no pulse), and shows it even on an idle bot. */
+body:is(.lcol, .lfit) .bot .badge { display: none; }
+body:is(.lcol, .lfit) .av .dot.unread { display: block; background: var(--accent); animation: none; }
+body:is(.lcol, .lfit) .bots .group { font-size: 0; padding: 6px; }
+body:is(.lcol, .lfit) .bots .empty { display: none; }  /* "No bots yet" / "No bot matches" cannot fit the 72px rail */
+.ptog { width: 32px; height: 32px; padding: 0; background: transparent; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.ptog:hover { background: var(--raised); color: var(--text); }
+.ptog svg { width: 18px; height: 18px; }
+.ptog .pane { fill: currentColor; opacity: .35; transition: opacity .15s; }
+body:is(.lcol, .lfit) #lcol .pane, body:is(.rcol, .rfit) #rcol .pane { opacity: 0; }
+/* The preview closes from its own chevron; the chat-header toggle only appears while the preview is hidden, to bring it back. */
+body:not(.rcol) #rcol { display: none; }
+main > section { min-width: 0; }
+/* Avatars: an emoji face; shape and color are hashed from the bot name, the mood follows its status. */
+.av { width: 44px; height: 44px; display: flex; flex: none; position: relative; }
+.av.sm { width: 28px; height: 28px; }
+.av svg, #cavt { display: block; width: 100%; height: 100%; overflow: visible; }
+.face, .body, .ribbons { transform-origin: 50px 50px; transform-box: view-box; } .eyeg, .eye, .sparks path { transform-box: fill-box; transform-origin: center; } .eyeg, .eye { fill: #0f172a; }
+.av .dot { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border: 2px solid var(--panel); }
+.av.sm .dot { width: 10px; height: 10px; right: -2px; bottom: -2px; border-color: var(--bg); }
+#cav, #bmface { cursor: pointer; }
+/* Settings avatar: big ringed face above Name; a pencil overlay and an "Edit avatar" label appear on hover. */
+#bmodal .avwrap { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 8px; cursor: pointer; }
+#bmface { width: 72px; height: 72px; padding: 3px; border: 3px solid var(--raised); border-radius: 50%; }
+#bmface::after { content: ""; position: absolute; inset: 0; border-radius: 50%; opacity: 0; transition: .15s; background: rgba(0,0,0,.4) center / 24px no-repeat
+  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z'/%3E%3C/svg%3E"); }
+#bmface:hover::after { opacity: 1; }
+#bmodal .avwrap .hint { font-size: 11px; font-weight: 300; padding: 4px 10px; border-radius: 8px; background: var(--raised); color: var(--text); opacity: 0; transition: .15s; }
+#bmodal .avwrap:hover .hint { opacity: 1; }
+/* Face picker: shapes in the chosen color, then colors; the preview on top plays the mood cycle after each pick. */
+#fmodal .box { width: 340px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+#fmodal .pface { width: 84px; height: 84px; }
+#fmodal .frow { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+#fmodal .frow button { width: 56px; height: 56px; padding: 4px; border-radius: 50%; background: none; outline: 2px solid transparent; outline-offset: 3px; transition: .15s; }
+#fmodal #fcolors button { width: 34px; height: 34px; }
+#fmodal .frow button svg { width: 100%; height: 100%; overflow: visible; display: block; }
+#fmodal .frow button[aria-pressed="true"] { outline-color: var(--text); } #fmodal .frow button:hover { transform: translateY(-2px); }
+#fmodal .row { align-self: stretch; }
+
+/* ---- left: bot list ---- */
+.bots { background: var(--panel); display: flex; flex-direction: column; min-height: 0; container-type: inline-size; }
+.bots header, .chat header, .preview header { display: flex; gap: 8px; align-items: center; padding: 10px 14px; min-height: 56px; }
+.chat header, .preview header { border-bottom: 1px solid var(--line); }
+.bots header h1 { font-size: 0; margin: 0; flex: 1; }  /* label kept for a11y; the panel reads as a list, not a titled pane */
+.bots header button { width: 32px; height: 32px; padding: 0; flex: none; }
+/* The header must never overflow the sidebar (it can be dragged to 180px): the usage pill gives way first, then hides. */
+.bots header { overflow: hidden; }
+.bots header #add { background: var(--raised); color: var(--text); display: inline-flex; align-items: center; justify-content: center; transition: width .3s, height .3s; transition-timing-function: cubic-bezier(.22,1,.36,1); }  /* grows into the rail's 44px circle in step with flipEls */
+/* usage meter: the always-visible answer to "are the bots doing something?" */
+.bots header #usage { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; width: auto; height: 26px; padding: 0 10px; border-radius: 13px; font-size: 11.5px; font-weight: 500; background: var(--inset); color: var(--muted); white-space: nowrap; }
+.bots header #usage:hover { color: var(--text); }
+body:is(.lcol, .lfit) .bots header #usage { display: none; }
+.ustats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 6px; }
+.ustats div { background: var(--inset); border-radius: 12px; padding: 8px 10px; }
+.ustats b { display: block; font-size: 20px; font-weight: 500; }
+.ustats span { font-size: 11px; color: var(--muted); }
+.uh { font-size: 11px; color: var(--muted); margin: 14px 0 6px; }
+.ubars { display: flex; align-items: flex-end; gap: 2px; height: 56px; }
+.ubars i { flex: 1; background: var(--accent); border-radius: 4px 4px 0 0; min-height: 2px; }
+.ubars i.zero { background: var(--line); }
+.ulist .u { display: grid; grid-template-columns: minmax(90px, 1fr) 44px 48px minmax(80px, 1.2fr) 44px 64px; gap: 8px; align-items: center; font-size: 12px; padding: 5px 6px; border-radius: 8px; }
+.ulist .u:not(.uhd)[data-id]:not([data-id=""]) { cursor: pointer; } .ulist .u:not(.uhd)[data-id]:not([data-id=""]):hover { background: var(--panel2); }
+.ulist .uhd { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding-bottom: 2px; border-bottom: 1px solid var(--line); border-radius: 0; margin-bottom: 2px; }
+.ulist .u .name, .ulist .u .last { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ulist .u .n { text-align: right; font-variant-numeric: tabular-nums; } .ulist .u .n.warn { color: var(--err); }
+.ulist .u .last { color: var(--muted); font-size: 11px; }
+.ulist .u.gone .name { color: var(--muted); font-style: italic; }
+.ulist .models { display: flex; gap: 4px; flex-wrap: wrap; }
+.chip { font-style: normal; font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--inset); color: var(--muted); white-space: nowrap; }
+.chip.opus, .chip.fable { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text, var(--text)); }
+#umodal .box { width: 560px; }
+/* Per-bot usage line in the info panel */
+.ustrip { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text); } .ustrip .warn { color: var(--err); }
+.ulist .u .n { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bots header #add svg { width: 20px; height: 20px; }
+.bots header #add:hover { background: var(--hover); box-shadow: inset 0 0 0 1px var(--muted); }
+.bots .search { display: block; position: relative; margin: 0 12px 10px; }
+.bots .search input { width: 100%; background: var(--panel2); border: none; border-radius: 12px; padding: 9px 12px 9px 34px; font-size: 13px; }
+.bots .search input::placeholder { color: var(--muted); }
+.bots .search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
+body:is(.lcol, .lfit) .bots .search { display: none; }
+
+.botlist { flex: 1; overflow-x: hidden; overflow-y: auto; padding: 4px 8px 8px; }  /* never scroll sideways: the rail circles may be wider than the list's inner width */
+/* Row grid: avatar spans both lines; name and time share line one; the subtitle takes the whole second line so the time never crops it. */
+.glide { transition: transform .3s cubic-bezier(.22,1,.36,1); }  /* set by glideRows / flipEls for one move */
+.bot.enter { animation: msg-in .18s cubic-bezier(.22,1,.36,1); }
+.bot { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 12px; row-gap: 1px; align-items: center; width: 100%; padding: 10px; border-radius: 14px; cursor: pointer; margin: 0 auto 2px; position: relative; box-sizing: border-box; }
+/* While the rail collapses/expands (body.lanim, set by applyLayout), rows morph into circles and glide to their new slot alongside the panel slide. */
+body.lanim .bot { transition: padding .3s, border-radius .3s, transform .3s; transition-timing-function: cubic-bezier(.22,1,.36,1); }
+/* Both directions keep the expanded row layout for the whole slide and let the shrinking/growing width clip the text, so closing mirrors opening
+   instead of dropping the text on the first frame. The collapsed rules take over only once body.lanim is lifted, when the row is already a circle. */
+body.lanim .bot { grid-template-columns: 44px minmax(0, 1fr) auto; justify-content: start; height: auto; overflow: hidden; }
+body.lanim .bot > div, body.lanim .bot .meta .time { display: block; }
+body.lanim .bot .meta { display: flex; }
+body.lanim .bot .badge { position: static; width: 9px; height: 9px; margin-right: 3px; box-shadow: none; }
+/* The header and search stay in their expanded form too, clipped by the narrowing panel; the icon rail (stacked +, hidden search) appears only when the slide has finished. */
+.bots { overflow: hidden; }
+body.lanim .bots header { flex-direction: row; gap: 8px; padding: 10px 14px; }
+body.lanim .bots header h1, body.lanim .bots .search { display: block; }
+body.lanim .bots header #lcol, body.lanim .bots header #add { order: 0; }
+body.lanim .bots header #add { width: 32px; height: 32px; border-radius: 999px; }
+body.lanim .bots header #add svg { width: 20px; height: 20px; }
+.bot:hover { background: var(--panel2); }
+.bot.sel { background: var(--raised); }
+.bot .av { grid-row: 1 / 3; }
+.bot .name { grid-column: 2; grid-row: 1; min-width: 0; font-weight: 400; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot .sub { grid-column: 2 / -1; grid-row: 2; min-width: 0; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot .meta { grid-column: 3; grid-row: 1; display: flex; align-items: center; gap: 6px; }
+.bot .time { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* A narrow list has no room for a time beside the name; the row is just avatar, name, preview (and the unread dot). */
+@container (max-width: 220px) { .bot .time, .bots header #usage { display: none; } }
+.bot .name .pin { font-size: 10px; margin-right: 3px; opacity: .8; }
+.bot .name .rt { font-size: 11px; margin-left: 4px; color: var(--muted); }
+.bot .name .rt.warn, .bot .sub .warn, .r .s .warn { color: var(--err); }
+.r .s .msg { display: block; color: var(--text); opacity: .85; white-space: pre-wrap; margin-top: 2px; }
+/* Unread = a quiet dot (count in the tooltip); red when the bot is waiting on you. */
+.bot .badge { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); font-size: 0; margin-right: 3px; }
+.bot .badge.q { background: var(--err); }
+.bots .group { display: flex; align-items: center; gap: 6px; padding: 10px 10px 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); cursor: pointer; user-select: none; }
+.bots .group:hover { color: var(--text); }
+/* Frosted-glass context menu: translucent card blurred over whatever sits behind it, with a thin edge highlight. */
+.cmenu { position: fixed; z-index: 50; background: color-mix(in srgb, var(--panel) 82%, transparent); -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4); border: 1px solid color-mix(in srgb, var(--text) 12%, transparent); box-shadow: var(--shadow), inset 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent); border-radius: 14px; padding: 6px; min-width: 220px; display: none; }
+.cmenu.show { display: block; }
+.cmenu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; padding: 8px 12px 8px 10px; border-radius: 9px; font: inherit; font-size: 12.5px; color: var(--text); cursor: pointer; }
+.cmenu button svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+.cmenu button:hover { background: color-mix(in srgb, var(--text) 9%, transparent); }
+.cmenu button:hover svg { color: var(--text); }
+.cmenu button.danger, .cmenu button.danger svg { color: var(--err); }
+.cmenu hr { border: none; border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent); margin: 4px 6px; }
+.empty { padding: 28px 16px; color: var(--muted); text-align: center; line-height: 1.5; }
+.empty.hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.empty.hero .herotitle { font-size: 17px; font-weight: 600; color: var(--text); }
+.empty.hero .herotext { max-width: 320px; }
+.empty.hero button { margin-top: 8px; padding: 8px 18px; }
+
+/* ---- middle: chat. Bot bubbles hang left (capped by .msg max-width); the composer and your bubbles run full width. ---- */
+.chat { display: flex; flex-direction: column; min-height: 0; background: var(--bg); --chatgut: 24px; }
+.chat header { padding: 10px 20px; gap: 4px; }
+.chat header .av { margin-right: 6px; }
+.chat header .title { flex: 1; min-width: 0; }
+.chat header .title b { display: block; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat header .title small { color: var(--muted); font-size: 11px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat header .title small:empty { display: none; }
+.tw { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+/* Round "back to latest" button, bottom center of the thread, shown whenever you are scrolled up. */
+.tobottom { position: absolute; bottom: 2px; left: 50%; translate: -50% 0; z-index: 5; display: none; align-items: center; justify-content: center; gap: 6px; width: 29px; height: 29px; padding: 0; border-radius: 999px; background: var(--raised); color: var(--text); box-shadow: var(--shadow); animation: msg-in .18s cubic-bezier(.22,1,.36,1); }
+.tobottom.show { display: inline-flex; } .tobottom svg { width: 14px; height: 14px; } .tobottom.new svg { width: 16px; height: 16px; } .tobottom span:empty { display: none; }
+/* Unread below you: the arrow grows into an accent "N new messages" pill; click jumps to the end of the thread and clears it. */
+.tobottom.new { width: auto; padding: 0 12px; gap: 8px; background: var(--accent); color: var(--accent-ink); font-size: 12px; }
+.thread { flex: 1; overflow: auto; padding: 18px var(--chatgut) 10px; display: flex; flex-direction: column; gap: 10px; container-type: inline-size; }
+/* Thread scrollbar only shows while the pointer is over the chat; the 8px gutter stays so content does not shift. */
+.thread::-webkit-scrollbar-thumb { background: transparent; transition: background .15s; }
+.chat:hover .thread::-webkit-scrollbar-thumb { background: var(--raised); }
+.msg { flex: none; max-width: min(42rem, 78%); padding: 9px 16px; border-radius: 20px; line-height: 1.5; font-size: 13px; white-space: pre-wrap; word-break: break-word; animation: msg-in .18s cubic-bezier(.22,1,.36,1); }
+.msg.user { align-self: flex-end; background: var(--bubble-user); color: var(--bubble-user-ink); }
+/* Rendered markdown: block elements do the spacing, so no pre-wrap here. */
+.msg.md { white-space: normal; }
+.msg.md > p, .msg.md > ul, .msg.md > ol, .msg.md > pre, .msg.md > blockquote, .msg.md > h1, .msg.md > h2, .msg.md > h3, .msg.md > h4, .msg.md > h5, .msg.md > h6 { margin: 0 0 .6em; }
+.msg.md > :last-child, .msg.md > :nth-last-child(2):has(+ .rx) { margin-bottom: 0; }
+.msg.md h1, .msg.md h2, .msg.md h3, .msg.md h4, .msg.md h5, .msg.md h6 { font-size: 1em; font-weight: 500; line-height: 1.4; }
+.msg.md h1 { font-size: 1.15em; } .msg.md h2 { font-size: 1.08em; }
+.msg.md ul, .msg.md ol { padding-left: 1.4em; }
+.msg.md li { margin: .15em 0; }
+.msg.md li::marker { color: var(--muted); }
+.msg.md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; background: rgba(127,127,127,.16); border-radius: 5px; padding: .1em .35em; }
+.msg.md pre { background: rgba(127,127,127,.14); border-radius: 10px; padding: 10px 12px; overflow-x: auto; }
+.msg.md pre code { background: none; padding: 0; font-size: .86em; white-space: pre; }
+.msg.md blockquote { border-left: 3px solid var(--line); margin-left: 0; padding-left: 10px; color: var(--muted); }
+.msg.md hr { border: 0; border-top: 1px solid var(--line); margin: .6em 0; }
+.msg.md a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.msg.thought { align-self: flex-start; background: var(--card); }
+/* Action step with its screenshot thumbnail: small strip by default, full width when open. */
+.step { flex: none; align-self: flex-start; display: flex; flex-direction: column; gap: 4px; max-width: min(42rem, 78%); }
+.step .thumb { display: block; height: 64px; width: auto; max-width: 100%; border-radius: 8px; border: 1px solid var(--line, rgba(127,127,127,.25)); cursor: zoom-in; object-fit: cover; }
+.step.open .thumb { height: auto; width: 100%; cursor: zoom-out; }
+.msg.action { align-self: flex-start; display: block; max-width: min(42rem, 78%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: transparent; border-radius: 999px; padding: 2px 12px;
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); opacity: .8; }
+.msg.action .res { margin-left: 8px; opacity: .7; }
+.msg.action .res.err { color: var(--err); opacity: 1; }
+.msg.done { align-self: flex-start; background: var(--card); }
+.msg.question { align-self: flex-start; background: var(--card); box-shadow: inset 3px 0 0 var(--warn); }
+.msg.error { align-self: flex-start; background: var(--card); box-shadow: inset 3px 0 0 var(--err); color: var(--err); }
+/* A question with choices is a card: the prompt, then lettered rows you can click. */
+.msg.question.card { box-shadow: none; width: min(48rem, 92%); padding: 14px 16px 16px; }
+.msg.question .opts { display: flex; flex-direction: column; margin-top: 12px; background: var(--inset); border-radius: 12px; overflow: hidden; }
+.msg.question .opt { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: transparent; border-radius: 0; padding: 10px 14px; font-size: 13px; font-weight: 300; color: var(--text); border-top: 1px solid var(--line); white-space: normal; }
+.msg.question .opt:first-child { border-top: none; }
+.msg.question .opt:hover { background: var(--raised); }
+.msg.question .opt kbd { width: 24px; height: 24px; border-radius: 6px; background: var(--raised); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; font: 400 11px/1 inherit; flex: none; }
+.msg.question .opt span { flex: 1; }
+.msg.question.settled .opt { pointer-events: none; color: var(--muted); }
+.msg.question.settled .opt.chosen { color: var(--text); }
+.msg.question .opt.chosen::after { content: "✓"; color: var(--ok); font-weight: 400; }
+/* An app offer: the proposed app (a new one; an existing app gets the regular card under the bubble) above the Use it / Build it rows. */
+.msg.question .proposed { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 8px 10px; background: var(--inset); border: 1px solid var(--line); border-radius: 12px; }
+.msg.question .proposed .ico { flex: none; width: 30px; height: 30px; border-radius: 8px; background: var(--raised); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 14px; color: var(--muted); }
+.msg.question .proposed .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.msg.question .proposed .txt b { font-weight: 400; }
+.msg.question .proposed .txt small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg.question.offer .opts { margin-top: 10px; }
+/* Thread search lives in the chat header (takes the title's slot while open); non-matching messages collapse. */
+.searchbar { display: none; gap: 8px; align-items: center; flex: 1; min-width: 0; }
+.searchbar.show { display: flex; }
+.chat header:has(.searchbar.show) .title { display: none; }
+.searchbar input { flex: 1; background: var(--raised); border: none; border-radius: 999px; padding: 7px 14px; font-size: 12px; }
+.searchbar .n { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.searchbar button { background: transparent; padding: 2px 8px; font-size: 15px; }
+.thread .ev { display: contents; }
+.thread.filtering > :not(.hit) { display: none; }
+/* Session divider: centered "Today 6:16 PM" before a message that follows a 15-minute silence. */
+.thread .day { align-self: center; color: var(--muted); font-size: 11px; padding: 12px 0 4px; }
+.thread .ev:first-child .day { padding-top: 4px; }
+/* "New" rule: a thin accent line with a centered label before the first message that arrived since you last looked. */
+.thread .new { display: flex; align-items: center; gap: 12px; width: 100%; padding: 4px 0; color: var(--accent-text); font-size: 10px; font-weight: 400; letter-spacing: .08em; text-transform: uppercase; }
+.thread .new::before, .thread .new::after { content: ""; flex: 1; height: 1px; background: var(--accent-text); opacity: .55; }
+/* Hover actions beside a message: reply (quotes it above the composer) and react (emoji picker). */
+.msg.user, .msg.thought, .msg.done { position: relative; }
+.msg .acts { position: absolute; top: 50%; transform: translateY(-50%); display: flex; gap: 6px; opacity: 0; transition: opacity .12s; }
+.msg.user .acts { right: 100%; margin-right: 5px; flex-direction: row-reverse; }  /* emoji stays nearest the bubble on both sides */
+.msg.thought .acts, .msg.done .acts { left: 100%; margin-left: 5px; }
+.msg:hover .acts, .msg .acts:focus-within { opacity: 1; }
+.msg .acts button { background: transparent; color: var(--muted); border-radius: 50%; width: 20px; height: 20px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.msg .acts button svg { width: 16px; height: 16px; }
+.msg.thought .acts [data-reply] svg, .msg.done .acts [data-reply] svg { transform: scaleX(-1); }  /* arrow points back at the bubble on both sides */
+.msg .acts button:hover { color: var(--text); background: transparent; }
+/* Hover time at the thread's far edge via container units (independent of bubble width); hidden when the thread is too narrow. */
+.msg .when { position: absolute; top: 50%; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; opacity: 0; transition: opacity .12s; pointer-events: none; }
+.msg.thought .when, .msg.done .when { left: 100cqw; transform: translate(-100%, -50%); }
+.msg.user .when { right: 100cqw; transform: translate(100%, -50%); }
+.msg:hover .when { opacity: 1; }
+@container (max-width: 560px) { .msg .when { display: none; } }
+/* The chosen reaction sits on the bubble's bottom corner. */
+.msg .rx { position: absolute; bottom: -10px; background: var(--card); box-shadow: 0 0 0 2px var(--bg); border-radius: 999px; padding: 1px 7px; font-size: 12px; line-height: 18px; cursor: pointer; }
+.msg .rx:empty { display: none; }
+.msg.user .rx { left: -6px; }
+.msg.thought .rx, .msg.done .rx { right: -6px; }
+.msg.has-rx { margin-bottom: 8px; }
+.rxpick { position: fixed; z-index: 50; display: none; gap: 2px; padding: 6px; background: var(--card); border-radius: 999px; box-shadow: var(--shadow); }
+.rxpick.show { display: flex; }
+.rxpick button { background: transparent; width: 38px; height: 38px; padding: 0; border-radius: 50%; font-size: 21px; line-height: 1; }
+.rxpick button:hover { background: var(--raised); transform: scale(1.15); }
+.rxpick button.on { background: var(--raised); }
+/* A reply: the quoted line (reply arrow + text) hangs above the bubble on the thread background, aligned to the bubble's side. */
+.qwrap { flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%; }
+.qwrap.user { align-items: flex-end; }
+.qwrap .quoted { display: inline-flex; align-items: center; gap: 6px; max-width: min(42rem, 78%); padding: 0 14px; font-size: 12px; color: var(--muted); }
+.qwrap .quoted svg { width: 16px; height: 16px; flex: none; }
+.qwrap .quoted span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* App card under a "your app is ready" message. Collapsed: one row. Open: the app runs inline in the thread, full width. */
+.appmsg { flex: none; align-self: flex-start; width: min(42rem, 78%); background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; font-size: 13px; animation: msg-in .18s cubic-bezier(.22,1,.36,1); }
+.appmsg.open { width: 100%; }
+.appmsg .hd { display: flex; align-items: center; gap: 10px; padding: 9px 12px; }
+.appmsg .ico { flex: none; width: 30px; height: 30px; border-radius: 8px; background: var(--raised); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 14px; color: var(--muted); }
+.appmsg .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.appmsg .txt b { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appmsg .txt small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appmsg .abtns { display: flex; gap: 6px; flex: none; align-items: center; }
+.appmsg .abtns button, .appmsg .abtns .btnlink { font-size: 11.5px; padding: 4px 9px; }
+.appmsg .abtns .btnlink { color: var(--muted); text-decoration: none; }
+.appmsg .abtns .btnlink:hover { color: inherit; text-decoration: underline; }
+.appmsg .frame { display: none; height: 60vh; min-height: 320px; border-top: 1px solid var(--line); background: var(--bg); }
+.appmsg.open .frame { display: block; }
+.appmsg .frame iframe { display: block; width: 100%; height: 100%; border: 0; background: var(--bg); }
+/* Side app in the preview column: body.hasapp shows the Browser | App strip, body.sideapp swaps the browser view for the app frame. */
+.sabar { display: none; align-items: center; gap: 4px; padding: 0 10px 8px 14px; border-bottom: 1px solid var(--line); }
+body.hasapp .sabar { display: flex; }
+.sabar .satab { font-size: 11.5px; padding: 4px 10px; border-radius: 999px; background: transparent; color: var(--muted); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sabar .satab:hover { color: var(--text); }
+body:not(.sideapp) #satabb, body.sideapp #sataba { background: var(--raised); color: var(--text); }
+.sabar .winacts { display: flex; gap: 6px; margin-left: auto; align-items: center; flex-shrink: 0; }
+.sabar .winacts button, .sabar .winacts .btnlink { white-space: nowrap; flex-shrink: 0; }
+.sabar .winacts button, .sabar .winacts .btnlink { font-size: 11.5px; padding: 4px 8px; }
+.sabar .winacts .btnlink { color: var(--muted); text-decoration: none; }
+.sabar .winacts .btnlink:hover { color: inherit; text-decoration: underline; }
+#saframe { display: none; flex: 1; min-height: 0; width: 100%; border: 0; background: var(--bg); }
+body.sideapp #saframe { display: block; }
+body.sideapp .preview :is(.shotwrap, .toast, .cap, .info) { display: none; }
+.msg.approval { align-self: flex-start; background: var(--card); box-shadow: inset 3px 0 0 var(--warn); max-width: min(48rem, 90%); }
+.msg.approval .btns { display: flex; gap: 8px; margin-top: 10px; }
+.msg.approval.settled .btns { display: none; }
+.composer { padding: 6px var(--chatgut) 18px; display: flex; flex-direction: column; gap: 8px; }
+/* Pause / Resume / Stop row: right-aligned, and gone entirely (no gap) while the bot is idle. */
+.composer .ctl { display: flex; gap: 6px; align-items: center; justify-content: flex-end; padding: 0 6px; }
+.composer .ctl button { font-size: 11px; padding: 4px 10px; }
+.composer .ctl button:disabled { display: none; }
+.composer .ctl:not(:has(button:not(:disabled))) { display: none; }
+.composer .row { display: flex; flex-direction: column; gap: 6px; background: var(--panel2); border-radius: 28px; padding: 7px; box-shadow: 0 0 0 1px var(--raised); transition: box-shadow .15s; }
+.composer .line { display: flex; gap: 6px; align-items: flex-end; }
+/* Reply: the message being answered sits above the input until sent or cancelled. */
+.composer .quote { display: flex; align-items: center; gap: 8px; background: var(--raised); border-radius: 20px; padding: 7px 8px 7px 14px; font-size: 12px; color: var(--muted); }
+.composer .quote[hidden] { display: none; }
+.composer .quote svg { width: 16px; height: 16px; flex: none; }
+.composer .quote span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.composer .quote button { background: transparent; padding: 0 6px; font-size: 15px; line-height: 1; color: var(--muted); }
+.composer .quote button:hover { color: var(--text); }
+.composer .row.replying { border-radius: 22px; }
+.composer .row:focus-within { box-shadow: 0 0 0 1px var(--hover); }
+.composer #attachbtn { width: 40px; height: 40px; padding: 0; border-radius: 50%; flex: none; background: var(--raised); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; }
+.composer #attachbtn:hover { color: var(--text); }
+.composer #attachbtn svg { width: 24px; height: 24px; display: block; }
+.composer #micbtn { height: 40px; min-width: 40px; padding: 0 8px; border-radius: 20px; flex: none; background: var(--raised); color: var(--muted); display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.composer #micbtn:hover { color: var(--text); }
+.composer #micbtn svg { width: 22px; height: 22px; display: block; }
+.composer #micbtn .mictime { display: none; font-size: 12px; font-variant-numeric: tabular-nums; }
+.composer #micbtn.rec { color: #fff; background: #d9363e; }
+.composer #micbtn.rec svg { animation: pulse 1.2s ease-in-out infinite; }
+.composer #micbtn.rec .mictime { display: inline; }
+.composer #micbtn.busy { color: var(--muted); cursor: progress; }
+.composer #micbtn.busy svg { display: none; }  /* a spinning microphone reads as "still recording"; show a plain ring while the text is being worked out */
+.composer #micbtn.busy::before { content: ""; width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent; animation: spin .8s linear infinite; }
+/* The send arrow only appears once there is something to send. */
+.composer .row:not(.has) #send { display: none; }
+.composer .row.drag { outline: 2px dashed var(--accent, #9ee65c); outline-offset: -2px; }
+.composer .chips { display: none; flex-wrap: wrap; gap: 6px; padding: 0 8px; }
+.composer .chips.show { display: flex; }
+.composer .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--card); border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 11.5px; max-width: 18rem; }
+.composer .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .chip b { color: var(--muted); font-weight: 300; }
+.composer .chip button { padding: 0 6px; font-size: 12px; background: transparent; line-height: 1.4; }
+.composer textarea { flex: 1; resize: none; height: 40px; min-height: 40px; max-height: 9rem; background: transparent; border: none; padding: 9px 10px; font-size: 13px; line-height: 22px; }
+.composer #send { width: 40px; height: 40px; padding: 0; font-size: 0; border-radius: 50%; flex: none; margin-bottom: 0; position: relative; }
+.composer #send::after { content: "↑"; font-size: 17px; font-weight: 500; line-height: 40px; }
+
+/* ---- right: preview ---- */
+.preview { background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+.preview header { border-bottom: none; }
+.preview .cap { text-align: center; padding: 10px 18px 0; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.preview .cap .url { font-size: 10.5px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shotwrap { position: relative; margin: 0 14px; border-radius: 14px; background: #000; aspect-ratio: 16 / 10; cursor: pointer; overflow: hidden; box-shadow: 0 1px 0 var(--line); }
+.shotwrap img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.shotwrap .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); background: var(--card); text-align: center; padding: 20px; font-size: 12px; }
+/* Asleep: Chrome was closed after sitting idle. The last frame stays, dimmed, with a moon; clicking wakes it (take-over relaunches). */
+.shotwrap.asleep img { filter: grayscale(.7) brightness(.45); transition: filter .4s; }
+.shotwrap .zz { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; gap: 8px; color: #fff; font-size: 12px; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+.shotwrap .zz svg { width: 18px; height: 18px; opacity: .9; }
+.shotwrap.asleep .zz { display: flex; }
+.shotwrap .live { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,.6); color: #fff; font-size: 10px; padding: 3px 8px; border-radius: 999px; display: flex; gap: 5px; align-items: center; }
+/* Ephemeral status pill under the screen: fades in, holds, fades out; a newer note pushes the old one up. Fixed height so nothing shifts. */
+.toast { position: relative; height: 26px; margin: 8px 14px 0; display: flex; justify-content: center; pointer-events: none; }
+.toast .pill { position: absolute; top: 0; display: inline-flex; align-items: center; gap: 7px; max-width: 100%; height: 26px; padding: 0 12px; border-radius: 999px;
+  background: var(--card); color: var(--text); font-size: 12px; box-shadow: 0 1px 0 var(--line), 0 4px 14px rgba(0,0,0,.18); pointer-events: auto;
+  animation: msg-in .18s cubic-bezier(.22,1,.36,1); transition: opacity .3s, transform .3s; }
+.toast .pill .dot { width: 6px; height: 6px; }
+.toast .pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toast .pill time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.toast .pill.out { opacity: 0; transform: translateY(-8px); pointer-events: none; }
+/* Live view mirror: floats over the top of the stage. */
+#full .stage { position: relative; }
+#full .toast { position: absolute; top: 12px; left: 0; right: 0; margin: 0; z-index: 2; }
+#full .toast .pill { background: rgba(0,0,0,.7); color: #fff; box-shadow: none; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+#full .toast .pill time { color: rgba(255,255,255,.6); }
+/* Below the screen: a few quiet sections, each a small heading and its lines. */
+.info { margin: 18px 14px 14px; padding: 0 4px; color: var(--muted); font-size: 12px; line-height: 1.55; overflow: auto; display: flex; flex-direction: column; gap: 18px; }
+.info h4 { margin: 0 0 4px; font-size: 10px; font-weight: 400; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); opacity: .8; }
+.info .task { white-space: pre-wrap; color: var(--text); }
+.info .note { text-align: center; padding: 28px 12px 8px; font-size: 13px; line-height: 1.5; }
+.info .rt { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); }
+.info .rt:first-of-type { border-top: none; }
+.info .rt span { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.info .rt small { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.info .rt.off { opacity: .55; }
+.info a, .info .lnk { color: var(--accent-text); cursor: pointer; text-decoration: none; background: none; padding: 0; font: inherit; border-radius: 0; }
+.info a:hover, .info .lnk:hover { text-decoration: underline; background: none; }
+.info .fine { font-size: 11px; opacity: .75; }
+/* Inbox: one small card per artifact the bot produced (saved result, download, built app). */
+.info .inbox .card { display: flex; gap: 10px; align-items: center; padding: 7px 8px; margin: 0 -8px; border-radius: 8px; color: var(--text); text-decoration: none; }
+.info .inbox .card:hover { background: var(--raised); text-decoration: none; }
+.info .inbox .card .ico { flex: none; width: 30px; height: 30px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 600; letter-spacing: .03em; color: var(--muted); }
+.info .inbox .card .body { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+.info .inbox .card .nm { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.info .inbox .card .sub { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.info .inbox .card small { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.info .dlbar { height: 6px; border-radius: 999px; background: var(--raised); overflow: hidden; }
+.info .dlfill { height: 100%; background: var(--accent); border-radius: inherit; transition: width .25s ease; }
+
+/* ---- fullscreen ---- */
+#full { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 20; }
+#full.show { display: flex; }
+#full header { display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: var(--panel); }
+#full header button, #full .winacts button { font-size: 11.5px; display: inline-flex; align-items: center; gap: 5px; }
+#full header button svg, #full .winacts button svg { width: 13px; height: 13px; }
+#full header .navctl svg { width: 16px; height: 16px; }
+#full .stage { flex: 1; overflow: auto; background: #000; display: flex; align-items: flex-start; justify-content: center; }
+#full .stage img { max-width: 100%; display: block; }
+#full .stage:focus, #full .stage:focus-visible { outline: none; }
+#full:not(.ctl) header .navctl { opacity: .45; pointer-events: none; }
+/* Chrome-style: tab strip sits on the dark band above the toolbar; the active tab shares the toolbar color so they fuse. */
+#full .topbar { display: flex; align-items: flex-end; background: var(--bg); padding-right: 8px; }
+#full .winacts { display: flex; gap: 8px; align-items: center; margin-left: auto; padding: 6px 0; }
+#full .topbar .backtxt { font-size: 11.5px; margin: 6px 8px 6px 8px; align-self: center; }
+/* One switch: "Take over" pauses the bot and hands you the page; while you drive it reads "Hand back" and the stage gets a thin accent frame. */
+/* Take over is a plain button; once you are driving it becomes the accent "Hand back", and the stage gets an accent ring.
+   The ring is an outline, not an inset shadow: the stage scrolls, and a shadow would scroll away with the content. */
+#full #ctl { background: var(--panel2); color: var(--text); }
+#full.ctl #ctl { background: var(--accent); color: var(--accent-ink); }
+#full.ctl .stage, #full.ctl .stage:focus, #full.ctl .stage:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#full .tabstrip { display: none; flex: 1; min-width: 0; align-items: flex-end; gap: 0; padding: 6px 8px 0; background: var(--bg); overflow-x: auto; }
+#full .tabstrip.show { display: flex; }
+#full .tabstrip .tab { display: flex; align-items: center; gap: 8px; flex: 0 1 200px; min-width: 0; padding: 8px 12px; border-radius: 8px 8px 0 0; font-size: 11px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+#full .tabstrip .tab:hover { background: var(--panel2); }
+#full .tabstrip .tab span { overflow: hidden; text-overflow: ellipsis; }
+#full .tabstrip .tab.active, #full .tabstrip .tab.active:hover { color: var(--text); background: var(--panel); }
+#full .tabstrip .tab .x, #full .tabstrip .newtab { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; opacity: .7; font-size: 13px; }
+#full .tabstrip .tab .x { flex: none; margin-left: auto; }
+#full .tabstrip .tab .x:hover, #full .tabstrip .newtab:hover { opacity: 1; background: var(--hover); }
+#full .tabstrip .newtab { width: 28px; height: 28px; margin: 0 0 3px 6px; color: var(--muted); cursor: pointer; font-size: 17px; }
+#full header .navctl { background: none; width: 28px; height: 28px; padding: 0; justify-content: center; border-radius: 50%; }
+#full header .navctl:hover { background: var(--hover); }
+#full header input.navctl { flex: 1; width: auto; height: auto; border-radius: 999px; background: var(--raised); padding: 7px 14px; }
+/* What the bot is doing, beside the URL bar: its status and the latest thought or action. */
+#full header .fstat { flex: 0 1 34%; min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#full header .fstat:empty { display: none; }
+
+/* ---- dialogs ---- */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(2px); display: none; align-items: center; justify-content: center; z-index: 40; }
+.modal.show { display: flex; }
+.modal .box { background: var(--card); border-radius: 20px; padding: 22px 24px; width: 380px; box-shadow: var(--shadow); }
+/* Bot dialog: fields scroll inside .body if the window is short; the title and Cancel/Save row stay put. */
+#bmodal .box { width: 460px; max-height: 90vh; display: flex; flex-direction: column; padding-bottom: 18px; }
+#bmodal .body { overflow: auto; margin: 0 -8px; padding: 0 8px; }
+#bmodal .body .field:last-child { margin-bottom: 4px; }
+#bmodal .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+#bmodal .field.check { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 9px 12px; background: var(--inset); border-radius: 10px; color: var(--text); cursor: pointer; }
+#bmodal .field.check input { margin: 0; accent-color: var(--accent); }
+#bmodal .field.check small { margin: 0 0 0 auto; font-size: 11px; }
+#bmodal .row { margin-top: 14px; }
+/* Advanced: approvals, browser profile and encryption fold away so the common fields fit without scrolling. */
+#bmodal .adv summary { list-style: none; display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 300; color: var(--muted); cursor: pointer; padding: 4px 0; margin-bottom: 4px; user-select: none; }
+#bmodal .adv summary::-webkit-details-marker { display: none; }
+#bmodal .adv summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; margin: 0 3px 1px 2px; }
+#bmodal .adv[open] summary::before { transform: rotate(45deg); }
+#bmodal .adv summary:hover { color: var(--text); }
+#bmodal .adv summary:focus { outline: none; } #bmodal .adv summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+#bmodal .adv[open] summary { margin-bottom: 10px; }
+#bmodal .adv { margin-bottom: 4px; }
+#bminstr, #bmmem { resize: none; max-height: 45vh; overflow-y: auto; box-sizing: border-box; }  /* grows with the text; caps so the dialog still fits */
+#bmodal .adv[open] summary small { display: none; }
+#bmodal .adv .field:last-child { margin-bottom: 4px; }
+#rmodal .box { width: 540px; max-height: 90vh; overflow: auto; }
+/* In-app confirm: sits above the other modals (routines/skills can ask from inside theirs). */
+#cmodal { z-index: 60; }
+#cmodal .box { width: 360px; }
+#cmodal p { color: var(--text); line-height: 1.45; }
+#cmodal button.danger { background: var(--err); color: #fff; font-weight: 400; }
+#cmodal button.danger:hover { filter: brightness(1.08); }
+.rlist { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.rlist .r { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 10px 12px; border-radius: 12px; background: var(--inset); }
+.rlist .r.off { opacity: .55; }
+.rlist .r .t { font-weight: 400; white-space: pre-wrap; }
+.rlist .r .s { color: var(--muted); font-size: 11px; grid-column: 1 / -1; }
+.rlist .r .b { display: flex; gap: 4px; align-items: flex-start; }
+.rlist .r .b button { padding: 2px 9px; font-size: 10.5px; }
+.rlist .r .t small { color: var(--muted); font-weight: 300; margin-left: 6px; }
+.rlist .r .body { grid-column: 1 / -1; white-space: pre-wrap; font-size: 11.5px; color: var(--muted); max-height: 7.5em; overflow: auto; }
+.radd .field input { width: 100%; }
+.rrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.rrow select, .rrow input { font: inherit; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; padding: 6px 10px; }
+.days label { font-size: 10px; margin-left: 6px; color: var(--muted); }
+.modal .field textarea { font: inherit; font-size: 12px; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; resize: vertical; min-height: 54px; }
+.modal .field small { color: var(--muted); font-weight: 300; }
+.modal .field small.stat { font-size: 11px; margin-top: 4px; line-height: 1.4; }  /* bridge status under the iMessage field */
+.modal .field input:not([type=checkbox]) { font: inherit; font-size: 12px; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; }
+.modal h3 { margin: 0 0 12px; font-size: 16px; font-weight: 400; }
+.modal p { margin: 0 0 14px; color: var(--muted); }
+.modal .row { display: flex; gap: 8px; justify-content: flex-end; }
+.modal .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; font-size: 11px; font-weight: 300; color: var(--muted); }
+.modal .field input, .modal .field select { font: inherit; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; }
+#banner { display: none; gap: 10px; align-items: center; padding: 8px 14px; background: var(--card); box-shadow: inset 0 -2px 0 var(--warn); }
+#banner.show { display: flex; }
+#banner span { flex: 1; }
+
+/* Responsive breakpoints last so they win on source order. */
+@media (max-width: 900px)  {
+  .chat header { padding: 8px 12px; }
+  .thread, .composer { padding-left: 12px; padding-right: 12px; } .msg { max-width: 92%; } .msg .when { display: none; } }
+
+/* Builds: footer chip at the bottom of the bot list, full-screen panel around the shell's Tasks UI, and the new-build dialog. */
+.bots #builds { position: relative; }
+.bots #builds .n { position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 16px; text-align: center; background: var(--raised); color: var(--text); }
+.bots #builds .n:empty { display: none; }
+.bots #builds.live .n { background: var(--accent); color: var(--accent-ink); }
+.bots #builds.warn .n { background: var(--warn, #f0a030); color: #1b1d21; }
+.bots #builds.fresh { color: var(--accent-text); }
+.bots .botfoot { display: flex; align-items: center; padding: 8px 14px 12px; flex: none; }
+body:is(.lcol, .lfit) .bots .botfoot { justify-content: center; padding: 8px 0 12px; }
+#bpanel { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 20; }
+#bpanel.show { display: flex; }
+#bpanel .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#bpanel .topbar .ttl { font-size: 13px; font-weight: 400; }
+#bpanel .topbar small { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#bpanel .topbar .backtxt, #bpanel .winacts button { font-size: 11.5px; }
+#bpanel .winacts { display: flex; gap: 8px; margin-left: auto; }
+#bpanel iframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
+#bdmodal .box { width: 460px; }
+#bdmodal .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+#bdmodal .where { font-size: 11px; margin: -6px 0 12px; }
+#bdmodal .where code { font-size: 11px; color: var(--text); word-break: break-all; }
+#bdmodal textarea { width: 100%; box-sizing: border-box; }
+.bots .botfoot { gap: 4px; }
+#apanel { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 20; }
+#apanel.show { display: flex; }
+#apanel .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#apanel .topbar .ttl { font-size: 13px; font-weight: 400; }
+#apanel .topbar small { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#apanel .topbar .backtxt, #apanel .winacts button { font-size: 11.5px; }
+#apanel .winacts { display: flex; gap: 8px; margin-left: auto; }
+/* Embedded app: one built app running full-size inside the bot page, above the Apps gallery. */
+#vpanel { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; z-index: 21; }
+#vpanel.show { display: flex; }
+#vpanel .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+#vpanel .topbar .ttl { font-size: 13px; font-weight: 400; white-space: nowrap; }
+#vpanel .topbar small { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#vpanel .topbar .backtxt, #vpanel .winacts button, #vpanel .winacts .btnlink { font-size: 11.5px; }
+#vpanel .winacts { display: flex; gap: 8px; margin-left: auto; align-items: center; flex-shrink: 0; }
+#vpanel .winacts button, #vpanel .winacts .btnlink { white-space: nowrap; flex-shrink: 0; }
+#vpanel .winacts .btnlink { color: var(--muted); text-decoration: none; }
+#vpanel .winacts .btnlink:hover { color: inherit; text-decoration: underline; }
+#vpanel .winacts .kebab { display: inline-flex; align-items: center; padding: 4px 7px; }
+#vpanel .winacts .kebab svg { width: 16px; height: 16px; }
+#vpanel iframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
+.agrid { flex: 1; overflow: auto; padding: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; align-content: start; }
+.agrid .empty { grid-column: 1 / -1; }
+.appcard { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; color: inherit; text-decoration: none; transition: transform .12s, box-shadow .12s, border-color .12s; }
+.appcard:hover { transform: translateY(-2px); border-color: var(--muted); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+.appcard .shot { position: relative; aspect-ratio: 16 / 10; background: var(--card); overflow: hidden; }
+.appcard .shot iframe { position: absolute; top: 0; left: 0; width: 300%; height: 300%; border: 0; transform: scale(.3333); transform-origin: 0 0; pointer-events: none; background: var(--bg); }
+.appcard .meta { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.appcard .ico { width: 28px; height: 28px; border-radius: 8px; flex: none; object-fit: cover; }
+.appcard .ico.ph { display: inline-flex; align-items: center; justify-content: center; background: var(--raised); color: var(--muted); font-size: 13px; }
+.appcard .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.appcard .txt b { font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appcard .txt small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appcard time { font-size: 10px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.appcard .tools, .appmsg .tools { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--inset); color: var(--muted); white-space: nowrap; flex: none; font-weight: 400; }
+/* Apps panel: dropping a zip anywhere on it imports the app (apps.js → importapp.py). */
+#apanel.drag { outline: 2px dashed var(--muted); outline-offset: -6px; }
+#apanel.busy .agrid { opacity: .5; pointer-events: none; }
+
+/* ==================================================================== Render App port adjustments ==== */
+/* React mounts into #root between <body> and OpenBot's <main>/#banner; body's flex column must see them directly. */
+#root { display: contents; }
+
+/* shadcn's tokens, mapped onto OpenBot's. Selector pair so it out-ranks BOTH of tailwind.css's blocks
+   (:root and :root[data-theme="light"]) by source order at equal specificity.
+   Collisions: OpenBot owns --card (shadcn's card is the same colour, so both agree), --accent (shadcn's is
+   --sh-accent in tailwind.css) and --muted (OpenBot: a TEXT grey; shadcn: a SURFACE). --muted keeps OpenBot's
+   meaning; shadcn's surface is --sh-muted, re-pointed below for the bg-muted utility. */
+:root, :root[data-theme="light"] {
+  --radius: 10px;
+  --background: var(--bg);
+  --foreground: var(--text);
+  --card-foreground: var(--text);
+  --popover: var(--card);
+  --popover-foreground: var(--text);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-ink);
+  --secondary: var(--raised);
+  --secondary-foreground: var(--text);
+  --sh-muted: var(--panel2);
+  --muted-foreground: var(--muted);
+  --sh-accent: var(--raised);
+  --accent-foreground: var(--text);
+  --destructive: var(--err);
+  --sh-border: var(--line);
+  --input: var(--line);
+  --ring: var(--accent);
+  --on-accent: var(--accent-ink);   /* button.tsx's accent variant */
+  /* tailwind.css's [data-slot] shadow block reads these from tokens.css, which this page does not load. */
+  --shadow-ink: rgba(0,0,0,.45); --shadow-ink-soft: rgba(0,0,0,.3); --shadow-ink-deep: rgba(0,0,0,.7);
+}
+:root[data-theme="light"] { --shadow-ink: rgba(0,0,0,.12); --shadow-ink-soft: rgba(0,0,0,.08); --shadow-ink-deep: rgba(0,0,0,.25); }
+@theme inline { --color-muted: var(--sh-muted); }
+
+/* shadcn roots in OpenBot's look: pill buttons (12px / 300), 10px fields, 20px dialog cards, the frosted menu. */
+button[data-slot] { border-radius: 999px; font-size: 12px; font-weight: 300; }
+input[data-slot], textarea[data-slot] { font: inherit; color: var(--text); background: var(--inset); border: 1px solid transparent; border-radius: 10px; box-shadow: none; }
+input[data-slot]:focus, textarea[data-slot]:focus { outline: none; border-color: var(--accent); box-shadow: none; }
+[data-slot="select-trigger"] { background: var(--inset); color: var(--text); border: 1px solid transparent; border-radius: 10px; padding: 8px 10px; font-size: 12px; font-weight: 300; box-shadow: none; }
+[data-slot="select-trigger"]:hover { background: var(--inset); }
+[data-slot="checkbox"] { accent-color: var(--accent); border-color: var(--muted); }
+[data-slot="checkbox"][data-checked] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+[data-slot="dialog-overlay"] { background: rgba(0,0,0,.55); backdrop-filter: blur(2px); }
+[data-slot="dialog-content"] { background: var(--card); color: var(--text); border-radius: 20px; padding: 22px 24px; box-shadow: var(--shadow); --tw-ring-shadow: 0 0 #0000; font-size: 13px; }
+[data-slot="dialog-title"] { margin: 0 0 12px; font-size: 16px; font-weight: 400; line-height: 1.45; }
+[data-slot="dialog-description"] { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+:is([data-slot="dropdown-menu-content"], [data-slot="context-menu-content"], [data-slot="select-content"]) {
+  background: color-mix(in srgb, var(--panel) 82%, transparent); -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent); box-shadow: var(--shadow), inset 0 1px 0 color-mix(in srgb, var(--text) 10%, transparent);
+  --tw-ring-shadow: 0 0 #0000; border-radius: 14px; padding: 6px; min-width: 220px; color: var(--text); }
+:is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"], [data-slot="select-item"]) { gap: 10px; padding: 8px 12px 8px 10px; border-radius: 9px; font-size: 12.5px; color: var(--text); }
+:is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"], [data-slot="select-item"]) svg { width: 16px; height: 16px; color: var(--muted); }
+:is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"], [data-slot="select-item"]):is(:hover, [data-highlighted]) { background: color-mix(in srgb, var(--text) 9%, transparent); }
+:is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"]):is(:hover, [data-highlighted]) svg { color: var(--text); }
+:is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"])[data-variant="destructive"], :is([data-slot="dropdown-menu-item"], [data-slot="context-menu-item"])[data-variant="destructive"] svg { color: var(--err); }
+:is([data-slot="dropdown-menu-separator"], [data-slot="context-menu-separator"], [data-slot="select-separator"]) { background: color-mix(in srgb, var(--text) 10%, transparent); margin: 4px 6px; height: 1px; }
+[data-slot="tooltip-content"] { background: var(--card); color: var(--text); border-radius: 8px; font-size: 11px; font-weight: 300; padding: 4px 10px; box-shadow: var(--shadow); }
+[data-slot="scroll-area-thumb"] { background: var(--raised); }
