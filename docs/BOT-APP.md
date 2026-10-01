@@ -270,7 +270,7 @@ interactive elements (canvas apps). `read` returns up to 6000 chars. The
 ledger records `usage.input_tokens` per assistant turn so context growth is
 measured, not guessed; `--autocompact` is left at its default as a net.
 
-Observation = `browser.snapshot()`: `Accessibility.getFullAXTree` on the
+Observation = `browser.observe()` (its private `_snapshot(ws)`): `Accessibility.getFullAXTree` on the
 main frame (plus same-process child frames from `Page.getFrameTree`),
 interactive roles + headings/dialogs/tabs/menus/named images, states
 (expanded/checked/selected/disabled/focused). Refs stay MECHANICAL: for each
