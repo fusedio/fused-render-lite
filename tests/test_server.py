@@ -30,7 +30,7 @@ def q(**kw):
     return "?" + urllib.parse.urlencode(kw)
 
 
-def test_placeholder_and_open_page(client):
+def test_bots_page_and_removed_pages(client):
     from fused_render_app import server
 
     # `/` is the bots page: the built file when it exists, else a 503 saying how to build it

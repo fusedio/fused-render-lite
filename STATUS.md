@@ -75,6 +75,50 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.11.0
+
+Minor: Render App becomes the **Browser Bots** app. The OpenBot fused-render
+app is rebuilt inside Render App, behaviour for behaviour
+(`docs/BOT-APP.md`), and the old product surface goes. Package, bundle id,
+DMG name and release pipeline keep their names. Packaging change: the
+`showcase/` `.fused` bundles no longer ship; the React build gains a second
+entry (`bots.html`).
+
+- **Backend (`fused_render_app/bots/`)**: bots run in the server process, no
+  daemon. Each bot has its own Chrome over CDP (accessibility-tree snapshot,
+  JPEG screenshots), a chat of events, memory, skills, routines, an Inbox
+  under `~/Fused/bots/<bot>/`, app offers and builds, app tools and app
+  skills, iMessage and `botsend`. Two engines: Claude Code (`haiku` / `sonnet`
+  / `opus` / `fable`, one `claude -p` per task, tools over a stdio MCP server)
+  and the OpenBot JSON-action loop for the local Gemma models (`local-4b`,
+  `local-9b`) or when no `claude` CLI is found. HTTP API under `/api/bots/*`
+  and `/api/apps/*`. State under `~/.fused-render-app/bots/`.
+- **Frontend (`frontend/src/apps/bots/`)**: the OpenBot page in React +
+  shadcn, served at `/` from `static/shell-dist/bots.html`: bot list, thread,
+  preview column, full-screen live view with take over, the bot / face /
+  routines / skills / usage dialogs, the Apps and Builds panels. `/embed`
+  frames an app for the gallery and cards.
+- **Removed (UI surfaces)**: the showcase home (`showcase.py`, `showcase/`,
+  `static/index.html`, `/api/showcase*`), the `.fused` opener page
+  (`static/open.html`, `/open`), the menu-bar Dock (`menubar_dock.py`,
+  `dock_store.py`, `icon_color.py`, `static/dock.html`, `/dock`,
+  `/api/dock*`), the ⌥Space launcher and its settings page (`launcher.py`,
+  `launcher_panel.py`, `hotkey.py`, `static/launcher.html`,
+  `static/settings.html`, `/launcher`, `/settings`, `/api/launcher*`), and
+  the title-bar Edit and Home buttons with their View menu items
+  (`editlink.py`). File → Open… is gone too.
+- **Kept (plumbing)**: `POST /api/open`, `/api/open/status`, `/api/drop`,
+  `/api/fetch`, `/render`, `appfile.py`, `container.py`, `localapps.py`,
+  `fetch.py`, `window_policy.py`, the job notifications (no longer consult
+  the Dock's list).
+- **Shell**: windows are titled "Browser Bots"; the startup window, New Window
+  and the menu-bar "Open in app" show `/`. A Finder or `render-app://` open of
+  a `.fused` is logged and shows the Browser Bots window; the document type
+  and URL scheme stay registered for now.
+- **Updates**: the in-app updater still checks and can install
+  (`/api/update*`), but its banner lived on the removed home page, so no page
+  shows it yet.
+
 ## 0.10.3
 
 Patch: three PRs syncing Render App's Claude sessions with fused-render.

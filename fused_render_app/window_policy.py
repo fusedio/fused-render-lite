@@ -7,7 +7,7 @@ AppKit half is only ever imported inside the packaged macOS app.
 
 A URL is one of three kinds relative to the server this process owns:
 
-- ``"app"``       loopback, our port — the placeholder, an `/open` page, a
+- ``"app"``       loopback, our port — the Browser Bots page, an app page, a
                   raw-file URL. Loads inside a window.
 - ``"external"``  any other http(s) — the default browser's job.
 - ``"other"``     anything else (about:blank, data:, blob:, javascript:).
@@ -32,9 +32,9 @@ def frame_autosave_name(app_file: str | None, app_id: str | None = None) -> str:
     of any app was. Keyed on the app's stable id (`appfile.app_id_of`,
     ``<meta name="fused-app-id">``) when the file carries one — the frame
     then survives updates, renames and moves of the .fused; a file that
-    predates ids is keyed on its abspath. The launcher (no file) keeps the
-    name every version so far used for all windows, so an existing user's
-    saved Home frame carries over.
+    predates ids is keyed on its abspath. A window with no app file (the
+    Browser Bots page, Tasks) keeps the name every version so far used for
+    all windows, so an existing user's saved Home frame carries over.
     """
     if app_id:
         return f"{HOME_FRAME_NAME}:app:{app_id}"

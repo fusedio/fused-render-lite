@@ -87,8 +87,8 @@ also verifies the stapled ticket (`stapler validate` + `spctl`).
 ## In-app update manifest
 
 The packaged app polls `https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json`
-(`fused_render_app/update/mac.py`) and shows the launcher page's update
-banner when it names a newer version. The release job's "Publish signed
+(`fused_render_app/update/mac.py`) and reports it through `GET /api/update`
+when it names a newer version (no page shows a banner since 0.11.0). The release job's "Publish signed
 update manifest" step writes it (`scripts/generate_update_manifest.py`, signed
 with the **8th secret** `FUSED_RENDER_UPDATE_SIGNING_KEY` — Render App's own
 Ed25519 key, NOT fused-render's; the public half is pinned in

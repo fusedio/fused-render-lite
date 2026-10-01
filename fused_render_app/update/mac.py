@@ -1,9 +1,9 @@
 """macOS in-app updater, ported from fused-render's `fused_render/update/mac.py`.
 
 A silent background loop checks the signed manifest and surfaces a newer
-version only through `GET /api/update` — the launcher page (static/index.html)
-shows a banner. Nothing else in the app does: a .fused app's own window is
-never interrupted. Downloading and installing happen solely on an explicit
+version only through `GET /api/update` (the old launcher page's banner was its
+reader; no page in the Browser Bots app shows it yet). Nothing interrupts an
+open window. Downloading and installing happen solely on an explicit
 `POST /api/update/install`.
 
 ONE install path: download the signed DMG, verify it, and swap the .app
@@ -49,8 +49,8 @@ BUNDLE_ID = "io.fused.render.app"  # scripts/setup_py2app.py + macapp.BUNDLE_ID
 MANIFEST_URL = os.environ.get(
     "FUSED_RENDER_APP_UPDATE_MANIFEST_URL",
     "https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json")
-# The first check runs right after boot so the launcher's banner appears on
-# its first polls rather than minutes into the session; every check after it
+# The first check runs right after boot so a page polling /api/update sees it
+# on its first polls rather than minutes into the session; every check after it
 # is common.CHECK_INTERVAL_S apart.
 STARTUP_DELAY_S = 1.0
 # A CHECK-ONLY MANAGER IN A DEV RUN. `start()` refuses to run outside a bundle
@@ -62,7 +62,7 @@ STARTUP_DELAY_S = 1.0
 # packaged app.
 DEV_MANAGER_ENV = "FUSED_RENDER_APP_UPDATE_DEV_MANAGER"
 NO_AUTO_UPDATE_ENV = "FUSED_RENDER_APP_NO_AUTO_UPDATE"
-# Floor between two checks that actually hit the network. The launcher checks
+# Floor between two checks that actually hit the network. A page may check
 # on its own when the app comes back to the front, and a run of focus flips
 # must not become a run of CDN fetches. Only the throttled path
 # (POST /api/update/check) is affected — the auto loop passes force=True.

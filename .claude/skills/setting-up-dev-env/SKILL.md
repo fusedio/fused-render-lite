@@ -14,8 +14,9 @@ frontend copied verbatim (the Tasks page and the native Claude chat) plus
 Render App's entry (`lite.html`, `src/lite.tsx`, `src/LiteApp.tsx`), built
 with bun into `fused_render_app/static/shell-dist/` (gitignored). `dev.sh`
 builds it when missing; `scripts/build_shell.sh` rebuilds it; `cd frontend &&
-bun run watch` rebuilds on edit. The home page, dock, launcher and
-`runtime.js` stay hand-written static files served per request.
+bun run watch` rebuilds on edit. The Browser Bots page (`bots.html`, served
+at `/`) is built the same way; `runtime.js` stays a hand-written static file
+served per request.
 
 ## Running the Dev Server
 

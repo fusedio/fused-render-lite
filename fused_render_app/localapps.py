@@ -3,10 +3,9 @@
 fused-render, the editor, keeps every app it works on as a plain folder one
 level under ``local/`` in its workspace (``FUSED_RENDER_DIR``, default
 ``~/Fused`` — the same override ``shared/appenv.py`` honours). Render App
-lists those folders on its home page and in the launcher next to the
-showcase, and opens them IN PLACE through the ordinary ``/open?_file=<dir>``
-path (`appfile.open_app_dir`): no ``.fused`` export step between editing an
-app and running it here.
+opens them IN PLACE through ``POST /api/open`` (`appfile.open_app_dir`): no
+``.fused`` export step between editing an app and running it here. The
+task peek (`current_apps`) and `server.app_dir_for` read this module.
 
 What makes a folder an app is fused-render's own rule (`appfile.dir_entry`):
 a non-hidden direct-child ``.html`` carrying ``<meta name="fused-app">``. A

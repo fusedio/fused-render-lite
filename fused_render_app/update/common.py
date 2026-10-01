@@ -39,8 +39,8 @@ FETCH_TIMEOUT_S = 15.0
 DOWNLOAD_TIMEOUT_S = 300.0
 # Every five minutes, as fused-render settled on (one ~300-byte signed GET on
 # CloudFront; a release sitting unnoticed for part of a working day costs
-# more than 288 of those). The launcher page polls /api/update on top, and
-# checks again when the app comes back to the front.
+# more than 288 of those). A page may poll /api/update on top, and check
+# again when the app comes back to the front.
 CHECK_INTERVAL_S = 5 * 60
 MAX_MANIFEST_BYTES = 64 * 1024
 # The shipped DMG is ~42 MB (STATUS.md); 200 MB leaves room to grow several

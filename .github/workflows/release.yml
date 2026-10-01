@@ -203,7 +203,7 @@ jobs:
 
       - name: Publish signed update manifest
         # The in-app updater (fused_render_app/update/mac.py) polls this fixed
-        # name and shows the launcher page's update banner when it names a
+        # name and reports it through GET /api/update when it names a
         # newer version. Same scheme as fused-render's macOS manifest, signed
         # with this repo's own FUSED_RENDER_UPDATE_SIGNING_KEY (a Render App
         # key, not fused-render's; its public half is pinned in
