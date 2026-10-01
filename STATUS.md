@@ -74,6 +74,25 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.10.3
+
+Patch: three PRs syncing Render App's Claude sessions with fused-render.
+
+- **Skills for spawned sessions (#44)**: the pane prompt has pointed every
+  session at `fused-render-authoring` since 0.10.1, but no skills shipped and
+  `FUSED_RENDER_SKILL_PLUGIN_DIR` was never set. `fused_render_app/skills/`
+  now ships fused-render's skills + plugin manifest (synced verbatim via
+  `scripts/sync_claude_tasks.py --skills`); `make_server` assembles the plugin
+  root under the app home and exports the var; `start_ai` installs the
+  published `fusedio/fused-render` plugin on a daemon thread. The pane prompt
+  says the session is on Render App.
+- **Server origin in the system prompt (#43)**: synced `agent.py` appends
+  `FUSED_RENDER_ORIGIN` so sessions check pages on `127.0.0.1:2777`, not the
+  1777 default. The sync script no longer copies the legacy chat page and
+  `vendor/`.
+- **`/render?path=<folder>` (#46)**: a folder with an `index.html` 307s to
+  `<folder>/index.html` (query kept) instead of 404ing.
+
 ## 0.10.2
 
 Patch: one fix PR, no packaging change.
