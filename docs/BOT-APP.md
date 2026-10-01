@@ -383,3 +383,34 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
 comparison. `pytest -q` green; `cd frontend && bun run build` (typecheck +
 boundaries) green; `bun test` for the ported pure libs (`md`, `format`,
 `unread`, `layout`).
+
+## 9. Status (2026-10-02)
+
+Landed and checked live against a dev server on 2799 (Chrome driven through
+Argent over CDP; OpenBot open in FusedRender.app in the next tab):
+
+- Backend: 970 pytest green. Real `claude` (haiku) + real Chrome through the
+  agent engine: goto → thought/action/done with step thumbnails; `ask` with
+  options answered from the chat; the approval gate on a "Buy now" click,
+  deny path, and the denied-action memory (a refused action is not re-asked
+  until the user speaks again — added after haiku retried a denied click);
+  Stop mid-approval ends the task with `system "Stopped"` and leaves no
+  `claude` / `botmcp.py` process behind; the usage ledger records cost and
+  the turn's full input context (fresh + cache-write + cache-read tokens).
+- Frontend: 77 bun tests green, `bun run build` green. Bot list, New bot
+  dialog (+ Advanced), Settings, row context menu, preview pane with inbox /
+  routines / usage strip, live view (screencast, Take over, URL bar
+  navigation, tab strip, Hand back), Builds panel (filtered to builds — fixed
+  a recorded build with an empty entry id matching every bare session row),
+  Apps panel (gallery thumbnails through `/embed?…&_preview=1` with the host
+  URL left clean, viewer, kebab menu, Beside chat side app), Usage, Routines
+  (add / delete with confirm), Skills, light theme, the composer send with
+  the "Task started" toast and the session divider.
+- Native shell from source (`python -m fused_render_app.macapp`): a
+  "Browser Bots" window on `/`, Open in Browser as the only title-bar
+  button, 0.11.0 in `server.json`.
+
+Not exercised live: dictation (needs a microphone grant), iMessage (needs
+Full Disk Access), a real `build`, the local Gemma tier (steps engine; unit
+tested), Chrome profile import and encryption at rest (unit tested in
+browser.py).
