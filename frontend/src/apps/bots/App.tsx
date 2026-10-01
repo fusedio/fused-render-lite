@@ -11,6 +11,7 @@ import { ChatPane } from "./components/ChatPane";
 import { useFaceAnimator } from "./components/faceAnim";
 import { LiveView } from "./components/LiveView";
 import { PreviewPane } from "./components/PreviewPane";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { Dialogs } from "./dialogs/Dialogs";
 import { useLayout } from "./hooks/useLayout";
 import { installNotify } from "./lib/notify";
@@ -35,6 +36,7 @@ export default function App() {
   return (
     <>
       <Banner />
+      <UpdateBanner />
       <main>
         <BotList
           onAddBot={() => openDialog({ kind: "newBot" })}

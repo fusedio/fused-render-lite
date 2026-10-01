@@ -561,6 +561,15 @@ body.sideapp .preview :is(.shotwrap, .toast, .cap, .info) { display: none; }
 #banner { display: none; gap: 10px; align-items: center; padding: 8px 14px; background: var(--card); box-shadow: inset 0 -2px 0 var(--warn); }
 #banner.show { display: flex; }
 #banner span { flex: 1; }
+/* Self-update (components/UpdateBanner.tsx): #banner's box, accent rule (err when an install failed), thin progress bar on the rule. */
+#update { position: relative; display: flex; gap: 10px; align-items: center; padding: 8px 14px; background: var(--card); box-shadow: inset 0 -2px 0 var(--accent); }
+#update.err { box-shadow: inset 0 -2px 0 var(--err); color: var(--err); }
+#update span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#update span em { font-style: normal; color: var(--muted); }
+#update .ubar { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--raised); overflow: hidden; }
+#update .ubar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+#update .ubar.indet i { width: 30%; animation: ubar-indet 1.2s ease-in-out infinite; }
+@keyframes ubar-indet { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 
 /* Responsive breakpoints last so they win on source order. */
 @media (max-width: 900px)  {
