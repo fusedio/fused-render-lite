@@ -389,7 +389,7 @@ boundaries) green; `bun test` for the ported pure libs (`md`, `format`,
 Landed and checked live against a dev server on 2799 (Chrome driven through
 Argent over CDP; OpenBot open in FusedRender.app in the next tab):
 
-- Backend: 1048 pytest green (2 skipped). Real `claude` (haiku) + real
+- Backend: 1053 pytest green (2 skipped). Real `claude` (haiku) + real
   Chrome through the agent engine: goto → thought/action/done with step
   thumbnails; `ask` with options answered from the chat; the approval gate
   on a "Buy now" click, deny path, and the denied-action memory (a refused
@@ -434,6 +434,16 @@ Argent over CDP; OpenBot open in FusedRender.app in the next tab):
 - Native shell from source (`python -m fused_render_app.macapp`): a
   "Browser Bots" window on `/`, Open in Browser as the only title-bar
   button, 0.11.0 in `server.json`.
+- Packaged app (`dist/RenderApp-0.11.0.dmg`, 42 MB, python.org framework
+  build, highest minos 11.0, ad-hoc signed — Developer ID signing needs the
+  "flow" keychain unlocked): launched from the DMG's bundle with its own
+  home beside the installed 0.10.2 — 0.11.0 on the next free port, the
+  Browser Bots window, a bot created, greeted and run through the Claude
+  engine (the CLI found from `~/.local/bin` inside the bundle), goto →
+  answer with a step thumbnail. Found and fixed there: every update check
+  failed TLS verification because openers were built before the bootstrap's
+  dangling `SSL_CERT_FILE` was repaired (STATUS 0.11.0); the rebuilt bundle
+  checks cleanly.
 
 Not exercised live: dictation (needs a microphone grant), iMessage (needs
 Full Disk Access), Chrome profile import and encryption at rest (unit
