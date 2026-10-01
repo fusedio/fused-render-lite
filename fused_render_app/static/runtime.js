@@ -73,6 +73,14 @@
   // batches history writes.
   function findTarget() {
     let t = window;
+    // A gallery thumbnail (`_preview=1` on its own URL) is one of many frames
+    // on the host page: it must never write its params onto the host page's
+    // URL, so it is its own target. (Inlined: `ownQuery` is defined further down.)
+    try {
+      if (new URLSearchParams(location.search).get("_preview") === "1") return window;
+    } catch (e) {
+      /* no readable location: fall through to the ancestor walk */
+    }
     try {
       while (t.parent && t.parent !== t) {
         void t.parent.location.href;

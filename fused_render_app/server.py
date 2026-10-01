@@ -1,11 +1,12 @@
 """The whole HTTP surface of fused-render-app, on the stdlib server.
 
 Pages
-  GET  /                    placeholder: drop a .fused here / open one
+  GET  /, /index.html       the Browser Bots page (static/shell-dist/bots.html)
   GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
                             (a folder app — ~/Fused/local/<app>, localapps.py — opens in place)
   GET  /open?_url=<http(s)> downloads (POST /api/fetch), then navigates to _file
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
+  GET  /embed?path=<abs>    the same, for an existing .html/.htm file only (no folder redirect)
 
 API (the six supported fused.* calls, plus what the shell needs)
   POST /api/open            {file}            -> {dir, entry, name, app_id, view}
@@ -164,15 +165,23 @@ def is_shipped_template(py: str) -> bool:
 
 def app_dir_for(path: str) -> str | None:
     """The app root that ``path`` lives under — an extract under
-    ``paths.apps_dir()`` or a folder app under ``localapps.local_dir()`` —
-    or None."""
+    ``paths.apps_dir()``, a folder app under ``localapps.local_dir()``, or a
+    folder under ``<workspace>/app/`` (the bots' apps) — or None."""
     root = os.path.realpath(paths.apps_dir())
     real = os.path.realpath(path)
     if real.startswith(root + os.sep):
         rel = real[len(root) + 1:]
         top = rel.split(os.sep, 1)[0]
         return os.path.join(root, top)
-    return localapps.app_dir_for(path)
+    local = localapps.app_dir_for(path)
+    if local:
+        return local
+    from fused_render_app.bots import paths as bots_paths
+
+    apps = os.path.realpath(bots_paths.apps_root())
+    if real.startswith(apps + os.sep):
+        return os.path.join(apps, real[len(apps) + 1:].split(os.sep, 1)[0])
+    return None
 
 
 def _openable(path: str) -> bool:
@@ -235,14 +244,16 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         route = url.path
         try:
-            if route == "/":
-                return self._static("index.html")
+            if route in ("/", "/index.html"):
+                return self._bots_page()
             if route.startswith("/static/"):
                 return self._static(route[len("/static/"):])
             if route == "/open":
                 return self._open_page(q)
             if route == "/render":
                 return self._render(q)
+            if route == "/embed":
+                return self._embed(q)
             if route == "/api/open/status":
                 return self._open_status(q)
             if route == "/api/fs/raw":
@@ -465,6 +476,40 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "r", encoding="utf-8") as f:
             self._html(f.read())
 
+    def _bots_page(self) -> None:
+        """`/` and `/index.html`: the Browser Bots page, built from `frontend/`
+        into `static/shell-dist/bots.html`. Not built: a 503 HTML page saying how."""
+        path = os.path.join(STATIC_DIR, "shell-dist", "bots.html")
+        if not os.path.isfile(path):
+            return self._html("<!doctype html><meta charset=\"utf-8\"><title>Browser Bots</title>"
+                              "<p>Browser Bots page not built "
+                              "(fused_render_app/static/shell-dist/bots.html missing). "
+                              "Run scripts/build_shell.sh.</p>", 503)
+        with open(path, "r", encoding="utf-8") as f:
+            self._html(f.read())
+
+    def _embed(self, q: dict) -> None:
+        """`/embed?path=<abs html>&…`: `/render` for framing an app in a gallery
+        or card — runtime injected, but no folder redirect and nothing served
+        that is not an existing `.html`/`.htm` file."""
+        path = q.get("path") or ""
+        if (not os.path.isabs(path) or not os.path.isfile(path)
+                or os.path.splitext(path)[1].lower() not in (".html", ".htm")):
+            return self._error(f"no such file: {path}", 404)
+        self._render_html(path)
+
+    def _render_html(self, path: str) -> None:
+        """Answer the app page at ``path`` with `runtime.js` injected into <head>."""
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            html = f.read()
+        injection = '<script src="/static/runtime.js"></script>'
+        m = _HEAD_RE.search(html)
+        if m:
+            html = html[: m.end()] + injection + html[m.end():]
+        else:
+            html = injection + html
+        self._html(html)
+
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
         if not os.path.isabs(path):
@@ -482,15 +527,7 @@ class Handler(BaseHTTPRequestHandler):
                 if k != "path"]
             location = "/render?" + urllib.parse.urlencode([("path", entry), *rest])
             return self._send(307, b"", "text/plain", {"Location": location})
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            html = f.read()
-        injection = '<script src="/static/runtime.js"></script>'
-        m = _HEAD_RE.search(html)
-        if m:
-            html = html[: m.end()] + injection + html[m.end():]
-        else:
-            html = injection + html
-        self._html(html)
+        self._render_html(path)
 
     def _showcase_preview(self, q: dict) -> None:
         data = showcase.preview_bytes(q.get("id") or "")

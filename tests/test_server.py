@@ -31,10 +31,55 @@ def q(**kw):
 
 
 def test_placeholder_and_open_page(client):
-    status, headers, body = client.get("/")
-    assert status == 200 and b".fused" in body
+    from fused_render_app import server
+
+    # `/` is the bots page: the built file when it exists, else a 503 saying how to build it
+    built = os.path.isfile(os.path.join(server.STATIC_DIR, "shell-dist", "bots.html"))
+    for route in ("/", "/index.html"):
+        status, headers, body = client.get(route)
+        if built:
+            assert status == 200
+        else:
+            assert status == 503 and b"Run scripts/build_shell.sh" in body
+        assert headers["Content-Type"].startswith("text/html")
     status, _, body = client.get("/open" + q(_file="/nope/x.fused"))
     assert status == 200 and b'"/nope/x.fused"' in body
+
+
+def test_embed_route(client, tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text("<html><head><title>t</title></head><body>HELLO</body></html>")
+    status, headers, body = client.get("/embed" + q(path=str(page)))
+    assert status == 200 and headers["Content-Type"].startswith("text/html")
+    assert body.index(b"/static/runtime.js") < body.index(b"HELLO")
+
+    # a folder is not redirected to its index.html, even when it has one
+    folder = tmp_path / "app"
+    folder.mkdir()
+    (folder / "index.html").write_text("<html><body>INDEX</body></html>")
+    status, headers, _ = client.get("/embed" + q(path=str(folder)))
+    assert status == 404 and "Location" not in headers
+
+    # nothing but an .html/.htm file is served
+    script = tmp_path / "x.py"
+    script.write_text("print('secret')")
+    status, _, body = client.get("/embed" + q(path=str(script)))
+    assert status == 404 and b"secret" not in body
+    status, _, _ = client.get("/embed" + q(path=str(tmp_path / "missing.html")))
+    assert status == 404
+    status, _, _ = client.get("/embed" + q(path="relative.html"))
+    assert status == 404
+
+
+def test_app_dir_for_apps_root(tmp_path, monkeypatch):
+    from fused_render_app import server
+
+    monkeypatch.setenv("FUSED_RENDER_DIR", str(tmp_path))
+    f = tmp_path / "app" / "x" / "sub" / "f.py"
+    f.parent.mkdir(parents=True)
+    f.write_text("")
+    assert server.app_dir_for(str(f)) == os.path.realpath(tmp_path / "app" / "x")
+    assert server.app_dir_for(str(tmp_path / "elsewhere" / "f.py")) is None
 
 
 def test_open_run_and_fs(client, v2_fused):
