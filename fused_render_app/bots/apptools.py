@@ -8,17 +8,18 @@ with or without a manifest, is listed in each bot's APPS prompt section
 
 - discovery: which apps have manifests (apps root + fused-render's registered
   and linked app lists), cached and refreshed on manifest mtime;
-- execution: the bundled runner `fused.agent_core.app_mcp._run_app_tool`,
-  the exact code path `fused app serve` uses (pins applied last, local
-  backend only);
+- execution: the bundled runner `fused.agent_core.app_mcp._run_app_tool`
+  (the exact code path `fused app serve` uses) when that package is
+  importable, else the NATIVE runner below, which mirrors app_mcp's manifest
+  rules and pin semantics and runs the tool's file on the app's own
+  interpreter through `env.run_python` (pins applied last on both paths);
 - the write heuristic that decides which tools go through the approval gate;
 - the APP TOOLS prompt section;
 - app skills: an app's SKILL.md and its `.py` files run through `/api/run`.
 
-`fused.agent_core` is not part of the Render App bundle, so `available()` is
-False here unless that package happens to be importable; everything that
-needs it degrades to "no tools". The APPS listing, SKILL.md parsing and
-`run_py` need nothing beyond the stdlib.
+`fused.agent_core` is not part of the Render App bundle, so the native path
+is the one that runs here; `available()` is True on either path. The APPS
+listing, SKILL.md parsing and `run_py` need nothing beyond the stdlib.
 
 Differences from OpenBot: there is no app folder of our own to skip
 (`SKIP_DIR` is None, so `discover()` and `list_apps()` skip nothing unless
@@ -44,6 +45,250 @@ try:
     _HAVE = True
 except Exception:  # ImportError, or a bundled module that fails to import
     _HAVE = False
+_NATIVE = not _HAVE  # the stdlib path below stands in for the bundled module
+
+
+# ---- native manifest + runner (used whenever fused.agent_core is absent) ---------
+# Mirrors fused.agent_core.app_mcp (manifest validation §2-§3, schema §4, pins
+# applied last §5) without importing it. Execution differs by design: the
+# target file runs on the APP'S OWN interpreter through env.run_python (its
+# pyproject venv, or the shared legacy set), the same path a page's
+# fused.runPython takes, with mcp.toml's `entrypoint` instead of `main`.
+import ast  # noqa: E402
+import tomllib  # noqa: E402
+from typing import Any  # noqa: E402
+
+MANIFEST_NAME = "mcp.toml"
+DEFAULT_ENTRYPOINT = "main"
+_JSON_SCALARS = (str, int, float, bool)
+_SIMPLE_TYPES = {"str": str, "int": int, "float": float, "bool": bool, "list": list, "dict": dict}
+_OPAQUE = object()
+CHILD_TIMEOUT_S = 300  # the child's own bound (app_mcp's backend stops at 300 s); run_tool gives up first
+
+
+class AppManifestError(ValueError):
+    """An app folder's mcp.toml is missing, unparseable, or invalid."""
+
+
+@dataclass(frozen=True)
+class AppTool:
+    name: str
+    description: str
+    file: str
+    entrypoint: str = DEFAULT_ENTRYPOINT
+    pinned: dict = field(default_factory=dict)
+    signature: str | None = None  # fused-render's curation-time snapshot; never read here
+
+    def target_path(self, app_dir) -> Path:
+        return Path(app_dir) / self.file
+
+
+@dataclass(frozen=True)
+class AppManifest:
+    app_dir: Path
+    tools: tuple
+
+
+@dataclass(frozen=True)
+class ParamSpec:
+    name: str
+    annotation: type | None = None
+    has_default: bool = False
+    default: Any = None
+
+
+@dataclass(frozen=True)
+class AppToolSpec:
+    tool: AppTool
+    params: list
+    path: Path      # the resolved target file, run as it is on disk at call time
+    app_dir: Path   # whose interpreter runs it (env.run_python looks for pyproject.toml here)
+
+
+def _native_load_app_manifest(app_dir) -> AppManifest:
+    """Read and validate <app_dir>/mcp.toml (app_mcp.load_app_manifest's rules)."""
+    app_dir = Path(app_dir)
+    if not app_dir.is_dir():
+        raise AppManifestError(f"{app_dir} is not a directory — nothing to serve.")
+    manifest_path = app_dir / MANIFEST_NAME
+    try:
+        raw_text = manifest_path.read_text()
+    except OSError as exc:
+        raise AppManifestError(f"No {MANIFEST_NAME} in {app_dir} — curate the app's tools first. [{exc}]") from exc
+    try:
+        raw = tomllib.loads(raw_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise AppManifestError(f"{manifest_path} is not valid TOML: {exc}") from exc
+    entries = raw.get("tool")
+    if not isinstance(entries, list) or not entries:
+        raise AppManifestError(f"{manifest_path} declares no [[tool]] tables — an app serves exactly the curated tools.")
+    tools, seen = [], set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise AppManifestError(f"{manifest_path}: [[tool]] #{index + 1} is not a table (got {type(entry).__name__}).")
+        tool = _tool_from_entry(entry, index, manifest_path, app_dir)
+        if tool.name in seen:
+            raise AppManifestError(f"{manifest_path}: duplicate tool name {tool.name!r} — MCP tool names must be unique.")
+        seen.add(tool.name)
+        tools.append(tool)
+    return AppManifest(app_dir=app_dir, tools=tuple(tools))
+
+
+def _tool_from_entry(entry, index, manifest_path, app_dir) -> AppTool:
+    where = f"{manifest_path}: [[tool]] #{index + 1}"
+    name = _required_str(entry, "name", where)
+    if not name.isidentifier():
+        raise AppManifestError(f"{where}: name {name!r} is not a Python identifier — a tool name has to be one.")
+    description = _required_str(entry, "description", where)
+    file = _required_str(entry, "file", where)
+    entrypoint = entry.get("entrypoint", DEFAULT_ENTRYPOINT)
+    if not isinstance(entrypoint, str) or not entrypoint.isidentifier():
+        raise AppManifestError(f"{where} ({name}): entrypoint {entrypoint!r} is not a Python identifier.")
+    signature = entry.get("signature")
+    if signature is not None and not isinstance(signature, str):
+        raise AppManifestError(f"{where} ({name}): signature must be a string.")
+    return AppTool(name=name, description=description, file=_validated_target(file, name, where, app_dir),
+                   entrypoint=entrypoint, pinned=_validated_pinned(entry.get("pinned"), name, where),
+                   signature=signature)
+
+
+def _required_str(entry, key, where) -> str:
+    value = entry.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise AppManifestError(f"{where}: {key} is required and must be a non-empty string (got {value!r}).")
+    return value.strip()
+
+
+def _validated_target(file, name, where, app_dir) -> str:
+    """A `.py` file that exists inside app_dir; containment checked on the resolved path."""
+    if not file.endswith(".py"):
+        raise AppManifestError(f"{where} ({name}): file {file!r} is not a .py file — a tool's target is a Python entrypoint file.")
+    try:
+        resolved = (app_dir / file).resolve()
+        root = app_dir.resolve()
+    except OSError as exc:
+        raise AppManifestError(f"{where} ({name}): file {file!r} is unreadable: {exc}") from exc
+    if not resolved.is_relative_to(root):
+        raise AppManifestError(f"{where} ({name}): file {file!r} resolves outside the app folder ({resolved}) — "
+                               "a served tool may only run the app's own code.")
+    if not resolved.is_file():
+        raise AppManifestError(f"{where} ({name}): file {file!r} does not exist in {app_dir}.")
+    return file
+
+
+def _validated_pinned(pinned, name, where) -> dict:
+    if pinned is None:
+        return {}
+    if not isinstance(pinned, dict):
+        raise AppManifestError(f"{where} ({name}): pinned must be a table of parameter → value (got {type(pinned).__name__}).")
+    for key, value in pinned.items():
+        if not key.isidentifier():
+            raise AppManifestError(f"{where} ({name}): pinned key {key!r} is not a Python identifier — "
+                                   "a pin names a parameter of the entrypoint.")
+        if not _is_json_value(value):
+            raise AppManifestError(f"{where} ({name}): pinned value for {key!r} has no JSON equivalent "
+                                   f"({type(value).__name__}); pins cross the process boundary as JSON.")
+    return dict(pinned)
+
+
+def _is_json_value(value) -> bool:
+    if value is None or isinstance(value, _JSON_SCALARS):
+        return True
+    if isinstance(value, list):
+        return all(_is_json_value(v) for v in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_json_value(v) for k, v in value.items())
+    return False
+
+
+def _literal_default(node):
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError):
+        return _OPAQUE
+
+
+def _annotation_type(node):
+    return _SIMPLE_TYPES.get(node.id) if isinstance(node, ast.Name) else None
+
+
+def _param(arg, default_node, has_default):
+    value = _literal_default(default_node) if has_default else None
+    return ParamSpec(name=arg.arg, annotation=_annotation_type(arg.annotation), has_default=has_default,
+                     default=None if value is _OPAQUE else value)
+
+
+def _params_from_funcdef(fn) -> list:
+    """Positional (incl. positional-only) and keyword-only params; *args/**kwargs skipped.
+    Defaults align right, as Python binds them."""
+    a = fn.args
+    positional = a.posonlyargs + a.args
+    offset = len(positional) - len(a.defaults)
+    out = [_param(arg, a.defaults[i - offset] if i >= offset else None, i >= offset) for i, arg in enumerate(positional)]
+    out += [_param(arg, d, d is not None) for arg, d in zip(a.kwonlyargs, a.kw_defaults)]
+    return out
+
+
+def _funcdef_named(tree, name):
+    for node in tree.body:  # top level only: the runner looks the name up in the module namespace
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+def _native_build_app_tool_spec(manifest: AppManifest, tool: AppTool) -> AppToolSpec:
+    """The tool's params from a STATIC AST read of its entrypoint (the module is never
+    imported here), minus the pinned names."""
+    path = tool.target_path(manifest.app_dir)
+    source = path.read_text()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise AppManifestError(f"{tool.name}: {tool.file} does not parse as Python ({exc}) — "
+                               "the served tool's schema is read from its source.") from exc
+    fn = _funcdef_named(tree, tool.entrypoint)
+    if fn is None:
+        raise AppManifestError(f"{tool.name}: {tool.file} defines no top-level {tool.entrypoint!r} function — "
+                               "the manifest's entrypoint must exist in the target file.")
+    params = [p for p in _params_from_funcdef(fn) if p.name not in tool.pinned]
+    return AppToolSpec(tool=tool, params=params, path=path.resolve(), app_dir=Path(manifest.app_dir))
+
+
+def call_params(tool, kwargs) -> dict:
+    """Caller args overlaid by pins: applied last, so no argument can override a pin."""
+    params = dict(kwargs)
+    params.update(tool.pinned)
+    return params
+
+
+def _native_run_app_tool(spec: AppToolSpec, kwargs) -> Any:
+    """Run one tool on its app's own interpreter and return the entrypoint's value;
+    raise RuntimeError on any failure (run_tool turns it into `error: ...` text)."""
+    from fused_render_app import env
+
+    tool = spec.tool
+    res = env.run_python(str(spec.path), call_params(tool, kwargs), str(spec.app_dir),
+                         timeout=CHILD_TIMEOUT_S, entrypoint=tool.entrypoint)
+    if not res.get("ok"):
+        err = res.get("error") or {}
+        if isinstance(err, dict):
+            msg = f"{err.get('type') or 'Error'}: {err.get('message') or ''}"
+        else:
+            msg = str(err)
+        raise RuntimeError(f"app tool {tool.name!r} failed: {msg}")
+    rv = res.get("result")
+    if isinstance(rv, str):  # app_mcp decodes a JSON-text return value
+        try:
+            rv = json.loads(rv)
+        except (ValueError, TypeError):
+            pass
+    return rv
+
+
+if _NATIVE:
+    load_app_manifest = _native_load_app_manifest
+    build_app_tool_spec = _native_build_app_tool_spec
+    _run_app_tool = _native_run_app_tool
 
 FUSED_HOME = os.path.expanduser("~/.fused-render")
 
@@ -68,7 +313,8 @@ if _HAVE:
 
 
 def available():
-    return _HAVE
+    """True on either path: the bundled runner, or the native one above."""
+    return _HAVE or _NATIVE
 
 
 @dataclass
@@ -153,7 +399,7 @@ def _load_dir(d):
 
 def discover(roots, registry_files, skip_dir=None):
     """All tool records from every app with a valid manifest, deduplicated by real path."""
-    if not _HAVE:
+    if not available():
         return []
     seen, out = set(), []
     skip = os.path.realpath(skip_dir) if skip_dir else None
@@ -197,7 +443,7 @@ def _signature(roots, registry_files, skip_dir):
 
 def registry(force=False):
     global _cache, _cache_at, _cache_sig
-    if not _HAVE:
+    if not available():
         return []
     with _lock:
         now = time.time()
@@ -248,7 +494,10 @@ class RunResult:
 
 
 def _call(rec, kwargs):
-    # asyncio.run in a worker thread (the bot loop is a thread; no running loop there).
+    if _NATIVE:  # the native runner is sync (a child process through env.run_python)
+        return _run_app_tool(rec.spec, kwargs)
+    # The bundled one is async: asyncio.run in a worker thread (the bot loop is a
+    # thread; no running loop there).
     return asyncio.run(_run_app_tool(rec.spec, kwargs))
 
 

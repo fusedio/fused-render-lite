@@ -1,7 +1,8 @@
 """Worker-process entry point for ``fused.runPython``.
 
-Reads a JSON request ``{"path": ..., "params": {...}}`` from stdin, imports
-the target module, calls its ``main(**params)`` and prints ONE JSON result
+Reads a JSON request ``{"path": ..., "params": {...}, "entrypoint"?: ...}``
+from stdin, imports the target module, calls its ``main(**params)`` (or the
+named ``entrypoint``, default ``main``) and prints ONE JSON result
 line to stdout. Runs in its own process (the app's own venv interpreter) so
 user code cannot take down the server; the parent enforces the timeout.
 
@@ -23,6 +24,9 @@ def run():
     req = json.load(sys.stdin)
     path = os.path.abspath(req["path"])
     params = req.get("params") or {}
+    # The function to call: `main` for runPython; an app MCP tool names its own
+    # (mcp.toml's `entrypoint`, run through bots/apptools.py).
+    entrypoint = req.get("entrypoint") or "main"
 
     captured = io.StringIO()
     real_stdout = sys.stdout
@@ -36,10 +40,10 @@ def run():
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        fn = getattr(mod, "main", None)
+        fn = getattr(mod, entrypoint, None)
         if not callable(fn):
             raise AttributeError(
-                f"{os.path.basename(path)} does not define a callable 'main' function"
+                f"{os.path.basename(path)} does not define a callable {entrypoint!r} function"
             )
 
         result = fn(**bind_params(fn, params))
@@ -47,7 +51,7 @@ def run():
             json.dumps(result)
         except (TypeError, ValueError):
             raise TypeError(
-                f"main() returned {type(result).__name__}, which is not JSON-serializable; "
+                f"{entrypoint}() returned {type(result).__name__}, which is not JSON-serializable; "
                 "return dict/list/str/number/bool/None (e.g. df.to_dict('records'))"
             ) from None
         out = {"ok": True, "result": result}

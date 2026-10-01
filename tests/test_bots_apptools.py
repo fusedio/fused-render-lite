@@ -1,22 +1,33 @@
 """fused_render_app.bots.apptools (port of OpenBot tests/test_apptools.py).
 
-Tests that discover or run real MCP tools need `fused.agent_core` (the bundled
-runner of `fused app serve`), which the Render App does not ship: they take the
-`core` fixture and skip when it is absent. Everything else (the write
-heuristic, the prompt sections, the APPS listing, SKILL.md parsing,
-resolve_app, is_owned, run_py's envelope handling) runs everywhere.
+Tests that discover or run real MCP tools go through whichever runner is
+present: the bundled `fused.agent_core.app_mcp` when importable, else the
+native one (always, in the Render App). The native runner executes through
+`env.run_python`; the autouse `stdlib_python` fixture points it at this
+interpreter so no test builds a uv venv.
 """
 import json
 import os
 import sys
 import textwrap
 import time
+from pathlib import Path
 
 import pytest
 
+from fused_render_app import env
 from fused_render_app.bots import apptools
+from fused_render_app.bots import bot as botmod
 
 os.environ.setdefault("OPENFUSED_APP_SERVE_PYTHON", sys.executable)
+
+
+@pytest.fixture(autouse=True)
+def stdlib_python(monkeypatch):
+    # As in test_server.py: run an app's .py on this interpreter instead of a uv venv.
+    monkeypatch.setattr(env, "base_python", lambda: sys.executable)
+    monkeypatch.setattr(env, "is_ready", lambda app_dir: True)
+    monkeypatch.setattr(env, "interpreter_for", lambda app_dir: sys.executable)
 
 
 def make_app(root, folder, tools=None, body=None):
@@ -56,24 +67,33 @@ def apps_root(tmp_path):
 
 @pytest.fixture
 def core():
-    """Skip unless the bundled MCP runner is importable."""
-    pytest.importorskip("fused.agent_core.app_mcp")
+    """A runner is present: the bundled one or the native one (always one of them)."""
     assert apptools.available() is True
 
 
+@pytest.fixture
+def native(core):
+    """Tests of the native runner itself."""
+    if not apptools._NATIVE:
+        pytest.skip("the bundled fused.agent_core runner is importable here")
+
+
 # ---- availability ------------------------------------------------------------------
-def test_available_matches_import():
+def test_available_on_either_path():
     try:
         import fused.agent_core.app_mcp  # noqa: F401
         have = True
     except Exception:  # noqa: BLE001
         have = False
-    assert apptools.available() is have
+    assert apptools._HAVE is have
+    assert apptools._NATIVE is (not have)
+    assert apptools.available() is True
 
 
-def test_without_core_everything_is_no_tools(apps_root, monkeypatch):
+def test_without_any_runner_everything_is_no_tools(apps_root, monkeypatch):
     make_app(apps_root, "fake-docs")
     monkeypatch.setattr(apptools, "_HAVE", False)
+    monkeypatch.setattr(apptools, "_NATIVE", False)
     assert apptools.available() is False
     assert apptools.discover([apps_root], []) == []
     assert apptools.registry(force=True) == []
@@ -262,7 +282,9 @@ def test_run_tool_non_json_result(core, apps_root):
     body = "import datetime\ndef main(x: int = 1, mode: str = 'a'):\n    return {'when': datetime.date(2026, 9, 29)}\n"
     rec = _one(apps_root, body=body)
     res = apptools.run_tool(rec, {})
-    assert res.ok is False and res.text.startswith("error:") and "not JSON serializable" in res.text
+    # json.dumps's own wording on the bundled runner; _child.py's on the native one.
+    assert res.ok is False and res.text.startswith("error:")
+    assert "not JSON serializable" in res.text or "not JSON-serializable" in res.text
 
 
 def test_run_tool_timeout_warns_it_may_still_complete(core, apps_root):
@@ -296,6 +318,279 @@ def test_run_tool_timeout_and_errors_with_fake_runner(monkeypatch):
     assert not boom.ok and boom.text == "error: boom"
     obj = apptools.run_tool(rec, {"x": "obj"})
     assert obj.ok  # default=str stringifies anything
+
+
+# ---- native runner: manifest validation (app_mcp §2-§3 rules) ----------------------
+_GOOD = '[[tool]]\nname = "t1"\ndescription = "d"\nfile = "t.py"\n'
+
+
+@pytest.mark.parametrize("toml,needle", [
+    ("", "declares no [[tool]] tables"),
+    ("[other]\nx = 1\n", "declares no [[tool]] tables"),
+    ("[[tool]\n", "is not valid TOML"),
+    ("tool = [1]\n", "is not a table"),
+    ('[[tool]]\nname = "bad-name"\ndescription = "d"\nfile = "t.py"\n', "is not a Python identifier"),
+    ('[[tool]]\nname = "t1"\nfile = "t.py"\n', "description is required"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\n', "file is required"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\nfile = "   "\n', "file is required"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\nfile = "missing.py"\n', "does not exist"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\nfile = "index.html"\n', "is not a .py file"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\nfile = "../outside.py"\n', "resolves outside the app folder"),
+    ('[[tool]]\nname = "t1"\ndescription = "d"\nfile = "/etc/x.py"\n', "resolves outside the app folder"),
+    (_GOOD + 'entrypoint = "not ok"\n', "entrypoint 'not ok' is not a Python identifier"),
+    (_GOOD + "entrypoint = 3\n", "entrypoint 3 is not a Python identifier"),
+    (_GOOD + "signature = 3\n", "signature must be a string"),
+    (_GOOD + 'pinned = "x"\n', "pinned must be a table"),
+    (_GOOD + '[tool.pinned]\n"bad key" = 1\n', "pinned key 'bad key' is not a Python identifier"),
+    (_GOOD + "[tool.pinned]\nwhen = 2026-09-29\n", "has no JSON equivalent (date)"),
+    (_GOOD + "[tool.pinned]\nwhen = [1, 2026-09-29]\n", "has no JSON equivalent (list)"),
+    (_GOOD + _GOOD, "duplicate tool name 't1'"),
+])
+def test_native_manifest_errors(native, tmp_path, toml, needle):
+    d = make_app(str(tmp_path), "app", tools=toml)
+    Path(d, "mcp.toml").write_text(toml)  # make_app skips an empty one
+    (tmp_path / "outside.py").write_text("def main():\n    return 1\n")
+    with pytest.raises(apptools.AppManifestError) as e:
+        apptools.load_app_manifest(Path(d))
+    assert needle in str(e.value)
+    assert isinstance(e.value, ValueError)
+
+
+def test_native_manifest_missing_and_not_a_dir(native, tmp_path):
+    d = make_app(str(tmp_path), "app", tools="")
+    with pytest.raises(apptools.AppManifestError, match="No mcp.toml"):
+        apptools.load_app_manifest(Path(d))
+    with pytest.raises(apptools.AppManifestError, match="is not a directory"):
+        apptools.load_app_manifest(tmp_path / "nope")
+
+
+def test_native_manifest_valid_reads_every_field(native, tmp_path):
+    d = make_app(str(tmp_path), "app", tools=textwrap.dedent('''
+        top = "other tooling's table is ignored"
+
+        [[tool]]
+        name = "a_tool"
+        description = "  Spaced.  "
+        file = "sub/../t.py"
+        entrypoint = "other"
+        signature = "other(x)"
+        future_key = "ignored"
+
+        [tool.pinned]
+        mode = "p"
+        n = [1, {k = "v"}]
+
+        [[tool]]
+        name = "b_tool"
+        description = "B"
+        file = "t.py"
+    '''))
+    os.makedirs(os.path.join(d, "sub"))
+    m = apptools.load_app_manifest(Path(d))
+    assert m.app_dir == Path(d)
+    a, b = m.tools  # manifest order
+    assert (a.name, a.description, a.file, a.entrypoint, a.signature) == ("a_tool", "Spaced.", "sub/../t.py", "other", "other(x)")
+    assert a.pinned == {"mode": "p", "n": [1, {"k": "v"}]}
+    assert (b.entrypoint, b.pinned, b.signature) == ("main", {}, None)
+    assert a.target_path(m.app_dir) == Path(d) / "sub/../t.py"
+
+
+# ---- native runner: params from a static AST read ------------------------------------
+_SIG_SRC = textwrap.dedent('''
+    import sys
+    raise SystemExit("importing this module would fail: the spec never imports it")
+    LIMIT = 5
+
+    def helper():
+        pass
+
+    def main(p, /, a, b: int, c: str = "x", d: float = 1.5, *args, e: bool = True, f=LIMIT,
+             g: list[str] = None, h: "int" = 2, i: dict = {"k": [1]}, j: list = [], req_kw, **kw):
+        return 1
+
+    class C:
+        def nested(self):
+            pass
+''')
+
+
+def test_native_params_from_ast(native, tmp_path):
+    d = make_app(str(tmp_path), "app", body=_SIG_SRC, tools=textwrap.dedent('''
+        [[tool]]
+        name = "t1"
+        description = "d"
+        file = "t.py"
+
+        [tool.pinned]
+        d = 2.0
+    '''))
+    m = apptools.load_app_manifest(Path(d))
+    spec = apptools.build_app_tool_spec(m, m.tools[0])
+    got = [(p.name, p.annotation, p.has_default, p.default) for p in spec.params]
+    assert got == [
+        ("p", None, False, None),            # positional-only counts
+        ("a", None, False, None),
+        ("b", int, False, None),
+        ("c", str, True, "x"),
+        # d is pinned: dropped; *args/**kw skipped
+        ("e", bool, True, True),             # keyword-only with a default
+        ("f", None, True, None),             # non-literal default: optional, value opaque
+        ("g", None, True, None),             # list[str] is not a simple name
+        ("h", None, True, 2),                # a string annotation is not resolved
+        ("i", dict, True, {"k": [1]}),
+        ("j", list, True, []),
+        ("req_kw", None, False, None),       # keyword-only, required
+    ]
+    assert spec.path == (Path(d) / "t.py").resolve() and spec.app_dir == Path(d)
+    assert spec.tool is m.tools[0]
+
+
+@pytest.mark.parametrize("body,needle", [
+    ("def main(:\n", "does not parse as Python"),
+    ("def other():\n    pass\n", "defines no top-level 'main' function"),
+    ("class C:\n    def main(self):\n        pass\n", "defines no top-level 'main' function"),
+    ("main = lambda: 1\n", "defines no top-level 'main' function"),
+])
+def test_native_spec_errors(native, tmp_path, body, needle):
+    d = make_app(str(tmp_path), "app", body=body, tools=_GOOD)
+    m = apptools.load_app_manifest(Path(d))
+    with pytest.raises(apptools.AppManifestError, match=needle.replace("(", r"\(")):
+        apptools.build_app_tool_spec(m, m.tools[0])
+
+
+def test_native_async_entrypoint_is_found(native, tmp_path):
+    d = make_app(str(tmp_path), "app", body="async def main(x: int):\n    return x\n", tools=_GOOD)
+    m = apptools.load_app_manifest(Path(d))
+    assert [p.name for p in apptools.build_app_tool_spec(m, m.tools[0]).params] == ["x"]
+
+
+# ---- native runner: execution through env.run_python ---------------------------------
+class _StubBot:
+    """The slice of bots.bot.Bot that run_tool / _deliver touch."""
+    _tool_calls = 0
+    run_tool = botmod.Bot.run_tool
+    _deliver = botmod.Bot._deliver
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, kind, text, **kw):
+        self.events.append((kind, text, kw))
+
+
+@pytest.fixture
+def tool_roots(apps_root, monkeypatch):
+    monkeypatch.setattr(apptools, "ROOTS", [apps_root])
+    monkeypatch.setattr(apptools, "REGISTRY_FILES", [])
+    monkeypatch.setattr(apptools, "_cache_at", 0.0)
+    return apps_root
+
+
+def test_native_bot_run_tool_end_to_end(native, tool_roots):
+    make_app(tool_roots, "fake-docs")
+    b = _StubBot()
+    label, text = b.run_tool("fake docs", "fake_echo", {"x": "7", "mode": "hacked", "bogus": 1})
+    assert label == "tool fake-docs › fake_echo"
+    assert text.startswith("RESULT:\n")
+    body, note = text[len("RESULT:\n"):].split("\n", 1)
+    assert json.loads(body) == {"x": 7, "mode": "pinned"}  # "7" coerced by the annotation; the pin wins
+    assert note == "(ignored unknown args: mode, bogus; the tool takes only the parameters listed)"
+    assert b.events[0][1] == "Used Fake docs › fake_echo" and b.events[0][2]["app"]["tools"] == 1
+
+
+def test_native_bot_run_tool_unknown_tool(native, tool_roots):
+    make_app(tool_roots, "fake-docs")
+    label, text = _StubBot().run_tool("fake-docs", "nope", {})
+    assert text.startswith("error: no such tool. Apps with tools: fake-docs.")
+
+
+def test_native_raising_entrypoint_is_error_text(native, tool_roots):
+    make_app(tool_roots, "fake-docs", body="def main(x: int = 1, mode: str = 'a'):\n    raise ValueError('kaput')\n")
+    _, text = _StubBot().run_tool("fake-docs", "fake_echo", {})
+    assert text == "error: app tool 'fake_echo' failed: ValueError: kaput"
+
+
+def test_native_missing_required_param_is_error_text(native, tool_roots):
+    make_app(tool_roots, "fake-docs", body="def main(x: int, mode: str = 'a'):\n    return x\n")
+    rec = apptools.registry(force=True)[0]
+    res = apptools.run_tool(rec, {})
+    assert not res.ok and res.text == "error: app tool 'fake_echo' failed: ParamError: missing required param: 'x'"
+
+
+def test_native_non_main_entrypoint_and_sibling_imports(native, tool_roots):
+    d = make_app(tool_roots, "multi", body=textwrap.dedent('''
+        import helper_mod
+
+        def main():
+            return "main ran"
+
+        def list_things(limit: int = 2, tag: str = ""):
+            return {"items": helper_mod.items()[:limit], "tag": tag, "cwd": __import__("os").getcwd()}
+
+        def as_text():
+            return '{"decoded": true}'
+    '''), tools=textwrap.dedent('''
+        [[tool]]
+        name = "list_things"
+        description = "Lists things."
+        file = "t.py"
+        entrypoint = "list_things"
+
+        [tool.pinned]
+        tag = "fixed"
+
+        [[tool]]
+        name = "as_text"
+        description = "Returns JSON text."
+        file = "t.py"
+        entrypoint = "as_text"
+    '''))
+    with open(os.path.join(d, "helper_mod.py"), "w") as f:
+        f.write("def items():\n    return ['a', 'b', 'c']\n")
+    recs = {r.name: r for r in apptools.registry(force=True)}
+    assert sorted(recs) == ["as_text", "list_things"]
+    assert [p.name for p in recs["list_things"].params] == ["limit"]
+    res = apptools.run_tool(recs["list_things"], {"limit": 1})
+    got = json.loads(res.text)
+    assert got["items"] == ["a"] and got["tag"] == "fixed"
+    assert os.path.realpath(got["cwd"]) == os.path.realpath(d)
+    assert json.loads(apptools.run_tool(recs["as_text"], {}).text) == {"decoded": True}  # app_mcp decodes JSON text
+
+
+def test_native_runs_on_the_apps_interpreter(native, tool_roots, monkeypatch):
+    """env.run_python is handed the app dir (whose venv runs it) and the entrypoint."""
+    d = make_app(tool_roots, "fake-docs")
+    seen = []
+    real = env.run_python
+
+    def spy(path, params, app_dir, timeout=env.RUN_TIMEOUT_S, entrypoint="main"):
+        seen.append((path, params, app_dir, timeout, entrypoint))
+        return real(path, params, app_dir, timeout=timeout, entrypoint=entrypoint)
+    monkeypatch.setattr(env, "run_python", spy)
+    rec = apptools.registry(force=True)[0]
+    assert apptools.run_tool(rec, {"x": 3}).ok
+    assert seen == [(os.path.realpath(os.path.join(d, "t.py")), {"x": 3, "mode": "pinned"}, d,
+                     apptools.CHILD_TIMEOUT_S, "main")]
+
+
+def test_native_registry_sees_tools_and_section(native, tool_roots):
+    make_app(tool_roots, "fake-docs")
+    make_app(tool_roots, "broken", tools="[[tool]]\nname = 'x'\n")
+    recs = apptools.registry(force=True)
+    assert [(r.app, r.name) for r in recs] == [("fake-docs", "fake_echo")]
+    assert "- fake_echo(x: int=1): Echoes x back. Read-only." in apptools.prompt_section(recs)
+
+
+def test_native_roster_offers_tool(native):
+    from fused_render_app.bots import tools as bot_tools
+
+    class B:
+        def contacts(self):
+            return []
+
+        def all_files(self):
+            return []
+    assert "tool" in [t["name"] for t in bot_tools.roster(B())]
 
 
 # ---- is_write / prompt_section ---------------------------------------------------
