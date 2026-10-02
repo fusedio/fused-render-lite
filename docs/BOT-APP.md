@@ -143,6 +143,26 @@ POST   /api/apps/starters/<key>/update                                      -> {
 GET    /api/apps/starters/<key>/icon  -> the starter's icon.svg / icon.png from the package, else 404
 ```
 
+First-run setup and Claude Code health (not under `/api/bots`; the wizard and
+the empty-state link read them — `fused_render_app/onboarding.py`,
+`routes/claude_health.py`, both ported from fused-render in October 2026):
+
+```
+GET    /api/onboarding                 -> {completed_at, dismissed_at, opened_at, stages: {about|claude|chrome|models|bot: {status, meta, updated_at}}, chrome: {found, path}, version}
+GET    /api/onboarding/models          -> {models: [{alias, id, label, size_gb, downloaded, downloading, fit}]}   (bot.py LOCAL_MODELS + fit.py, not the catalog's `recommended`)
+POST   /api/onboarding/opened | dismiss | complete                           -> the snapshot (stamps the timestamp)
+POST   /api/onboarding/stage           {stage, status: pending|partial|complete|n/a, meta?} -> the snapshot (meta merged)
+GET    /api/claude/health              -> fused-render's ClaudeHealth (found, version, outdated, signed_in, account, doctor, on_shell_path, …)
+POST   /api/claude/health/refresh | install {action} | link-path | doctor | login | login/cancel;  GET /api/claude/install | login
+```
+
+`GET /api/config` carries the same snapshot as `onboarding`. The stored stage
+statuses are overruled on every read by what the server can see: Claude Code
+from `claude_health`'s disk cache (never a spawn), Chrome from
+`browser.CHROME_CANDIDATES`, local models from the Hub cache, "first bot" from
+the bots data dir. `FUSED_RENDER_ONBOARDING=0|1` forces the wizard off/on
+(tests force it off); the state file is `<home>/onboarding.json`.
+
 The server also keeps: `/api/tasks/*` (Builds), `/api/run` (the `py` action
 and embedded apps), `/api/fs/raw` (inbox downloads, attached files),
 `/api/capture/*` + `/api/ai/transcribe` (dictation), `/api/ai` (steps
@@ -184,6 +204,7 @@ One module per OpenBot file so behaviour can be diffed:
 | apps.js (starters) | `apps/StartersStrip.tsx`, `apps/starters.ts` | the Starter apps row above the gallery: Install / Update (confirmed) / Open, Installed / Needs setup / Ready badges from `/api/apps/starters` and its `status` |
 | builds.js | `builds/BuildsPanel.tsx`, `builds/BuildDialog.tsx`, `builds/builds.ts` | iframe to `/tasks?embed=1&scope=all&view=list` (+`&peek=<key>`), the row filter stylesheet, chip count, `builds.json` under the app home via `/api/fs/*`… see note |
 | apps.js | `apps/AppsPanel.tsx`, `apps/AppViewer.tsx`, `apps/AppCard.tsx`, `apps/SideApp.tsx`, `apps/apps.ts` | gallery (`/embed?...&_preview=1` thumbnails), viewer, kebab menu, upload/drop, app cards in the thread, side app, Copy state, appFromText |
+| — (fused-render `shell/onboarding/`) | `onboarding/OnboardingWizard.tsx`, `AboutStep`, `ClaudeStep`, `ChromeStep`, `ModelsStep`, `FirstBotStep`, `progress.ts`, `state.ts`, `onboarding.css` | the first-run setup wizard, rendered ALONE by `bots.tsx` on `/onboarding` (no store, no poll): five skippable steps, the step id in `?step=`, pills from the server's stage statuses, every exit awaits its complete/dismiss POST then `location.assign` (the server redirects `/` while the flags are empty, so a fire-and-forget write would bounce back in); the last step hands over to `/?new=1`, which `App.tsx` reads once and opens the new-bot chooser; the empty hero's "Set up this Mac" link reopens it. The Claude step reuses fused-render's `IssueRow` (`platform/ui/ClaudeHealthStrip`) through `lib/claude-setup.ts`, minus the terminal-dock re-check (no terminal here) |
 
 Builds note: OpenBot kept `builds.json` in its own `.fused/data`; here it is
 `GET/POST /api/bots/builds` (`registry.builds_json`, stored at
@@ -199,6 +220,19 @@ notification roles, the mood table, the face shapes/colours, the layout
 limits (`MID_MIN 450`, `R_MIN 280`, `LIM`), the `md()` rules, the `_preview`
 gate (the page is never a preview here, so `renderPreviewOnly` is dead code
 and dropped).
+
+**Styling trap: OpenBot's CSS is unlayered and beats Tailwind.** `bots.css`
+embeds `app.css` outside any `@layer` — `button { background: var(--raised);
+border-radius: 999px; font-weight: 300 }` and friends — and unlayered rules win
+over `@layer utilities` whatever the class list says. So a shadcn `<Button
+variant="accent">` (`bg-[var(--accent)]`) renders grey here while the same
+button is lime on the shell pages; checkboxes, pills and links get OpenBot's
+look the same way. Two ways through: use OpenBot's own classes (`.primary`,
+`.muted`) on OpenBot-shaped markup, or add an unlayered rule scoped to your
+surface (`onboarding/onboarding.css` does `.onboarding button[data-slot="button"]`
+plus an `onboarding-accent` class passed beside `variant="accent"`). Check the
+computed `backgroundColor` over CDP before concluding a token is unmapped — the
+tokens (`--accent`, `--on-accent`) were right all along the first time this bit.
 
 ## 5. Behaviour the backend keeps (from agents.py)
 
@@ -397,6 +431,19 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
   dock / launcher / settings / open routes and their imports; `start_ai` adds
   `bots.registry.start()` (scheduler + iMessage) and `stop_ai` adds
   `bots.registry.shutdown()` (stop every bot's Chrome).
+- First run (October 2026, `onboarding.py` + `routes/claude_health.py`,
+  the audit in `docs/AUDIT-onboarding.md`): `/` answers 307 → `/onboarding`
+  while the wizard has never been on screen — the bare front door only, so
+  the dock's `/?bot=…` and any other query are honoured — and `/onboarding`
+  serves `bots.html` like `/`. `make_server` calls
+  `onboarding.seed_for_existing_users()` before the first request: an install
+  that already has a bot under `<home>/bots/data` is stamped completed, so an
+  upgrade from 0.11.x never sees a first-run screen. The CLI the server
+  resolves at startup is published through `claude_health.adopt()` rather
+  than by exporting `FUSED_RENDER_CLAUDE_BIN`, which fused-render's
+  `resolve()` would read back as a user override. Chrome, Claude Code and
+  the local models are only ever *reported*: the wizard never switches a
+  bot's model, never starts a download unasked (owner's call, 2026-10-02).
 - `macapp.py`: startup window → `/`; drop the launcher panel, the global
   hotkey, `dock_store` recording; the menu-bar Dock tray stays, its tiles
   now bots and apps instead of `.fused` recents (described below). Finder-open
