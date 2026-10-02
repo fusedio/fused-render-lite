@@ -270,6 +270,9 @@ export interface OnboardingState {
   // overruled server-side where the truth is cheap to see. Optional: an older
   // server does not send it. Rules live in shell/onboarding/progress.ts.
   stages?: Record<string, OnboardingStage>;
+  // FusedBot only (fused_render_app/onboarding.py): the first browser from the
+  // bots' own candidate list, or `found: null` when the probe could not run.
+  chrome?: { found: boolean | null; path: string | null };
   version: number;
 }
 
@@ -286,6 +289,25 @@ export interface OnboardingStage {
 
 export function getOnboarding(): Promise<OnboardingState> {
   return getJson<OnboardingState>("/api/onboarding");
+}
+
+/** FusedBot's Models step (fused_render_app/onboarding.py local_model_picks):
+    the bots' own local models, with whether each is on disk, downloading, and
+    fit.py's verdict for this machine. */
+export interface OnboardingModelPick {
+  /** The bot picker's alias (`local-4b`, `local-9b`). */
+  alias: string;
+  /** The Hub repo id a download names. */
+  id: string;
+  label: string;
+  size_gb: number | null;
+  downloaded: boolean;
+  downloading: boolean;
+  fit: AiFitVerdict | null;
+}
+
+export function getOnboardingModels(): Promise<{ models: OnboardingModelPick[] }> {
+  return getJson<{ models: OnboardingModelPick[] }>("/api/onboarding/models");
 }
 
 export function completeOnboarding(): Promise<OnboardingState> {

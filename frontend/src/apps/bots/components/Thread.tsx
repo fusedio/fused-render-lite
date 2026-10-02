@@ -285,6 +285,10 @@ export function Thread({ b, threadRef, searchQ, onSearchCount, onReact, onReply 
         <div className="herotitle">{first ? "No bots yet" : "No bot selected"}</div>
         <div className="herotext">{first ? "Create a bot and give it a task — it browses the web for you." : "Pick one on the left, or create a new one."}</div>
         <button id="emptyaddbot" className="primary" onClick={() => openDialog({ kind: "newBot" })}>+ New bot</button>
+        {/* The setup wizard (apps/bots/onboarding), for a user who skipped it
+            or wants to check the machine again: a plain link, the wizard is
+            a route. */}
+        {first && <a className="muted setuplink" href="/onboarding">Set up this Mac (Claude Code, Chrome, local models)</a>}
       </div>
     );
   } else if (!evs.length) {

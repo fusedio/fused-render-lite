@@ -1,0 +1,131 @@
+/* The setup wizard on the bots page (apps/bots/onboarding). The wizard draws
+   with Tailwind + shadcn (bots.css maps shadcn's tokens onto OpenBot's), but
+   the Claude step reuses fused-render's IssueRow (platform/ui/ClaudeHealthStrip),
+   whose rules live in styles/dialogs.css and styles/sidebar.css — shell
+   stylesheets the bots page never loads. The slice it needs, on this page's
+   own tokens (--text / --muted / --line / --accent / --accent-ink / --warn). */
+
+.onboarding { font-size: 14px; }
+.onboarding a { color: inherit; }
+
+/* OpenBot's app.css styles every <button> UNLAYERED (`button { background:
+   var(--raised); border-radius: 999px; font-weight: 300 }`), and an unlayered
+   rule beats Tailwind's layered utilities whatever the class list says — so
+   the shadcn Button's `bg-[var(--accent)]` lost and every wizard button came
+   out grey. These are the wizard's own unlayered rules for the two variants
+   it uses: `onboarding-accent` is passed beside `variant="accent"`, the rest
+   is the outline look. */
+.onboarding button[data-slot="button"] { background: transparent; border: 1px solid var(--line); color: var(--text); font-size: 13px; font-weight: 400; }
+.onboarding button[data-slot="button"]:hover { background: var(--hover); }
+.onboarding button[data-slot="button"]:disabled { opacity: .4; }
+.onboarding button[data-slot="button"].onboarding-accent { background: var(--accent); border-color: transparent; color: var(--accent-ink); font-weight: 500; }
+.onboarding button[data-slot="button"].onboarding-accent:hover { background: var(--accent); filter: brightness(1.06); }
+/* The step pills: transparent until current (the row's own `bg-background`). */
+.onboarding [aria-label="Setup steps"] button { background: transparent; border-radius: 6px; }
+.onboarding [aria-label="Setup steps"] button[aria-current="step"] { background: var(--bg); }
+.onboarding [aria-label="Setup steps"] button:hover { background: var(--hover); }
+/* ✕ and the brand link: no pill behind them. */
+.onboarding button[aria-label="Close setup"] { background: transparent; }
+.onboarding button[aria-label="Close setup"]:hover { background: var(--hover); }
+
+.claude-health-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+.claude-health-issue + .claude-health-issue {
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
+}
+.claude-health-issue-title { font-weight: 600; margin-bottom: 3px; }
+.claude-health-issue-detail { margin: 0 0 8px; color: var(--muted); }
+
+/* The first-run wizard's Claude step reuses IssueRow; the list sits inside a
+   checklist row rather than the strip's own padding. */
+.onboarding-issue { padding: 0; margin: 0; }
+.onboarding-issue .update-badge-command { flex-wrap: wrap; margin-bottom: 8px; }
+
+/* The copyable command plate (platform/ui/CommandLine). */
+.update-badge-command { display: flex; align-items: center; gap: 6px; }
+.update-badge-command code {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--inset);
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.update-badge-copy {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.update-badge-copy:hover { color: var(--text); }
+
+/* The repair actions: the one affirmative control takes the accent fill. */
+.claude-health-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.claude-health-action {
+  text-decoration: none;
+  display: inline-block;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.claude-health-action:hover:not(:disabled) { filter: brightness(1.06); }
+.claude-health-action:disabled { opacity: 0.6; cursor: default; }
+.claude-health-action-quiet { background: transparent; color: var(--muted); border-color: var(--line); font-weight: 500; }
+.claude-health-action-quiet:hover:not(:disabled) { color: var(--text); filter: none; }
+/* What the button will run, beside the button: disclosure, not decoration. */
+.claude-health-action-cmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 7px;
+  overflow-wrap: anywhere;
+}
+.claude-health-progress { margin: 0 0 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.claude-health-error { margin: 0 0 8px; color: var(--warn); overflow-wrap: anywhere; }
+
+/* Verbatim child output: scrolls rather than truncating. */
+.claude-health-output { margin: 0 0 8px; }
+.claude-health-output-label { font-size: 12px; font-weight: 600; color: var(--warn); margin-bottom: 4px; }
+.claude-health-output pre {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.claude-health-doctor { margin: 0 0 8px; }
+.claude-health-doctor-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.claude-health-doctor-problem { display: block; }
+.claude-health-doctor-fix { display: block; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.version-panel-link { color: var(--muted); font: inherit; font-size: 12px; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.version-panel-link:hover { color: var(--text); }

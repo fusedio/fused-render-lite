@@ -31,6 +31,16 @@ export default function App() {
   useThemeSync();
   const { gutter } = useLayout();
   useEffect(() => startStore(), []);
+  // `/?new=1` — the setup wizard's last step hands over here with the "+ New
+  // bot" chooser already open (apps/bots/onboarding/FirstBotStep). Read once,
+  // then dropped from the URL so a refresh does not reopen it.
+  useEffect(() => {
+    const u = new URL(location.href);
+    if (u.searchParams.get("new") !== "1") return;
+    u.searchParams.delete("new");
+    history.replaceState(history.state, "", u.pathname + (u.search || "") + u.hash);
+    openDialog({ kind: "newBot" });
+  }, []);
   useEffect(() => installNotify(), []);
   useFaceAnimator();
   return (
