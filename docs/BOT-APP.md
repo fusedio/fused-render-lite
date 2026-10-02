@@ -1,4 +1,4 @@
-# Browser Bots on Render App — architecture and wire contract
+# FusedBot (Browser Bots on Render App) — architecture and wire contract
 
 Status: the design every port in this tree follows. Written 2026-10-02 from
 the OpenBot reference app (`~/Fused/sandbox/Showcase Drafts/OpenBot`, a
@@ -32,6 +32,8 @@ fused_render_app/bots/            the backend package (in-process; no daemon, no
   apptools.py     port of OpenBot apptools.py (APPS / APP TOOLS / SKILL.md); `available()` False when `fused.agent_core` is absent
   imessage.py     port of OpenBot imessage.py (bridge thread, texts, contacts)
   apps.py         ports of listapps.py, importapp.py, mkbuild.py, revealapp.py
+  presets.py      presets()/apply_preset (agents.py); data in presets/<key>/ (preset.json + playbook .md), section 5
+  starters.py     port of installapp.py; data in starters/<key>/ (complete fused apps), section 5
   registry.py     the bot registry, scheduler thread (routines, file inbox), iMessage thread, slow-call log
   routes.py       the HTTP API (section 3), an `_web.APIRouter` included from server.py
   botsend.py      CLI: `python -m fused_render_app.bots.botsend <bot> "<task>"` (drops into the bot's inbox dir)
@@ -95,7 +97,9 @@ live view is open), exactly as OpenBot polled `status`.
 
 ```
 GET    /api/bots?cursors=<json {id: seq}>&shot_for=<id>&fast=0|1       -> status reply (section 2)
-POST   /api/bots                      {name, model, effort, instructions, approval, build_access, encrypt} -> {ok, id}
+POST   /api/bots                      {name, model, effort, instructions, approval, build_access, encrypt, preset?} -> {ok, id}
+                                       (preset: a key from /api/bots/presets, "" = blank; unknown key -> 400, no bot made)
+GET    /api/bots/presets              -> {ok, presets: [{key, name, color, order, model, instructions, apps, skills: [title]}]}
 GET    /api/bots/profiles             -> {ok, profiles: [{dir, name, email}]}
 GET    /api/bots/usage                -> the usage summary
 GET    /api/bots/imessage             -> the bridge state
@@ -107,7 +111,7 @@ POST   /api/bots/<id>/nav             {op: back|forward|reload}             -> {
 POST   /api/bots/<id>/tab             {tab: new|switch|close, url?, index?} -> {ok, url, tabs}
 POST   /api/bots/<id>/attach          {name, data: <base64>}                -> {ok, name}   (8 MB cap)
 POST   /api/bots/<id>/react           {seq, emoji}                          -> {ok, reactions}
-POST   /api/bots/<id>/flag            {pinned?, hidden?, face?}             -> {ok}
+POST   /api/bots/<id>/flag            {pinned?, hidden?, face?: {shape, color, icon}} -> {ok}   (icon: a preset key = brand mark)
 POST   /api/bots/<id>/settings        {name?, model?, effort?, instructions?, memory?, approval?, build_access?,
                                        encrypt?, imessage_handle?, imessage_to?}  -> {ok}   ("rename" in OpenBot;
                                        POST because the server has no do_PATCH)
@@ -131,6 +135,12 @@ POST   /api/apps/import               {name, data: <base64>}                -> {
 POST   /api/apps/mkdir                {dir}                                 -> {dir, existed}
 POST   /api/apps/reveal               {dir}                                 -> {dir}
 GET    /api/apps/icon?dir=<abs>       -> the app's icon.svg / icon.png, else 404
+GET    /api/apps/starters             -> {root, starters: [{key, name, desc, version, tools, icon, setup_tool, ready_key,
+                                                            installed, dir, installed_version, update}]}
+GET    /api/apps/starters/status      -> {ok, ready: {key: true|false|null}, why: {key: reason}}   (each setup tool capped at 8 s)
+POST   /api/apps/starters/<key>/install                                     -> {ok, key, dir, installed, existed, name}  (400 unknown key)
+POST   /api/apps/starters/<key>/update                                      -> {ok, key, dir, installed, existed, name}  (400 unknown key)
+GET    /api/apps/starters/<key>/icon  -> the starter's icon.svg / icon.png from the package, else 404
 ```
 
 The server also keeps: `/api/tasks/*` (Builds), `/api/run` (the `py` action
@@ -169,7 +179,9 @@ One module per OpenBot file so behaviour can be diffed:
 | core.js | `state/store.ts`, `lib/api.ts`, `lib/format.ts`, `lib/md.ts`, `components/Face.tsx`, `lib/face.ts` | poll loop (one in flight), events merge, 600-event cap, toasts, md(), face SVG + anime.js moods, select(), URL `?bot=` |
 | chat.js | `components/BotList.tsx`, `components/Thread.tsx`, `components/Composer.tsx`, `components/ThreadSearch.tsx`, `components/ToBottom.tsx`, `components/BotMenu.tsx`, `lib/unread.ts`, `lib/notify.ts` | list order (pinned → waiting-unread → last user ts), FLIP glide, unread/seen (localStorage `browser-bot.seen`), New rule, tobottom pill, reactions, reply quote, attachments (paste/drop), dictation, search, notifications, document.title |
 | live.js | `components/PreviewPane.tsx`, `components/LiveView.tsx`, `lib/cdp.ts`, `lib/layout.ts` | right column (shot, cap, inbox, routines, usage strip, side app), full-screen live view: CDP screencast WebSocket to `tabs[active].ws`, take over / hand back, input forwarding (toPage, keyParams), tab strip, popup follow, panel widths + collapse (localStorage `browser-bot.layout`), fit hysteresis |
-| dialogs.js | `dialogs/BotDialog.tsx`, `dialogs/FacePicker.tsx`, `dialogs/Confirm.tsx`, `dialogs/Routines.tsx`, `dialogs/Skills.tsx`, `dialogs/Usage.tsx` | the six modals, dirty guard, iMessage status line, profiles list |
+| dialogs.js | `dialogs/BotDialog.tsx`, `dialogs/FacePicker.tsx`, `dialogs/Confirm.tsx`, `dialogs/Routines.tsx`, `dialogs/Skills.tsx`, `dialogs/Usage.tsx`, `dialogs/PresetPicker.tsx`, `lib/presets.ts` | the six modals, dirty guard, iMessage status line, profiles list; the new-bot chooser ("+" asks for a preset or a blank bot first: four named blanks, every preset's brand face, search over names and playbook titles, Enter picks the first match) and the "Comes with N playbooks" note in the bot dialog |
+| core.js (BRANDS) | `lib/face.ts`, `components/Face.tsx`, `components/faceAnim.ts` | brand avatars: a disc with a hand-drawn white mark and no eyes for bots made from a preset (`face.icon`), eye animations are no-ops on them; the picker's brands row |
+| apps.js (starters) | `apps/StartersStrip.tsx`, `apps/starters.ts` | the Starter apps row above the gallery: Install / Update (confirmed) / Open, Installed / Needs setup / Ready badges from `/api/apps/starters` and its `status` |
 | builds.js | `builds/BuildsPanel.tsx`, `builds/BuildDialog.tsx`, `builds/builds.ts` | iframe to `/tasks?embed=1&scope=all&view=list` (+`&peek=<key>`), the row filter stylesheet, chip count, `builds.json` under the app home via `/api/fs/*`… see note |
 | apps.js | `apps/AppsPanel.tsx`, `apps/AppViewer.tsx`, `apps/AppCard.tsx`, `apps/SideApp.tsx`, `apps/apps.ts` | gallery (`/embed?...&_preview=1` thumbnails), viewer, kebab menu, upload/drop, app cards in the thread, side app, Copy state, appFromText |
 
@@ -210,6 +222,38 @@ for `local-4b`/`local-9b` and when no `claude` CLI is resolved. The agent
 engine is the default for `haiku sonnet opus fable`. A bot setting `engine`
 (`auto | steps | agent`, default `auto`) is stored but not exposed in the
 dialog yet (Advanced can grow it later); `auto` = the rule above.
+
+**Presets** (`bots/presets.py`, data in `fused_render_app/bots/presets/<key>/`,
+shipped inside the package). One folder per site: `preset.json` (`name`,
+`color`, `order`, `model`, `instructions`, optional `apps`) plus four to six
+playbook `.md` files in the Skills format. `POST /api/bots` with `preset`
+runs `apply_preset` before the greeting: the playbooks are copied into the
+bot's own skills (editable per bot), `meta.preset = key`, `meta.face =
+{icon: key, color, shape: ""}` (the page draws the brand mark), and the
+preset's standing rules become Instructions when the user typed none; the
+created line reads "<name> created. Comes with N <key> playbooks." The
+instructions keep the bot read-only (browse and report; pop a sign-in window
+with `login`), and each playbook names exact URLs, how many items to open so
+a run fits the step budget, and stops before any send/post/apply for
+approval. `apps` lists starter keys installed when missing (below), so the
+Google Docs, Google Sheets and Apple Notes presets run on tools, not browsing;
+a system line says what was installed. Add a folder to add a preset.
+
+**Starter apps** (`bots/starters.py`, port of OpenBot `installapp.py`; data in
+`fused_render_app/bots/starters/<key>/`, shipped inside the package with their
+`uv.lock`). Each is a complete fused app (index.html with the marker,
+pyproject.toml, mcp.toml) plus an optional `starter.json`
+`{setup_tool, ready_key}`: today Google Docs Tabs and Google Sheets Tabs
+(service-account Google access) and Apple Notes (reads Notes.app). Install
+copies the folder to `~/Fused/app/<key>` and never overwrites an existing
+folder; it records `{starter, version, installed_at}` in
+`<dir>/.fused/starter.json`. `update` (only on the user's ask) replaces the
+shipped files and keeps `.fused/`, `.venv` and anything not shipped; the list
+reports `update: true` when the package carries a newer version than the
+record. `status` runs each installed starter's `setup_tool` through the
+native app-tool runner (`apptools.run_tool`, 8 s cap) and reports `ready_key`
+as true/false, or null with a reason when the tool could not run. Add a
+folder to add a starter.
 
 ## 6. The agent engine (harness) — `agent_engine.py`, `tools.py`, `botmcp.py`
 
@@ -353,14 +397,85 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
   dock / launcher / settings / open routes and their imports; `start_ai` adds
   `bots.registry.start()` (scheduler + iMessage) and `stop_ai` adds
   `bots.registry.shutdown()` (stop every bot's Chrome).
-- `macapp.py`: startup window → `/`; drop the menu-bar Dock tray, the
-  launcher panel, the global hotkey, `dock_store` recording; keep the
-  menu-bar item (Open in app / Open in browser / Tasks… / Open app logs /
-  Quit), Finder-open of `.fused` goes (the document type stays registered
-  for now; opening one shows the bot app).
+- `macapp.py`: startup window → `/`; drop the old menu-bar Dock tray (the
+  `.fused` recents), the launcher panel, the global hotkey, `dock_store`
+  recording; the menu-bar item becomes the bots/apps dock described below
+  (pinned → recent bots → recent apps → Open FusedBot / Tasks / Open in
+  browser / Open app logs / Quit). Finder-open of `.fused` goes (the document
+  type stays registered for now; opening one shows the bot app).
 - `mainwindow.py`: drop the Edit and Home title-bar buttons and menu items
   (keep Open in Browser, Tasks ⌘⇧T, Edit menu, Window menu); the window title
-  is "Browser Bots".
+  is "FusedBot" (`APP_NAME`); `show_url(path)` / `show_bot(bid)` for the dock.
+- Name: the product is **FusedBot** (bundle `FusedBot.app`, DMG
+  `FusedBot-<ver>.dmg`, icon `static/fusedbot-icon*.png` from
+  `fusedbot-icon.svg`, template menu-bar icon `menubar.png`/`@2x`); the
+  package, bundle id, URL scheme, env vars, app home and manifest URL keep
+  their Render App names, and an installed `RenderApp.app` keeps its path on
+  update.
+
+### Menu-bar dock (`bots/dock.py`, `bots/dock_routes.py`, `macapp.py`)
+
+The FusedBot menu-bar item is a small dock above its fixed items:
+
+```
+Pinned                 (disabled header)
+   <pinned bots, by name>     e.g. "Scout · running"
+   <pinned apps, pin order>
+──────────
+Recent bots
+   <3 most recently updated bots, not pinned>
+──────────
+Recent apps
+   <3 most recently changed apps, not pinned>
+──────────
+Open FusedBot
+Tasks
+Open in browser
+Open app logs
+Quit
+```
+
+An empty section is left out. A bot title is its name, plus ` · <status>`
+when it is not idle; titles are unique across the menu (rumps keys items by
+title), so a repeat gets ` (2)`, ` (3)`… and long names are capped at 40
+characters. `hidden` bots are never listed.
+
+- **Sources.** Bots are read from disk (`store.list_ids` + each `bot.json`);
+  a bot the registry already built is read from memory so its live status
+  shows. The dock never constructs a `Bot` (that writes `bot.json` and loads
+  the Chrome/CDP code); a status a dead process left behind (`running`,
+  `waiting`, `paused`) on a bot nobody has loaded reads as idle, as
+  `Bot.__init__` would reset it. Bot recency is `meta.updated`. Apps are the
+  APPS scan (`apptools.list_apps` over `<workspace>/app`), recency is the
+  app's `index.html` mtime.
+- **Pins.** A bot's pin is the sidebar's own (`bot.json` `pinned`). App pins
+  live in `<home>/bots/dock.json` as `{"pinned_apps": [<real dir>, …]}` in
+  pin order, set from the app viewer's ⋯ menu ("Pin to menu bar" / "Unpin
+  from menu bar", which reads `GET /api/dock` as it opens). Only a folder
+  under the apps root with an `index.html` can be pinned; a pinned folder
+  that disappears is no longer listed, and unpinning it still tidies
+  `dock.json`.
+- **Clicks.** A bot item selects that bot in a FusedBot window: an open
+  bots-page window is pointed at it in place (`?bot=` rewritten plus the
+  page's own `fused:urlchange` listener, no reload), else a new window opens
+  on `/?bot=<id>`, which the page reads at boot. An app item raises a window
+  already on `/render?path=<dir>/index.html` (spelled like the page's "Open
+  in tab") or opens one.
+- **Refresh.** rumps has no "menu will open" hook: the menu is built at
+  startup, again once the server is up, and on a 5-second `rumps.Timer`. Each
+  tick computes `dock_menu_items(entries())` and rebuilds only when that list
+  changed, so an unchanged dock costs a few stats and small reads and never
+  churns an open menu. A failing refresh logs once (then every 120th time)
+  and keeps the last menu.
+- **HTTP.** `GET /api/dock` returns `{pinned, recent_bots, recent_apps}`.
+  A bot row is `{kind: "bot", id, name, face, status, updated, pinned}`; an
+  app row is `{kind: "app", dir, name, icon, mtime}`. `POST /api/dock/pin`
+  takes `{dir, pinned}`, needs `X-Fused: 1`, and returns
+  `{ok, pinned_apps}`. A `dir` outside the apps root, or not an app folder
+  when pinning, gets a 400.
+- **Tests.** `tests/test_bots_dock.py` covers the store, the ordering,
+  limits and exclusions of `entries()`, the menu layout and unique titles,
+  and both routes through the real server.
 - Deleted (UI surfaces only): `showcase.py`, `showcase/`, `dock_store.py`,
   `menubar_dock.py`, `launcher.py`, `launcher_panel.py`, `hotkey.py`,
   `editlink.py`, `icon_color.py`, `static/{index,open,dock,launcher,settings}.html`,

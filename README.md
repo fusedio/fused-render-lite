@@ -1,8 +1,9 @@
 # fused-render-app
 
-Ships as **Render App** (`RenderApp.app`, `RenderApp-<version>.dmg`). Since
-0.11.0 the app is **Browser Bots**: autonomous browsing bots that run on your
-own Mac. Each bot gets its own headless Chrome (private profile, cookies and
+Ships as **FusedBot** (`FusedBot.app`, `FusedBot-<version>.dmg`; the package,
+bundle id `io.fused.render.app`, `render-app://` scheme and `FUSED_RENDER_*`
+settings keep their Render App names). Since 0.11.0 the app is autonomous
+browsing bots that run on your own Mac. Each bot gets its own headless Chrome (private profile, cookies and
 history), a chat thread where you give it tasks, and an agent loop that reads
 the page, clicks, types and reports back. You can pause, resume or stop a bot,
 take over its browser by hand, give it routines on a schedule, and keep notes
@@ -16,7 +17,7 @@ contract. Everything runs locally; the server binds 127.0.0.1 only.
 
 ## The page
 
-`/` serves the Browser Bots page in a native window. Three columns:
+`/` serves the FusedBot page in a native window. Three columns:
 
 - **Bots** (left): every bot, pinned first, then the ones waiting on you with
   unread messages, then by your last message. "New bot" opens the bot dialog
@@ -52,6 +53,11 @@ Column widths and collapse state are remembered per browser.
 - **Browser profile.** Import one of your own Chrome profiles (logins,
   cookies, extensions) into a bot's browser, and optionally encrypt the
   profile at rest (AES-256 while Chrome is closed, key in the macOS Keychain).
+- **Presets.** A new bot can start from a site preset (LinkedIn, YouTube, X,
+  Reddit, Gmail, GitHub, Google Docs, Apple Notes and more): the site's brand
+  mark as its avatar, read-only standing instructions, and four to six
+  playbooks copied into its own Skills. Presets ship in
+  `fused_render_app/bots/presets/<key>/`; add a folder to add one.
 
 ## Inbox, Apps, Builds
 
@@ -66,6 +72,14 @@ leaves its Inbox alone.
 app through `/embed`. "Upload app" (or a drop onto the panel) unpacks a
 `.fused` export (v1 zip or v2 container) or a zipped app folder into a new
 folder there; nothing is overwritten.
+
+**Starter apps.** Some apps ship with the package, ready to install rather
+than build: Google Docs Tabs, Google Sheets Tabs and Apple Notes, each
+exposing its actions as tools. They live in `fused_render_app/bots/starters/`;
+installing copies one into `~/Fused/app/<key>` and never overwrites an
+existing folder. A bot made from the matching preset installs its own. The
+starter's `*_status` tool tells whether it still needs setup, and Update
+replaces its files with a newer shipped version while keeping its `.fused/`.
 
 **Builds.** A bot builds or updates an app with its `build` action: a Claude
 Code task (the Tasks engine below) that writes the app under `~/Fused/app`.
@@ -140,9 +154,14 @@ the one local server.
 
 The title bar ends in one button, Open in Browser (View → Open in Browser
 ⌘⇧L). Window → Tasks (⌘⇧T) opens the Tasks page. Closing the last window does
-not quit. The menu-bar item has "Open in app", "Tasks", "Open in browser",
-"Open app logs" and "Quit". `FUSED_RENDER_APP_NO_BROWSER=1` suppresses the
-startup window.
+not quit. The menu-bar item is a small dock: pinned bots and pinned apps
+first, then the three most recently used bots, then the three most recently
+changed apps (each section skipped when empty), then "Open FusedBot",
+"Tasks", "Open in browser", "Open app logs" and "Quit". A bot item selects
+that bot in a FusedBot window; an app item opens the app in its own window.
+Bots are pinned from the sidebar, apps from the app viewer's ⋯ menu ("Pin to
+menu bar"); the list refreshes every 5 s. `FUSED_RENDER_APP_NO_BROWSER=1`
+suppresses the startup window.
 
 The app posts macOS notifications for background work (model downloads,
 environment installs, AI jobs): one banner per job, replaced in place by the
@@ -311,6 +330,8 @@ fused_render_app/
     apptools.py     APPS / APP TOOLS / app SKILL.md for the prompt
     imessage.py     the iMessage bridge
     apps.py         list / import / mkdir / reveal under ~/Fused/app
+    presets.py      site presets (presets/<key>/: preset.json + playbooks) applied at create
+    starters.py     starter apps (starters/<key>/) installed into ~/Fused/app
     registry.py     the bot registry, scheduler (routines, file inbox), iMessage thread
     routes.py       /api/bots/*, /api/apps/*
     store.py, paths.py  bot.json, events.jsonl, the usage ledger; state roots
@@ -327,10 +348,11 @@ fused_render_app/
   templates/claude/  fused-render's Claude chat engine (Tasks, bot builds)
   skills/         fused-render's skills, synced verbatim
   update/         the in-app updater
-  static/         runtime.js, menubar.png, shell-dist/ (built: bots.html, lite.html)
+  static/         runtime.js, the FusedBot icon (fusedbot-icon.svg → fusedbot-icon-1024.png / -64.png,
+                  menubar.svg → menubar.png / menubar@2x.png; scripts/render_icons.py), shell-dist/ (built: bots.html, lite.html)
 frontend/
   bots.html, lite.html   the two Vite entries
-  src/apps/bots/  the Browser Bots React app: components/, dialogs/, apps/, builds/, state/, lib/, styles/
+  src/apps/bots/  the FusedBot React app: components/, dialogs/, apps/, builds/, state/, lib/, styles/
   src/            fused-render's frontend slice (Tasks page, Claude chat), copied verbatim
 docs/BOT-APP.md   architecture and wire contract
 ```
