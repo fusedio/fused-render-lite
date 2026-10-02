@@ -36,7 +36,7 @@ export function AboutStep({ eyebrow }: { eyebrow: ReactNode }) {
       <StepHeader
         eyebrow={eyebrow}
         title="Bots that browse for you."
-        lead="FusedBot runs browser bots on this Mac: tell one what to do in chat and it opens its own Chrome window and does it. The next two screens check what this Mac has — Claude Code, Chrome, a local model — and the last one makes your first bot. Every step can be skipped."
+        lead="FusedBot runs browser bots on this Mac: tell one what to do in chat and it opens its own Chrome window and does it. The next three screens check what this Mac has — Claude Code, Chrome, a local model — and the last one makes your first bot. Every step can be skipped."
       />
 
       <ul className="m-0 grid list-none gap-3 p-0 sm:grid-cols-2">

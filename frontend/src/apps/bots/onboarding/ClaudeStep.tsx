@@ -1,10 +1,8 @@
 import { useEffect, type ReactNode } from "react";
-// Step 2 — Claude Code and Chrome: what a bot needs on this Mac. A CHECKLIST,
-// ported from fused-render's wizard step: the four Claude facts are rows,
-// each done (struck through, green check) or open (the health strip's own
-// IssueRow attached — same buttons, same endpoints, same polls, via
-// lib/claude-setup), plus one row for Chrome, which fused-render never
-// needed and every bot here does.
+// Step 2 — Claude Code. A CHECKLIST, ported from fused-render's wizard step:
+// the four Claude facts are rows, each done (struck through, green check) or
+// open (the health strip's own IssueRow attached — same buttons, same
+// endpoints, same polls, via lib/claude-setup). Chrome is the next step.
 //
 // THIS IS THE STEP WITH THE PUSH. FusedBot wants bots on Claude Code: the
 // copy asks for it, Install and Sign in are the yellow buttons, and the
@@ -22,7 +20,7 @@ import { Button } from "@platform/shadcn/ui/button";
 import { Skeleton } from "@platform/shadcn/ui/skeleton";
 import { IssueRow } from "@platform/ui/ClaudeHealthStrip";
 
-import { reportStage, useOnboardingState, type StageStatus } from "./progress";
+import { reportStage, type StageStatus } from "./progress";
 import { StepHeader } from "./StepHeader";
 
 type RowState = "done" | "open" | "unknown";
@@ -105,47 +103,6 @@ function StateIcon({ state, optional }: { state: RowState; optional?: boolean })
   );
 }
 
-const CHROME_URL = "https://www.google.com/chrome/";
-
-/** The Chrome row: the server's probe (onboarding.py chrome_snapshot, the
- *  bots' own candidate list), re-read on every return to the tab — which is
- *  how a user who went to install Chrome sees the row turn green. */
-function ChromeRow() {
-  const chrome = useOnboardingState()?.chrome;
-  const state: RowState = chrome?.found === true ? "done" : chrome?.found === false ? "open" : "unknown";
-  useEffect(() => {
-    if (chrome?.found === true) reportStage("chrome", "complete", { path: chrome.path });
-    else if (chrome?.found === false) reportStage("chrome", "pending", { path: null });
-  }, [chrome?.found, chrome?.path]);
-  return (
-    <li className="flex flex-col gap-2 px-4 py-3">
-      <div className="flex items-start gap-3">
-        <StateIcon state={state} />
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">
-            <span className={state === "done" ? "text-muted-foreground line-through" : undefined}>Google Chrome installed</span>
-          </div>
-          <div className="text-xs text-muted-foreground">
-            {state === "done"
-              ? `Found at ${chrome?.path}. Each bot opens its own window of it.`
-              : state === "open"
-                ? "No Chrome, Chromium, Edge or Brave in /Applications. A bot cannot start without one."
-                : "Couldn't check — carry on, a bot will say so if it cannot find one."}
-          </div>
-        </div>
-      </div>
-      {state === "open" && (
-        <div className="ml-9 flex flex-wrap items-center gap-2">
-          <a className="claude-health-action" href={CHROME_URL} target="_blank" rel="noreferrer">
-            Get Chrome
-          </a>
-          <span className="text-xs text-muted-foreground">Install it, come back to this window and the row updates.</span>
-        </div>
-      )}
-    </li>
-  );
-}
-
 // `setup` is the wizard's single machine (OnboardingWizard owns it).
 export function ClaudeStep({
   setup,
@@ -194,8 +151,7 @@ export function ClaudeStep({
           <>
             Bots think with Claude Code running on this Mac — it is what reads the page, decides the
             next click and writes the reply, on your existing Claude subscription. Every preset bot is
-            set to a Claude model, so this is the one thing to set up. Chrome is the other: each bot
-            drives its own window of it.
+            set to a Claude model, so this is the one thing to set up.
           </>
         }
       />
@@ -266,7 +222,6 @@ export function ClaudeStep({
             </li>
           );
         })}
-        <ChromeRow />
       </ol>
 
       {/* What skipping means, said once and plainly: the bots do not switch

@@ -6,12 +6,13 @@
 //
 //   1 About        — what a bot is, one screen
 //   2 Claude Code  — installed / new enough / signed in / on PATH, with the
-//                    install and sign-in buttons, plus a Chrome row
-//   3 Models       — the bots' local models (Gemma 4B / 12B), nothing preselected
-//   4 First bot    — hands over to the bots page with "+ New bot" open
+//                    install and sign-in buttons
+//   3 Chrome       — found in /Applications, or a link to get it
+//   4 Models       — the bots' local models (Gemma 4B / 12B), nothing preselected
+//   5 First bot    — hands over to the bots page with "+ New bot" open
 //
-// Steps 1–2 write nothing but their own STAGE STATUS (progress.ts — the pills
-// in the bar above; a reopen lands on the first step still to do). Step 3
+// Steps 1–3 write nothing but their own STAGE STATUS (progress.ts — the pills
+// in the bar above; a reopen lands on the first step still to do). Step 4
 // starts model downloads only on a click; they are server-owned jobs that
 // outlive the wizard. Step 4's "+ New bot" is "complete". ✕ / Escape record
 // a DISMISS. Both stop the auto-show.
@@ -34,6 +35,7 @@ import { Button } from "@platform/shadcn/ui/button";
 import { FusedMark } from "@platform/ui/FusedMark";
 
 import { AboutStep } from "./AboutStep";
+import { ChromeStep } from "./ChromeStep";
 import { ClaudeStep } from "./ClaudeStep";
 import { FirstBotStep } from "./FirstBotStep";
 import { forgetModelsStep, ModelsStep, useModelPicks } from "./ModelsStep";
@@ -41,11 +43,12 @@ import { firstOpenStage, getProgress, reportStage, setProgress, stageStatus, use
 import { EXIT_NEW_BOT, EXIT_PATH } from "./state";
 import "./onboarding.css";
 
-type StepId = "about" | "claude" | "models" | "bot";
+type StepId = "about" | "claude" | "chrome" | "models" | "bot";
 
 const STEPS: { id: StepId; label: string }[] = [
   { id: "about", label: "About" },
   { id: "claude", label: "Claude Code" },
+  { id: "chrome", label: "Chrome" },
   { id: "models", label: "Models" },
   { id: "bot", label: "First bot" },
 ];
@@ -58,15 +61,10 @@ function asStepId(v: string | null | undefined): StepId | null {
 function stepFromUrl(): StepId | null {
   return asStepId(new URLSearchParams(location.search).get(STEP_PARAM));
 }
-/** The stage `chrome` has no step of its own: it is a row on the Claude step. */
-function stepForStage(stage: string | null): StepId | null {
-  if (stage === "chrome") return "claude";
-  return asStepId(stage);
-}
 
 export function OnboardingWizard() {
   const [stepId, setStepId] = useState<StepId>(
-    () => stepFromUrl() ?? stepForStage(firstOpenStage(getProgress()?.stages)) ?? "about",
+    () => stepFromUrl() ?? asStepId(firstOpenStage(getProgress()?.stages)) ?? "about",
   );
   const settled = useRef(false);
   const [leaving, setLeaving] = useState(false);
@@ -202,12 +200,7 @@ export function OnboardingWizard() {
         {/* Every step is a link, in both directions: nothing gates anything. */}
         <ol className="my-0 hidden list-none items-center gap-0.5 rounded-lg bg-muted/60 p-0.5 sm:flex" aria-label="Setup steps">
           {STEPS.map((s, i) => {
-            // The Claude pill also carries the Chrome stage: both rows on
-            // one step, so the pill is green only when both are.
-            const own = stageStatus(stages, s.id);
-            const chrome = s.id === "claude" ? stageStatus(stages, "chrome") : "complete";
-            const status =
-              own === "complete" && chrome === "complete" ? "complete" : own === "complete" || own === "partial" ? "partial" : own;
+            const status = stageStatus(stages, s.id);
             const done = status === "complete";
             const partial = status === "partial";
             const current = i === index;
@@ -264,6 +257,7 @@ export function OnboardingWizard() {
         <div className="mx-auto w-full max-w-4xl px-6 py-10">
           {step.id === "about" && <AboutStep eyebrow={eyebrow} />}
           {step.id === "claude" && <ClaudeStep setup={setup} eyebrow={eyebrow} onWork={onWork} />}
+          {step.id === "chrome" && <ChromeStep eyebrow={eyebrow} onWork={onWork} />}
           {step.id === "models" && <ModelsStep picks={picks} eyebrow={eyebrow} onWork={onWork} />}
           {step.id === "bot" && <FirstBotStep eyebrow={eyebrow} onNewBot={newBot} busy={leaving} />}
         </div>
