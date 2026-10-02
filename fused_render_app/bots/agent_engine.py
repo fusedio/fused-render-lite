@@ -532,7 +532,7 @@ def run(bot, task: str, label: str | None = None) -> None:
     try:
         bot.emit("system", f"Task started: {label or task}")
         bot.browser.start(False)
-        bin_path, _ = claude_health.resolve()
+        bin_path = claude_health.runnable()
         if not bin_path:
             raise RuntimeError("the Claude Code CLI (`claude`) was not found; install it or pick a local model")
         if bot.stop_flag.is_set():
