@@ -109,7 +109,7 @@ def test_click_focuses_the_app_whose_env_is_installing(monkeypatch):
                         lambda f: extract if f == "/x/demo.fused" else None)
     monkeypatch.setattr(webnotify, "notify", lambda *a, **k: None)
     mgr = _Manager([_Win(None), _Win("/x/demo.fused")])
-    jobnotify.install(mgr, ROOT, remembered_files=lambda: ["/x/old.fused"])
+    jobnotify.install(mgr, ROOT)
     jobs.upsert({"id": "sys:env-install:k", "title": "Preparing demo",
                  "state": "running"}, page=extract, server=True)
     handler = webnotify._click_handlers[notify_policy.IDENTIFIER_PREFIX]

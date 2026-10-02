@@ -45,7 +45,7 @@ def test_ed25519_rfc8032_vectors(seed, pk, msg, sig):
         ed25519.verify(pk, sig[:32] + s.to_bytes(32, "little"), msg)
 
 
-def _manifest(version="9.9.9", sha256="ab" * 32, url="https://cdn.example/RenderApp-9.9.9.dmg",
+def _manifest(version="9.9.9", sha256="ab" * 32, url="https://cdn.example/FusedBot-9.9.9.dmg",
               seed=SEED, **extra):
     sig = ed25519.sign(seed, common.signing_message(version, sha256))
     body = {"schema": 1, "version": version, "url": url, "sha256": sha256,
@@ -312,6 +312,57 @@ def test_swap_survives_a_detach_failure(manager, monkeypatch, tmp_path):
     assert "detach" in ran and not dmg.exists()
 
 
+@pytest.mark.parametrize("installed,shipped", [
+    ("RenderApp.app", "FusedBot.app"),   # a pre-rename install takes a FusedBot DMG
+    ("FusedBot.app", "RenderApp.app"),   # an old manifest's DMG still installs
+    ("FusedBot.app", "FusedBot.app"),
+])
+def test_swap_keeps_the_installed_bundle_path(monkeypatch, tmp_path, installed, shipped):
+    """The FusedBot rename: the swap lands the new bundle at the INSTALLED
+    path whatever the .app inside the DMG is called (a /Applications/RenderApp.app
+    is never renamed), and its temp names are the new ones, all cleaned up."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(common, "PUBLIC_KEY", PUBLIC)
+    apps = tmp_path / "Applications"
+    bundle = _bundle(apps, version="0.8.13", name=installed)
+    m = mac_update.UpdateManager(manifest_url="https://x/latest.json", bundle=bundle,
+                                 current_version="0.8.13")
+    _point(monkeypatch, _manifest(version="0.8.14"))
+    m.check(force=True)
+    mount = tmp_path / "mount"
+    _bundle(mount, version="0.8.14", name=shipped)
+    dmg = tmp_path / "FusedBot-0.8.14.dmg"
+    dmg.write_bytes(b"x")
+    monkeypatch.setattr(common, "download_verified", lambda *a, **k: str(dmg))
+    monkeypatch.setattr(m, "_check_disk_space", lambda updates: None)
+    monkeypatch.setattr(m, "_attach", lambda d: str(mount))
+    renames = []
+    real_rename = os.rename
+
+    def spy_rename(a, b):
+        renames.append((os.path.basename(a), os.path.basename(b)))
+        real_rename(a, b)
+    monkeypatch.setattr(mac_update.os, "rename", spy_rename)
+
+    def fake_run(argv, **kw):
+        if argv[0] == "/usr/bin/ditto":
+            shutil.copytree(argv[1], argv[2])
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(mac_update.subprocess, "run", fake_run)
+
+    m.install(expected_version="0.8.14")
+    m._install_thread.join(5)
+    assert m.status()["state"] == "installed"
+    assert m._disk_version() == "0.8.14"
+    # The old bundle is removed on a worker thread; it may still be there.
+    assert [n for n in os.listdir(apps) if not n.startswith(".FusedBot-old-")] == [installed]
+    assert renames[0] == (installed, f".FusedBot-old-{os.getpid()}.app")
+    assert renames[1] == (".FusedBot-update.app", installed)
+    assert mac_update._DOWNLOAD_PREFIX == "FusedBot-"
+
+
 def test_attach_failures_detach_what_got_mounted(manager, monkeypatch, tmp_path):
     """`hdiutil attach` can succeed and still leave us without a mount point;
     every such path detaches the image before raising (bugbot, PR #26)."""
@@ -409,9 +460,9 @@ def test_cancel_only_while_downloading(manager):
 
 
 def test_relaunch_script_waits_for_pid_then_opens_bundle():
-    script = mac_update.relaunch_script("/Applications/Render App.app", 4242)
+    script = mac_update.relaunch_script("/Applications/Fused Bot.app", 4242)
     assert "kill -0 4242" in script
-    assert script.endswith("/usr/bin/open -n '/Applications/Render App.app'")
+    assert script.endswith("/usr/bin/open -n '/Applications/Fused Bot.app'")
 
 
 def test_start_is_a_no_op_outside_a_bundle(monkeypatch):
@@ -423,6 +474,30 @@ def test_start_is_a_no_op_outside_a_bundle(monkeypatch):
     m = mac_update.start()
     assert m is not None and m.status()["check_only"] is True
     assert mac_update.start() is m
+    mac_update.reset_for_tests()
+
+
+def test_dev_version_env_only_applies_to_the_dev_manager(monkeypatch):
+    monkeypatch.setenv(mac_update.NO_AUTO_UPDATE_ENV, "1")
+    # Dev flag + version: the check-only manager pretends to be that version.
+    mac_update.reset_for_tests()
+    monkeypatch.setenv(mac_update.DEV_MANAGER_ENV, "1")
+    monkeypatch.setenv(mac_update.DEV_VERSION_ENV, "0.9.0")
+    try:
+        st = mac_update.start().status()
+        assert st["current_version"] == "0.9.0" and st["check_only"] is True
+    finally:
+        mac_update.reset_for_tests()
+    # Dev flag without the version: the real version.
+    monkeypatch.delenv(mac_update.DEV_VERSION_ENV)
+    try:
+        assert mac_update.start().status()["current_version"] == mac_update.__version__
+    finally:
+        mac_update.reset_for_tests()
+    # Version without the dev flag: ignored, no manager at all outside a bundle.
+    monkeypatch.delenv(mac_update.DEV_MANAGER_ENV)
+    monkeypatch.setenv(mac_update.DEV_VERSION_ENV, "0.9.0")
+    assert mac_update.start() is None and mac_update.manager() is None
     mac_update.reset_for_tests()
 
 

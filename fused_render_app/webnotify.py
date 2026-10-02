@@ -18,7 +18,7 @@ origins as granted, so ``Notification.permission`` already reads
 
 Display:
 
-- Inside the bundle (a real ``Render App.app``): ``UNUserNotificationCenter``.
+- Inside the bundle (a real ``FusedBot.app``): ``UNUserNotificationCenter``.
   Authorization is requested on first use; a click on the banner is routed
   back as ``WKNotificationManagerProviderDidClickNotification`` (the page's
   ``onclick``) and the app comes forward. ``UNUserNotificationCenter``

@@ -1,17 +1,26 @@
-"""macOS app shell: the HTTP server on a thread, a menu-bar item, and the
-app's own windows (mainwindow.py) — every .fused opens in a native window of
-this app, any number of them, all on the one server. The default browser is
-only ever an explicit "Open in browser".
+"""macOS app shell of FusedBot: the HTTP server on a thread, a menu-bar item,
+and the app's own windows (mainwindow.py) — the bots page (``/``) and the
+Tasks page in native windows, any number of them, all on the one server. The
+default browser is only ever an explicit "Open in browser".
+
+The menu-bar item opens a Dock-like tray (menubar_dock.py, the page at
+``/dock``; its tiles are bots/dock.py's lists): a left click drops it, a right
+click shows the utility menu (Open FusedBot, Tasks, Open in Browser, Open App
+Logs, Quit). If the tray cannot be built, rumps's own menu with those same
+items stays on the status item, so Quit is never lost.
 
 Launch order matters: the AppKit run loop starts first and the server boots
-in the background after it, because ``application:openFiles:`` (a Finder
-double-click on a .fused) is delivered once the run loop is up while the
-server takes a moment. Files that arrive before readiness are queued.
+in the background after it; the first window opens once the server answers.
+
+Opening a ``.fused`` (Finder double-click, ``render-app://`` link, argv) is
+no longer a feature: the document type and URL scheme stay registered for
+now, and any such open just shows the FusedBot window.
 
 A second launch (a CLI-style ``open -a`` while the app already runs) finds the
-live server through the pidfile and asks the running app, via LaunchServices,
-to open the files in its windows; only if no such app is registered does it
-fall back to a browser tab on the live port.
+live server through the pidfile and hands over to the running app via
+LaunchServices (a reopen event, or openFiles, which shows its window); only
+if no such app is registered does it fall back to a browser tab on the live
+port.
 """
 from __future__ import annotations
 
@@ -26,6 +35,7 @@ import urllib.request
 import webbrowser
 
 from fused_render_app import __version__, appfile, fetch, paths, server
+from fused_render_app.bots import dock as bots_dock
 from fused_render_app.cli import open_url
 from fused_render_app.update import mac as mac_update
 
@@ -88,29 +98,62 @@ def pick_port(start: int = DEFAULT_PORT, tries: int = 20) -> int:
     return 0  # let the OS pick
 
 
+def _menubar_image(path: str):
+    """The menu-bar template icon as ONE NSImage carrying both
+    representations — ``menubar.png`` (36 px) and ``menubar@2x.png`` (72 px)
+    — at rumps's 20×20 pt, so a Retina menu bar draws the 72 px one instead of
+    upscaling the 36 (rumps itself loads only the single file it is given).
+    None when neither file loads; the caller keeps rumps's own image then."""
+    try:
+        from AppKit import NSImage, NSImageRep
+
+        image = NSImage.alloc().initWithSize_((20, 20))
+        for p in (path, path[:-len(".png")] + "@2x.png"):
+            if os.path.isfile(p):
+                for rep in NSImageRep.imageRepsWithContentsOfFile_(p) or ():
+                    rep.setSize_((20, 20))
+                    image.addRepresentation_(rep)
+        if not image.representations():
+            return None
+        image.setTemplate_(True)
+        return image
+    except Exception:  # noqa: BLE001 — cosmetic; rumps's single-file image stands
+        logger.debug("menu-bar icon: @2x image not built", exc_info=True)
+        return None
+
+
+def _install_window_hooks(manager) -> None:
+    """`server.native_hooks` for the window manager, callable from the HTTP
+    thread: each hook hops to the main thread itself and returns at once,
+    except ``open_files`` which only reads plain attributes (WindowManager
+    keeps it thread-safe on purpose)."""
+    from PyObjCTools import AppHelper
+
+    server.native_hooks.update({
+        "open_files": manager.open_files,
+        "focus_or_open": lambda fs_path: AppHelper.callAfter(manager.focus_or_open, fs_path),
+        "show_home": lambda: AppHelper.callAfter(manager.show_home),
+    })
+
+
 def _install_dock_hooks(state: dict) -> None:
-    """What the server's /api/dock/* routes call, from the HTTP thread: every
-    hook hops to the main thread itself and returns at once, except
-    ``open_files`` which only reads plain attributes (WindowManager keeps it
-    thread-safe on purpose)."""
+    """What the tray's ``/api/dock/*`` routes (and its own tile menu) call,
+    from any thread: each hook hops to the main thread, closes the tray first,
+    then shows the window. Installed after `_install_window_hooks`, whose
+    ``show_home`` it replaces with the tray-closing one."""
     from PyObjCTools import AppHelper
 
     manager = state["windows"]
     dock = state["dock"]
 
-    def focus_or_open(fs_path: str) -> None:
+    def dock_open(kind: str, key: str) -> None:
         def run():
             dock.close_popover()
-            manager.focus_or_open(fs_path)
+            if kind == "bot":
+                manager.show_bot(key)
+            elif kind == "app":
+                manager.show_url(bots_dock.app_render_path(key))
         AppHelper.callAfter(run)
-
-    def choose_file() -> None:
-        def run():
-            dock.close_popover()
-            manager.choose_file()
-        # One extra tick: started from inside the popover's event handling
-        # the modal panel gets its clicks eaten; a clean run-loop pass fixes it.
-        AppHelper.callAfter(lambda: AppHelper.callAfter(run))
 
     def show_home() -> None:
         def run():
@@ -118,33 +161,7 @@ def _install_dock_hooks(state: dict) -> None:
             manager.show_home()
         AppHelper.callAfter(run)
 
-    server.native_hooks.update({
-        "open_files": manager.open_files,
-        "focus_or_open": focus_or_open,
-        "choose_file": choose_file,
-        "show_home": show_home,
-    })
-
-
-def _install_launcher_hooks(state: dict) -> None:
-    """What ``POST /api/launcher/hotkey`` and the footer's status read call,
-    from the HTTP thread: rebinding hops to the main thread (Carbon and the
-    page live there); the bound flag is a plain attribute read."""
-    from PyObjCTools import AppHelper
-
-    launcher = state["launcher"]
-
-    def rebind(spec) -> None:
-        if spec:
-            AppHelper.callAfter(launcher.bind_hotkey, spec)
-        else:  # another setting changed; only the page needs telling
-            AppHelper.callAfter(launcher.push_settings)
-
-    server.native_hooks.update({
-        "launcher_rebind": rebind,
-        "launcher_hotkey_bound": launcher.hotkey_bound,
-        "launcher_pinned_bound": launcher.pinned_bound,
-    })
+    server.native_hooks.update({"dock_open": dock_open, "show_home": show_home})
 
 
 def main() -> None:
@@ -155,42 +172,43 @@ def main() -> None:
     )
     logger.info("fused-render-app %s starting (pid %s)", __version__, os.getpid())
 
-    # Files handed on argv (open -a … file, or a CLI-style launch), plus
-    # http(s) or render-app:// links to a .fused (downloaded by the open
-    # page, fetch.py).
-    argv_urls = [u for u in (fetch.url_from_link(a) for a in sys.argv[1:]) if u]
-    argv_files = [a for a in sys.argv[1:]
-                  if (a.lower().endswith(".fused") and os.path.isfile(a)) or appfile.is_app_dir(a)]
+    # Files or links handed on argv (open -a … file, a CLI-style launch).
+    # Opening them is no longer a feature (module docstring): they are only
+    # logged, and the launch shows the FusedBot window like any other.
+    argv_ignored = [a for a in sys.argv[1:]
+                    if fetch.url_from_link(a)
+                    or (a.lower().endswith(".fused") and os.path.isfile(a)) or appfile.is_app_dir(a)]
+    if argv_ignored:
+        logger.info("opening .fused files is no longer a feature; ignoring %s", argv_ignored)
 
+    # Before the first urlopen (find_running_server's health probe): py2app's
+    # bootstrap leaves SSL_CERT_FILE pointing at a file that does not exist,
+    # and urllib freezes its CA bundle into the first opener it builds. The
+    # server's own make_server() repeats this; running it here first keeps the
+    # launcher's probe from poisoning every later HTTPS call in the process.
+    paths.fix_process_env()
     existing = find_running_server()
     if existing is not None:
-        # Hand the files to the RUNNING app: LaunchServices delivers them to
-        # its application:openFiles: (or, with no files, a reopen event), and
-        # that instance opens them in its own windows. Only from a SOURCE run:
+        # Hand over to the RUNNING app: LaunchServices delivers a reopen
+        # event and that instance shows its window. Only from a SOURCE run:
         # inside the bundle this branch means another process owns the
         # pidfile (a source run, a second copy of the app), and `open -b`
         # would resolve to the registered bundle — this very process, about
-        # to exit — dropping the files or relaunching in a loop. There, and
-        # when no bundle with our id is registered, a browser tab on the live
-        # port is the fallback that keeps the files openable.
+        # to exit — relaunching in a loop. There, and when no bundle with our
+        # id is registered, a browser tab on the live port is the fallback.
         logger.info("live server on port %s; handing over and exiting", existing)
         handed = None
         if not getattr(sys, "frozen", False):  # py2app sets sys.frozen
-            handed = subprocess.run(["open", "-b", BUNDLE_ID, *argv_files],
+            handed = subprocess.run(["open", "-b", BUNDLE_ID],
                                     check=False, capture_output=True)
         if handed is None or handed.returncode != 0:
-            for f in argv_files or [None]:
-                webbrowser.open(open_url(existing, f))
-        # `open -b` only carries files; a URL goes to the live port directly.
-        for u in argv_urls:
-            webbrowser.open(open_url(existing, u))
+            webbrowser.open(open_url(existing, None))
         return
 
     import rumps  # macOS only
 
     port = pick_port()
-    state = {"ready": False, "docs": False, "pending": [], "server": None, "windows": None,
-             "dock": None, "launcher": None}
+    state = {"ready": False, "server": None, "windows": None, "dock": None}
 
     def show(target: str) -> None:
         """Open ``target`` in a new window of this app. Callable from any
@@ -205,7 +223,7 @@ def main() -> None:
         AppHelper.callAfter(manager.open, target)
 
     def show_home() -> None:
-        """Focus a Home window, or open a new one if none is open."""
+        """Focus a FusedBot window, or open a new one if none is open."""
         manager = state["windows"]
         if manager is None:
             webbrowser.open(open_url(port, None))
@@ -214,65 +232,47 @@ def main() -> None:
 
         AppHelper.callAfter(manager.show_home)
 
-    def open_file(fs_path: str) -> None:
-        target = open_url(port, fs_path)
-        state["docs"] = True
+    def open_file(what: str) -> None:
+        """A Finder / URL-scheme open of a .fused, a folder app or a link.
+        Opening those is no longer a feature: log it and show the FusedBot
+        window. Before readiness, nothing — the startup window opens once
+        the server answers."""
+        logger.info("opening .fused files is no longer a feature; showing FusedBot for %s", what)
         if state["ready"]:
-            logger.info("opening %s", target)
-            show(target)
-        elif target in state["pending"]:
-            # A source run gets a launch file twice: once as argv, once as
-            # the openFiles event AppKit synthesises from it. One window.
-            logger.info("already queued %s", target)
-        else:
-            logger.info("queueing %s until the server is ready", target)
-            state["pending"].append(target)
+            show_home()
 
     # Finder "Open with" / double-click: AppKit calls application:openFiles:
     # on the delegate. rumps's delegate lacks it; adding the method to the
-    # class is enough — pyobjc registers the selector.
+    # class is enough — pyobjc registers the selector. The .fused document
+    # type stays registered for now (scripts/setup_py2app.py).
     def application_openFiles_(self, _app, filenames):
         names = [str(n) for n in filenames]
         logger.info("Finder open-files event: %s", names)
-        for name in names:
-            open_file(name)
+        open_file(", ".join(names))
 
     rumps.rumps.NSApp.application_openFiles_ = application_openFiles_
 
-    # URL scheme (render-app://open?url=…, "Open in Render App" web links),
-    # a bare http(s) link, or a file:// URL. The http(s) target is downloaded
-    # by the open page (fetch.py); nothing is fetched here.
+    # URL scheme (render-app://open?url=…), a bare http(s) link, or a
+    # file:// URL: same as a file open.
     def application_openURLs_(self, _app, urls):
-        for u in urls:
-            raw = str(u.absoluteString())
-            logger.info("open-URLs event: %s", raw)
-            if raw.startswith("file://"):
-                import urllib.parse
-
-                open_file(urllib.parse.unquote(urllib.parse.urlsplit(raw).path))
-                continue
-            link = fetch.url_from_link(raw)
-            if link:
-                open_file(link)
-            else:
-                logger.warning("ignoring URL %s", raw)
+        raws = [str(u.absoluteString()) for u in urls]
+        logger.info("open-URLs event: %s", raws)
+        open_file(", ".join(raws))
 
     rumps.rumps.NSApp.application_openURLs_ = application_openURLs_
 
     # Dock click / Finder double-click on the running app: bring the front
-    # window forward, or open the placeholder if every window was closed.
+    # window forward, or open FusedBot if every window was closed. Before
+    # readiness, nothing: the startup window is on its way.
     def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
-        target = open_url(port, None)
         if state["ready"]:
             manager = state["windows"]
             if manager is None:
-                webbrowser.open(target)
+                webbrowser.open(open_url(port, None))
             else:
                 from PyObjCTools import AppHelper
 
                 AppHelper.callAfter(manager.reopen)
-        elif target not in state["pending"]:
-            state["pending"].append(target)
         return True
 
     rumps.rumps.NSApp.applicationShouldHandleReopen_hasVisibleWindows_ = (
@@ -288,48 +288,36 @@ def main() -> None:
             quit_app(None)
             return
         _write_pidfile(actual)
+        state["port"] = actual
         if state["windows"] is not None:
             state["windows"].set_port(actual)
         if state["dock"] is not None:
             state["dock"].set_port(actual)
-        if state["launcher"] is not None:
-            state["launcher"].set_port(actual)
-        # argv files join the queue BEFORE the ready flip so they dedupe
-        # against the openFiles event AppKit already delivered for them.
-        for f in argv_files + argv_urls:
-            open_file(f)
-        state["ready"] = True
         logger.info("server ready on port %s", actual)
+        # The tray's page loads now the server answers (the panel was built
+        # at kickoff, before the port was bound). No first-launch show: the
+        # FusedBot window below is the startup surface.
         if state["dock"] is not None:
             from PyObjCTools import AppHelper
 
             AppHelper.callAfter(state["dock"].server_ready)
             if os.environ.get("FUSED_RENDER_APP_DOCK_SHOW"):  # dev: screenshot the tray
                 AppHelper.callAfter(state["dock"].show_popover)
-        if state["launcher"] is not None:
-            from PyObjCTools import AppHelper
-
-            AppHelper.callAfter(state["launcher"].server_ready)
-            AppHelper.callAfter(state["launcher"].bind_hotkey)
-            AppHelper.callAfter(state["launcher"].bind_pinned)
-            if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):  # dev: show without the shortcut
-                AppHelper.callAfter(state["launcher"].show)
         # The in-app updater (update/mac.py): a background manifest check
-        # whose only surface is the launcher page's banner. No-op outside a
-        # bundle, and guarded like everything else — no updates is a lesser
-        # outcome than no app.
+        # read through GET /api/update. No-op outside a bundle, and guarded
+        # like everything else — no updates is a lesser outcome than no app.
         try:
             mac_update.start()
         except Exception:  # noqa: BLE001
             logger.exception("update manager unavailable")
-        pending, state["pending"] = state["pending"], []
-        for target in pending:
-            show(target)
-        # The placeholder window, unless this launch was a document open.
+        # The FusedBot window (`/`). Queued BEFORE the ready flip: an
+        # open or reopen event landing right after it then finds this window
+        # (both hop to the main thread in order) instead of opening a second.
         # FUSED_RENDER_APP_NO_BROWSER keeps its name: "open no surface at
         # startup", whatever the surface is.
-        if not state["docs"] and not os.environ.get("FUSED_RENDER_APP_NO_BROWSER"):
+        if not os.environ.get("FUSED_RENDER_APP_NO_BROWSER"):
             show(open_url(actual, None))
+        state["ready"] = True
 
     def relaunch() -> None:
         """POST /api/update/relaunch (HTTP thread): the bundle on disk is a
@@ -414,35 +402,41 @@ def main() -> None:
 
     icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "menubar.png")
 
+    def live_port() -> int:
+        return state.get("port") or port
+
+    def open_tasks() -> None:
+        manager = state.get("windows")
+        if manager is not None:
+            manager.show_tasks()
+        else:
+            webbrowser.open(f"http://127.0.0.1:{live_port()}/tasks")
+
+    def open_browser() -> None:
+        webbrowser.open(open_url(live_port(), None))
+
+    def open_logs() -> None:
+        subprocess.run(["open", "-R", paths.log_path()], check=False)
+
     class App(rumps.App):
+        """The menu-bar item. This plain menu is the fallback only: the tray
+        (menubar_dock.py, built at kickoff) takes it off the status item and
+        shows the same entries on a right click. Every item has its own
+        callback — not `@rumps.clicked`."""
+
         def __init__(self):
-            super().__init__("Render App", icon=icon if os.path.isfile(icon) else None,
+            super().__init__("FusedBot", icon=icon if os.path.isfile(icon) else None,
                              template=True, quit_button=None)
-            self.menu = ["Open in app", "Tasks", "Open in browser", "Open app logs", "Quit"]
-
-        @rumps.clicked("Open in app")
-        def open_in_app(self, _sender):
-            show_home()
-
-        @rumps.clicked("Tasks")
-        def open_tasks(self, _sender):
-            manager = state.get("windows")
-            if manager is not None:
-                manager.show_tasks()
-            else:
-                webbrowser.open(f"http://127.0.0.1:{port}/tasks")
-
-        @rumps.clicked("Open in browser")
-        def open_browser(self, _sender):
-            webbrowser.open(open_url(port, None))
-
-        @rumps.clicked("Open app logs")
-        def open_logs(self, _sender):
-            subprocess.run(["open", "-R", paths.log_path()], check=False)
-
-        @rumps.clicked("Quit")
-        def quit(self, _sender):
-            quit_app(_sender)
+            if os.path.isfile(icon):
+                # Read by rumps at run() (its delegate sees this __dict__).
+                self._icon_nsimage = _menubar_image(icon) or self._icon_nsimage
+            self.menu = [
+                rumps.MenuItem("Open FusedBot", callback=lambda _s: show_home()),
+                rumps.MenuItem("Tasks", callback=lambda _s: open_tasks()),
+                rumps.MenuItem("Open in browser", callback=lambda _s: open_browser()),
+                rumps.MenuItem("Open app logs", callback=lambda _s: open_logs()),
+                rumps.MenuItem("Quit", callback=quit_app),
+            ]
 
     app = App()
 
@@ -464,30 +458,26 @@ def main() -> None:
         # here — no banners is a lesser outcome than no app.
         if state["windows"] is not None:
             try:
-                from fused_render_app import dock_store, jobnotify
+                from fused_render_app import jobnotify
 
-                jobnotify.install(
-                    state["windows"], paths.apps_dir(),
-                    remembered_files=lambda: [a["file"] for a in dock_store.list_apps()])
+                jobnotify.install(state["windows"], paths.apps_dir())
             except Exception:  # noqa: BLE001
                 logger.exception("job notifications unavailable")
+            _install_window_hooks(state["windows"])
         # The menu-bar Dock (menubar_dock.py) replaces rumps' menu with a
-        # popover tray of pinned + recent apps; right-click keeps the old
-        # entries. Needs the window manager (focus-or-open is its point).
-        # Guarded: without it the rumps menu above stays as it was.
+        # floating tray of bots and apps; right-click keeps the menu's
+        # entries. Needs the window manager (showing a bot or an app is its
+        # point). Guarded: without it the rumps menu above stays as it was.
         if state["windows"] is not None:
             try:
                 from fused_render_app.menubar_dock import DockController
 
                 state["dock"] = DockController(
-                    app._nsapp.nsstatusitem, port,
+                    app._nsapp.nsstatusitem, live_port(),
                     actions={"show_home": show_home,
-                             # The launcher is built after the Dock: resolve at click time.
-                             "show_launcher": lambda: state["launcher"] and state["launcher"].show(),
-                             "show_tasks": lambda: state["windows"].show_tasks(),
-                             "open_browser": lambda: webbrowser.open(open_url(port, None)),
-                             "open_logs": lambda: subprocess.run(
-                                 ["open", "-R", paths.log_path()], check=False),
+                             "show_tasks": open_tasks,
+                             "open_browser": open_browser,
+                             "open_logs": open_logs,
                              "quit": lambda: quit_app(None)})
                 _install_dock_hooks(state)
                 if os.environ.get("FUSED_RENDER_APP_DOCK_SHOW"):
@@ -508,46 +498,12 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("menu-bar Dock unavailable; keeping the status-item menu")
                 state["dock"] = None
-        # The launcher (launcher_panel.py): a Spotlight-like panel on a
-        # global shortcut (⌥Space by default) that opens any known app.
-        # Guarded like the Dock — no launcher is a lesser outcome than no app.
-        if state["windows"] is not None:
-            try:
-                from fused_render_app.launcher_panel import LauncherController
-
-                manager = state["windows"]
-
-                def open_from_launcher(fs_path: str) -> None:
-                    # Dock semantics; the panel is non-activating, so bring
-                    # this app forward or the window opens behind the caller.
-                    from AppKit import NSApp
-
-                    NSApp.activateIgnoringOtherApps_(True)
-                    manager.focus_or_open(fs_path)
-
-                def home_from_launcher() -> None:
-                    from AppKit import NSApp
-
-                    NSApp.activateIgnoringOtherApps_(True)
-                    manager.show_home()
-
-                state["launcher"] = LauncherController(port, open_from_launcher, home_from_launcher)
-                _install_launcher_hooks(state)
-                if os.environ.get("FUSED_RENDER_APP_LAUNCHER_SHOW"):
-                    # Dev only: SIGUSR2 toggles the launcher (SIGUSR1 is the
-                    # Dock's); the breathing timer below keeps signals landing.
-                    import signal
-
-                    from PyObjCTools import AppHelper
-
-                    signal.signal(signal.SIGUSR2, lambda *_: AppHelper.callAfter(
-                        state["launcher"].toggle))
-                    if not hasattr(app, "dock_dev_tick"):
-                        app.dock_dev_tick = rumps.Timer(lambda _t: None, 0.5)
-                        app.dock_dev_tick.start()
-            except Exception:  # noqa: BLE001
-                logger.exception("launcher unavailable")
-                state["launcher"] = None
+                server.native_hooks.pop("dock_open", None)
+                _install_window_hooks(state["windows"])  # the plain show_home again
+                try:  # a half-built Dock may have taken the menu off already
+                    app._nsapp.nsstatusitem.setMenu_(app._menu._menu)
+                except Exception:  # noqa: BLE001
+                    logger.debug("status-item menu not restored", exc_info=True)
         threading.Thread(target=bootstrap, daemon=True).start()
 
     # Held on `app`: an unreferenced rumps.Timer is collected before it fires.

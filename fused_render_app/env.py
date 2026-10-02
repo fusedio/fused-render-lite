@@ -400,8 +400,9 @@ def _error(err_type: str, message: str, detail: str = "") -> dict:
             "stdout": ""}
 
 
-def _run_child(python: str, path: str, params: dict, timeout: float, started: float) -> dict:
-    request = json.dumps({"path": path, "params": params or {}})
+def _run_child(python: str, path: str, params: dict, timeout: float, started: float,
+               entrypoint: str = "main") -> dict:
+    request = json.dumps({"path": path, "params": params or {}, "entrypoint": entrypoint})
     try:
         proc = subprocess.run(
             [python, _CHILD], input=request, capture_output=True, text=True,
@@ -447,7 +448,11 @@ def run_python_trusted(path: str, params: dict, timeout: float = RUN_TIMEOUT_S) 
     return result
 
 
-def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S) -> dict:
+def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEOUT_S,
+               entrypoint: str = "main") -> dict:
+    """Run ``entrypoint(**params)`` from ``path`` on ``app_dir``'s own interpreter
+    (its venv, built on demand). ``entrypoint`` is ``main`` for runPython; an app
+    MCP tool (bots/apptools.py) names its own from mcp.toml."""
     started = time.monotonic()
     if not os.path.isfile(path):
         return _error("FileNotFoundError", f"no such Python file: {path}")
@@ -459,7 +464,7 @@ def run_python(path: str, params: dict, app_dir: str, timeout: float = RUN_TIMEO
         return _error("EnvironmentError",
                       "the app's environment failed to install: " + (inst.error or ""),
                       "\n".join(inst.lines[-40:]))
-    result = _run_child(interpreter_for(app_dir), path, params, timeout, started)
+    result = _run_child(interpreter_for(app_dir), path, params, timeout, started, entrypoint)
     if not result.get("ok"):
         err = result.get("error") or {}
         if err.get("type") == "ModuleNotFoundError" and not has_project(app_dir):

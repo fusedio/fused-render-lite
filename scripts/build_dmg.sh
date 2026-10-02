@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build RenderApp.app + a DMG via py2app.
+# Build FusedBot.app + a DMG (FusedBot-<version>.dmg) via py2app. Before
+# 0.11.0 the bundle was RenderApp.app; only the display name changed — the
+# bundle id, URL scheme, env vars and app home are the same (setup_py2app.py).
 #
 #   framework python -> wheel -> build venv (wheel[app] + py2app + dmgbuild)
 #   -> icon -> py2app -> prune -> Contents/lib symlink -> sanity probes
@@ -48,7 +50,7 @@ _build_failed() {
 trap _build_failed ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="RenderApp"
+APP_NAME="FusedBot"
 VERSION="$(python3 -c "
 import re
 print(re.search(r'(?m)^__version__\s*=\s*\"([^\"]+)\"', open('${REPO_ROOT}/fused_render_app/__init__.py').read()).group(1))
@@ -119,38 +121,26 @@ echo "==> installing ${WHEEL_PATH##*/} [app] + py2app + dmgbuild + pillow into t
 "$BUILD_VENV/bin/pip" install --quiet --force-reinstall --no-deps --no-cache-dir "${WHEEL_PATH}"
 
 # --- 3. icon -------------------------------------------------------------
+# The FusedBot icon is a committed 1024 px master (transparent corners, the
+# orange bot face on the dark rounded square, rendered from the hand-written
+# static/fusedbot-icon.svg by scripts/render_icons.py); the .iconset is every
+# size iconutil wants, resized from it.
 echo "==> generating app icon"
+ICON_MASTER="$REPO_ROOT/fused_render_app/static/fusedbot-icon-1024.png"
+test -f "$ICON_MASTER" || { echo "FATAL: icon master missing: $ICON_MASTER" >&2; exit 1; }
 ICONSET_DIR="$BUILD_DIR/${APP_NAME}.iconset"
 rm -rf "$ICONSET_DIR" "$ICNS_PATH"
 mkdir -p "$ICONSET_DIR"
-"$BUILD_VENV/bin/python" - "$ICONSET_DIR" <<'PYEOF'
-import math, sys
-from PIL import Image, ImageDraw
-out = sys.argv[1]
-C = 1024 * 4
-bg = Image.new("RGBA", (C, C), (0, 0, 0, 0))
-d = ImageDraw.Draw(bg)
-m = C * 0.06
-d.rounded_rectangle([m, m, C - m, C - m], radius=C * 0.22, fill=(27, 29, 33, 255))
-cx = cy = C / 2
-tips = [(-90, C * 0.34), (0, C * 0.34), (90, C * 0.34), (180, C * 0.34)]
-waists = [(-45, C * 0.09), (45, C * 0.09), (135, C * 0.09), (-135, C * 0.09)]
-def pt(a, r):
-    a = math.radians(a); return (cx + r * math.cos(a), cy + r * math.sin(a))
-poly = []
-for i in range(4):
-    t0, t1, c = pt(*tips[i]), pt(*tips[(i + 1) % 4]), pt(*waists[i])
-    poly.append(t0)
-    for k in range(1, 12):
-        t = k / 12
-        poly.append(((1-t)**2*t0[0] + 2*(1-t)*t*c[0] + t**2*t1[0],
-                     (1-t)**2*t0[1] + 2*(1-t)*t*c[1] + t**2*t1[1]))
-d.polygon(poly, fill=(229, 255, 68, 255))
-# hollow the glyph's centre
-d.ellipse([cx - C*0.075, cy - C*0.075, cx + C*0.075, cy + C*0.075], fill=(27, 29, 33, 255))
+"$BUILD_VENV/bin/python" - "$ICON_MASTER" "$ICONSET_DIR" <<'PYEOF'
+import sys
+from PIL import Image
+master, out = sys.argv[1], sys.argv[2]
+src = Image.open(master).convert("RGBA")
+if src.size != (1024, 1024):
+    sys.exit(f"icon master must be 1024x1024, got {src.size}")
 for s in (16, 32, 128, 256, 512):
-    bg.resize((s, s), Image.LANCZOS).save(f"{out}/icon_{s}x{s}.png")
-    bg.resize((s*2, s*2), Image.LANCZOS).save(f"{out}/icon_{s}x{s}@2x.png")
+    src.resize((s, s), Image.LANCZOS).save(f"{out}/icon_{s}x{s}.png")
+    src.resize((s * 2, s * 2), Image.LANCZOS).save(f"{out}/icon_{s}x{s}@2x.png")
 PYEOF
 iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
 

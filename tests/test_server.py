@@ -30,11 +30,73 @@ def q(**kw):
     return "?" + urllib.parse.urlencode(kw)
 
 
-def test_placeholder_and_open_page(client):
-    status, headers, body = client.get("/")
-    assert status == 200 and b".fused" in body
-    status, _, body = client.get("/open" + q(_file="/nope/x.fused"))
-    assert status == 200 and b'"/nope/x.fused"' in body
+def test_bots_page_and_removed_pages(client):
+    from fused_render_app import server
+
+    # `/` is the bots page and `/dock` the menu-bar tray: the built file when
+    # it exists, else a 503 saying how to build it (tests/test_bots_dock.py
+    # covers `/dock` both ways).
+    for route, name in (("/", "bots.html"), ("/index.html", "bots.html"), ("/dock", "dock.html")):
+        built = os.path.isfile(os.path.join(server.STATIC_DIR, "shell-dist", name))
+        status, headers, body = client.get(route)
+        if built:
+            assert status == 200
+        else:
+            assert status == 503 and b"Run scripts/build_shell.sh" in body
+        assert headers["Content-Type"].startswith("text/html")
+    # The old product surface is gone: the `.fused` opener, the showcase home,
+    # the launcher and its settings page. (`/dock` and `/api/dock` are back,
+    # as the FusedBot menu-bar tray: tests/test_bots_dock.py.)
+    for route in ("/open?_file=/nope/x.fused", "/api/showcase", "/launcher",
+                  "/settings", "/api/launcher"):
+        assert client.get(route)[0] == 404, route
+
+
+def test_favicon_is_the_fusedbot_png(client):
+    from fused_render_app import server
+
+    with open(os.path.join(server.STATIC_DIR, server.FAVICON_NAME), "rb") as f:
+        png = f.read()
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    for route in ("/favicon.ico", "/static/fusedbot-icon-64.png"):
+        status, headers, body = client.get(route)
+        assert status == 200 and headers["Content-Type"].startswith("image/png") and body == png, route
+
+
+def test_embed_route(client, tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text("<html><head><title>t</title></head><body>HELLO</body></html>")
+    status, headers, body = client.get("/embed" + q(path=str(page)))
+    assert status == 200 and headers["Content-Type"].startswith("text/html")
+    assert body.index(b"/static/runtime.js") < body.index(b"HELLO")
+
+    # a folder is not redirected to its index.html, even when it has one
+    folder = tmp_path / "app"
+    folder.mkdir()
+    (folder / "index.html").write_text("<html><body>INDEX</body></html>")
+    status, headers, _ = client.get("/embed" + q(path=str(folder)))
+    assert status == 404 and "Location" not in headers
+
+    # nothing but an .html/.htm file is served
+    script = tmp_path / "x.py"
+    script.write_text("print('secret')")
+    status, _, body = client.get("/embed" + q(path=str(script)))
+    assert status == 404 and b"secret" not in body
+    status, _, _ = client.get("/embed" + q(path=str(tmp_path / "missing.html")))
+    assert status == 404
+    status, _, _ = client.get("/embed" + q(path="relative.html"))
+    assert status == 404
+
+
+def test_app_dir_for_apps_root(tmp_path, monkeypatch):
+    from fused_render_app import server
+
+    monkeypatch.setenv("FUSED_RENDER_DIR", str(tmp_path))
+    f = tmp_path / "app" / "x" / "sub" / "f.py"
+    f.parent.mkdir(parents=True)
+    f.write_text("")
+    assert server.app_dir_for(str(f)) == os.path.realpath(tmp_path / "app" / "x")
+    assert server.app_dir_for(str(tmp_path / "elsewhere" / "f.py")) is None
 
 
 def test_open_run_and_fs(client, v2_fused):
@@ -239,6 +301,22 @@ def test_upload_mkdir_and_jobs(client, v2_fused):
     assert json.loads(client.get("/api/jobs")[2])["jobs"] == []
 
 
+def test_sys_job_rows_take_ticks_only_from_a_live_worker(client, monkeypatch):
+    """A model worker's weight-fetch ticks land on its `sys:` row (else the row
+    goes `stalled` and `fused_ai.models.download` abandons a running download)."""
+    from fused_render_app.ai import supervisor
+    monkeypatch.setattr(supervisor, "_worker_tokens", {"tok-live"})
+    tick = {"id": "sys:ai-model:m", "title": "m", "kind": "download", "state": "running", "done": 5, "total": 10,
+            "page": "/ai-models/local"}
+    status, _, body = client.post("/api/jobs", tick)
+    assert status == 400 and "reserved" in json.loads(body)["error"]  # a page cannot write it
+    status, _, _ = client.post("/api/jobs", tick, headers={"X-Fused-Worker": "tok-dead"})
+    assert status == 400
+    status, _, body = client.post("/api/jobs", tick, headers={"X-Fused-Worker": "tok-live"})
+    row = json.loads(body)
+    assert status == 200 and row["done"] == 5 and row["total"] == 10 and row["page"] == "/ai-models/local"
+
+
 def test_worker_origin_is_exported(client):
     assert os.environ["FUSED_RENDER_ORIGIN"] == client.base
 
@@ -295,3 +373,20 @@ def test_old_uv_on_path_is_skipped(tmp_path, monkeypatch):
     assert env.uv_bin(download=True) == "downloaded"
     monkeypatch.setattr(env.shutil, "which", lambda name: str(new))
     assert env.uv_bin(download=True) == str(new)
+
+
+def test_run_python_calls_the_named_entrypoint(tmp_path):
+    """`entrypoint` (app MCP tools, bots/apptools.py) picks the function; the
+    default stays `main`, and a missing one is an AttributeError naming it."""
+    py = tmp_path / "t.py"
+    py.write_text("def main():\n    return 'main'\n\n"
+                  "def other(n: int = 1):\n    return {'other': n}\n\n"
+                  "def bad():\n    return object()\n")
+    assert env.run_python(str(py), {}, str(tmp_path))["result"] == "main"
+    res = env.run_python(str(py), {"n": "4", "junk": 1}, str(tmp_path), entrypoint="other")
+    assert res["ok"] and res["result"] == {"other": 4}
+    missing = env.run_python(str(py), {}, str(tmp_path), entrypoint="nope")
+    assert not missing["ok"] and missing["error"]["type"] == "AttributeError"
+    assert "callable 'nope' function" in missing["error"]["message"]
+    bad = env.run_python(str(py), {}, str(tmp_path), entrypoint="bad")
+    assert not bad["ok"] and bad["error"]["message"].startswith("bad() returned object")

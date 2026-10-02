@@ -1,14 +1,17 @@
 """The whole HTTP surface of fused-render-app, on the stdlib server.
 
 Pages
-  GET  /                    placeholder: drop a .fused here / open one
-  GET  /open?_file=<abs>    opens the .fused: extracts, builds its env, iframes the entry
-                            (a folder app — ~/Fused/local/<app>, localapps.py — opens in place)
-  GET  /open?_url=<http(s)> downloads (POST /api/fetch), then navigates to _file
+  GET  /, /index.html       the FusedBot (bots) page (static/shell-dist/bots.html)
+  GET  /dock                the menu-bar tray (static/shell-dist/dock.html; menubar_dock.py)
+  GET  /favicon.ico         the 64 px FusedBot icon (static/fusedbot-icon-64.png)
+  GET  /tasks, /chat, /explorer/*   fused-render's React shell (static/shell-dist/lite.html)
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
+  GET  /embed?path=<abs>    the same, for an existing .html/.htm file only (no folder redirect)
 
 API (the six supported fused.* calls, plus what the shell needs)
   POST /api/open            {file}            -> {dir, entry, name, app_id, view}
+                            (a .fused is extracted and its env built; a folder app —
+                             ~/Fused/local/<app>, localapps.py — opens in place)
   GET  /api/open/status?file=<abs>            -> {status, lines, error}
   POST /api/drop            raw bytes + X-Filename -> {file}
   POST /api/fetch           {url}             -> {file}   (fetch.py; downloads/<app_id>.fused)
@@ -21,33 +24,16 @@ API (the six supported fused.* calls, plus what the shell needs)
   GET  /api/jobs            {jobs:[...]}   POST /api/jobs {id, ...} -> row
   POST /api/jobs/<id>/cancel | /dismiss, /api/jobs/clear
   GET  /api/health                             {ok, version, pid}
-  Self-update (update/mac.py; packaged mac app only — the launcher page's banner):
+  Self-update (update/mac.py; packaged mac app only):
   GET  /api/update                             {update: null | {state, current_version, latest_version,
                                                  progress, progress_total, phase, error, check_only, check_error}}
   POST /api/update/check | /install {expected_version?} | /cancel | /relaunch
                                                404 when no update manager runs (dev server, CLI)
-  Menu-bar dock (dock_store.py; GET /dock serves static/dock.html):
-  GET  /api/dock                               {apps:[{file,name,pinned,running,openedAt,
-                                                 hasIcon,iconVersion,hasPreview,previewVersion}], tilesize}
-  GET  /api/dock/icon?file=<abs>[&theme=light|dark]  the app's icon.svg (currentColor
-                                               resolved for the theme, icon_color.py), else
-                                               its icon.png as is, or 404
-  GET  /api/dock/preview?file=<abs>[&v=]       the app's preview.png (the hover bubble's
-                                               picture; ``v`` = previewVersion, so it caches), or 404
-  POST /api/dock/open|pin|remove|order|reveal|choose|home|size   (size: {tilesize} -> {tilesize})
-  Launcher (launcher.py; GET /launcher serves static/launcher.html, GET /settings its settings page):
-  GET  /api/launcher?q=                        {query, apps:[{file,name,title,description,pinned,running,
-                                                 showcase,icon}]} (empty q: the pinned apps; else search)
-  GET  /api/launcher/settings                  {hotkey: "alt+space", display: "⌥Space", bound: bool|null,
-                                                 rowModifier: "alt", rowModifierDisplay: "⌥", pinnedBound: bool|null}
-  POST /api/launcher/settings {hotkey?, rowModifier?}  stores (+ rebinds); 400 on a bad
-                                               spec, nothing written -> same shape. /api/launcher/hotkey = alias.
-  GET  /api/showcase                           {recent:[{file,name,title,description,preview,opened_at,showcase_id,local}],
-                                                local:[{file,name,title,description,preview,...}], local_dir,
-                                                showcase:[{id, file, title, description, has_preview, preview, ...}]}
-                                               (home page: dock entries newest first, then the ~/Fused/local folder
-                                                apps and the showcase apps not among them)
-  GET  /api/showcase/preview?id=<file name>    the app's preview.png, or 404
+  GET  /api/prefs, /api/config, /api/current-apps, POST /api/current-apps/*   what the React shell reads
+  /api/bots/*, /api/apps/*  Browser Bots (bots/routes.py, docs/BOT-APP.md §3)
+  GET  /api/dock                               the menu-bar dock: {pinned, recent_bots, recent_apps, tilesize}
+  POST /api/dock/open {kind, id|dir}, /home, /reveal {dir}, /pin {dir, pinned}, /order {dirs},
+       /pin-bot {id, pinned}, /size {tilesize}  the tray's actions (bots/dock_routes.py)
   fused.daemon (background_routes.py, copied from fused-render):
   GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
   POST /api/apps/background/start|stop|restart {html}     /autostart {html, autostart}
@@ -75,7 +61,6 @@ import logging
 import mimetypes
 import os
 import re
-import subprocess
 import tempfile
 import threading
 import time
@@ -83,7 +68,7 @@ import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fused_render_app import __version__, appfile, background_apps, background_routes, dock_store, engine_host, env, fetch, hotkey, icon_color, launcher, localapps, showcase, jobs, paths
+from fused_render_app import __version__, appfile, background_apps, background_routes, engine_host, env, fetch, localapps, jobs, paths
 
 # BEFORE the routers import: the copied Claude sessions / tasks modules
 # (tasks_store, drafts, routes/claude_sessions) derive their state dir from
@@ -104,6 +89,9 @@ from fused_render_app.routes import drafts as drafts_routes
 from fused_render_app.routes import queue_events as queue_events_routes
 from fused_render_app.routes import schedule as schedule_routes
 from fused_render_app.routes import tasks as tasks_routes
+from fused_render_app.bots import routes as bots_routes  # noqa: E402
+from fused_render_app.bots import dock_routes  # noqa: E402
+import fused_render_app.bots.registry as bots_registry  # noqa: E402
 
 AI_ROUTER = APIRouter()
 AI_ROUTER.include_router(ai_relay.router)
@@ -120,33 +108,33 @@ AI_ROUTER.include_router(queue_events_routes.router)
 AI_ROUTER.include_router(schedule_routes.router)
 AI_ROUTER.include_router(drafts_routes.router)
 AI_ROUTER.include_router(claude_artifacts_routes.router)
+# Browser Bots: /api/bots/* and /api/apps/* (docs/BOT-APP.md §3).
+AI_ROUTER.include_router(bots_routes.router)
+# The menu-bar dock's lists and the apps' "Pin to menu bar" (bots/dock.py).
+AI_ROUTER.include_router(dock_routes.router)
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+FAVICON_NAME = "fusedbot-icon-64.png"  # served at /favicon.ico (and /static/…)
 MAX_DROP_BYTES = 1024 * 1024 * 1024
 _HEAD_RE = re.compile(r"<head[^>]*>", re.I)
 
-#: What the native shell (macapp.py) plugs in so the dock page can drive it:
-#:   "open_files":    () -> set[str]   .fused files with a window open right now
-#:   "focus_or_open": (file) -> None   raise that window or open a new one (non-blocking)
-#:   "choose_file":   () -> None       the native open-file panel
-#:   "show_home":     () -> None       the placeholder window
+#: What the native shell (macapp.py) plugs in, callable from the HTTP thread:
+#:   "show_home":     () -> None       close the tray, focus a FusedBot window or open one (non-blocking)
+#:   "dock_open":     (kind, key) -> None   close the tray; "bot" + id shows that bot, "app" + dir
+#:                                      opens the app in its window (non-blocking)
 #:   "relaunch":      () -> None       quit and respawn from the bundle on disk (after an update)
-#: Absent (CLI run, tests) the routes answer `native: false` and the page
-#: navigates itself instead.
+#:   "open_files":    () -> set[str]   app files with a window open right now
+#:   "focus_or_open": (file) -> None   raise that window or open a new one (non-blocking)
+#: Absent in a CLI run and in tests. Read by POST /api/update/relaunch
+#: ("relaunch") and the tray's POST /api/dock/open, /api/dock/home
+#: (bots/dock_routes.py).
 native_hooks: dict = {}
 
 mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("application/geo+json", ".geojson")
-
-
-def _js(value: str) -> str:
-    """A JS string literal safe inside an inline <script>: json.dumps leaves
-    ``<``/``>`` alone, so a query value carrying ``</script>`` would end the
-    block. Escape them."""
-    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
@@ -164,20 +152,23 @@ def is_shipped_template(py: str) -> bool:
 
 def app_dir_for(path: str) -> str | None:
     """The app root that ``path`` lives under — an extract under
-    ``paths.apps_dir()`` or a folder app under ``localapps.local_dir()`` —
-    or None."""
+    ``paths.apps_dir()``, a folder app under ``localapps.local_dir()``, or a
+    folder under ``<workspace>/app/`` (the bots' apps) — or None."""
     root = os.path.realpath(paths.apps_dir())
     real = os.path.realpath(path)
     if real.startswith(root + os.sep):
         rel = real[len(root) + 1:]
         top = rel.split(os.sep, 1)[0]
         return os.path.join(root, top)
-    return localapps.app_dir_for(path)
+    local = localapps.app_dir_for(path)
+    if local:
+        return local
+    from fused_render_app.bots import paths as bots_paths
 
-
-def _openable(path: str) -> bool:
-    """A ``.fused`` on disk, or a folder app (`appfile.is_app_dir`)."""
-    return os.path.isfile(path) or appfile.is_app_dir(path)
+    apps = os.path.realpath(bots_paths.apps_root())
+    if real.startswith(apps + os.sep):
+        return os.path.join(apps, real[len(apps) + 1:].split(os.sep, 1)[0])
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -235,14 +226,16 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
         route = url.path
         try:
-            if route == "/":
-                return self._static("index.html")
+            if route in ("/", "/index.html"):
+                return self._bots_page()
+            if route == "/dock":
+                return self._dock_page()
             if route.startswith("/static/"):
                 return self._static(route[len("/static/"):])
-            if route == "/open":
-                return self._open_page(q)
             if route == "/render":
                 return self._render(q)
+            if route == "/embed":
+                return self._embed(q)
             if route == "/api/open/status":
                 return self._open_status(q)
             if route == "/api/fs/raw":
@@ -258,10 +251,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"update": manager.status() if manager else None})
             if route == "/api/jobs":
                 return self._json({"jobs": jobs.list_jobs(mark_read=True)})
-            if route == "/api/showcase":
-                return self._json(showcase.home())
-            if route == "/api/showcase/preview":
-                return self._showcase_preview(q)
             if route in ("/tasks", "/chat") or route.startswith("/explorer/"):
                 # `/explorer/view/<path>?_side=claude&session_id=…` is the
                 # address fused-render's task rows and Recent lists link to;
@@ -283,26 +272,10 @@ class Handler(BaseHTTPRequestHandler):
                 from fused_render_app import current_apps
 
                 return self._json({"apps": current_apps.list_apps()})
-            if route == "/dock":
-                return self._static("dock.html")
-            if route == "/launcher":
-                return self._static("launcher.html")
-            if route == "/settings":
-                return self._static("settings.html")
-            if route == "/api/launcher":
-                return self._json({"query": q.get("q") or "",
-                                   "apps": launcher.results(q.get("q") or "", self._dock_running())})
-            if route in ("/api/launcher/settings", "/api/launcher/hotkey"):
-                return self._json(self._launcher_status())
-            if route == "/api/dock":
-                return self._json({"apps": dock_store.list_apps(self._dock_running()),
-                                   "tilesize": dock_store.get_tilesize()})
-            if route == "/api/dock/icon":
-                return self._dock_icon(q)
-            if route == "/api/dock/preview":
-                return self._dock_preview(q)
             if route == "/favicon.ico":
-                return self._send(204, b"", "image/x-icon")
+                # The FusedBot mark, for any page that does not name its own
+                # icon (bots.html links /static/fusedbot-icon-64.png itself).
+                return self._favicon()
             if route == "/api/apps/background/status":
                 return background_routes.status(self, q)
             if route == "/api/apps/background/running":
@@ -376,10 +349,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._fs_mkdir()
             if route == "/api/jobs":
                 return self._jobs_report()
-            if route.startswith("/api/dock/"):
-                return self._dock(route[len("/api/dock/"):])
-            if route in ("/api/launcher/settings", "/api/launcher/hotkey"):
-                return self._launcher_settings()
             if route == "/api/jobs/clear":
                 return self._guarded() and self._json({"cleared": jobs.clear_finished()})
             if route.startswith("/api/update/"):
@@ -417,18 +386,15 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         self._send(200, data, ctype)
 
-    def _open_page(self, q: dict) -> None:
-        file = q.get("_file") or q.get("file") or ""
-        url = q.get("_url") or q.get("url") or ""
-        if not file and not url:
-            return self._static("index.html")
-        with open(os.path.join(STATIC_DIR, "open.html"), "r", encoding="utf-8") as f:
-            page = f.read()
-        # A URL open renders a confirm step; the transfer happens only on the
-        # user's click (POST /api/fetch), never from this GET — any web page
-        # can point the browser here, and opening a .fused runs its Python.
-        page = page.replace("__FILE_JSON__", _js(file)).replace("__URL_JSON__", _js(url))
-        self._html(page)
+    def _favicon(self) -> None:
+        """`/favicon.ico`: the 64 px FusedBot icon as PNG (every browser takes
+        a PNG under that name). 204 if the file is missing, as before."""
+        try:
+            with open(os.path.join(STATIC_DIR, FAVICON_NAME), "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._send(204, b"", "image/x-icon")
+        self._send(200, data, "image/png", {"Cache-Control": "max-age=86400"})
 
     @staticmethod
     def _config() -> dict:
@@ -465,6 +431,49 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "r", encoding="utf-8") as f:
             self._html(f.read())
 
+    def _bots_page(self) -> None:
+        """`/` and `/index.html`: the Browser Bots page, built from `frontend/`
+        into `static/shell-dist/bots.html`. Not built: a 503 HTML page saying how."""
+        self._built_page("bots.html", "FusedBot page")
+
+    def _dock_page(self) -> None:
+        """`/dock`: the menu-bar tray (menubar_dock.py loads it into its
+        panel), built from `frontend/` into `static/shell-dist/dock.html`.
+        Not built: the same 503 page as `/`."""
+        self._built_page("dock.html", "FusedBot dock page")
+
+    def _built_page(self, name: str, what: str) -> None:
+        path = os.path.join(STATIC_DIR, "shell-dist", name)
+        if not os.path.isfile(path):
+            return self._html("<!doctype html><meta charset=\"utf-8\"><title>FusedBot</title>"
+                              f"<p>{what} not built "
+                              f"(fused_render_app/static/shell-dist/{name} missing). "
+                              "Run scripts/build_shell.sh.</p>", 503)
+        with open(path, "r", encoding="utf-8") as f:
+            self._html(f.read())
+
+    def _embed(self, q: dict) -> None:
+        """`/embed?path=<abs html>&…`: `/render` for framing an app in a gallery
+        or card — runtime injected, but no folder redirect and nothing served
+        that is not an existing `.html`/`.htm` file."""
+        path = q.get("path") or ""
+        if (not os.path.isabs(path) or not os.path.isfile(path)
+                or os.path.splitext(path)[1].lower() not in (".html", ".htm")):
+            return self._error(f"no such file: {path}", 404)
+        self._render_html(path)
+
+    def _render_html(self, path: str) -> None:
+        """Answer the app page at ``path`` with `runtime.js` injected into <head>."""
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            html = f.read()
+        injection = '<script src="/static/runtime.js"></script>'
+        m = _HEAD_RE.search(html)
+        if m:
+            html = html[: m.end()] + injection + html[m.end():]
+        else:
+            html = injection + html
+        self._html(html)
+
     def _render(self, q: dict) -> None:
         path = q.get("path") or ""
         if not os.path.isabs(path):
@@ -482,21 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                 if k != "path"]
             location = "/render?" + urllib.parse.urlencode([("path", entry), *rest])
             return self._send(307, b"", "text/plain", {"Location": location})
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            html = f.read()
-        injection = '<script src="/static/runtime.js"></script>'
-        m = _HEAD_RE.search(html)
-        if m:
-            html = html[: m.end()] + injection + html[m.end():]
-        else:
-            html = injection + html
-        self._html(html)
-
-    def _showcase_preview(self, q: dict) -> None:
-        data = showcase.preview_bytes(q.get("id") or "")
-        if data is None or len(data) > showcase.MAX_PREVIEW_BYTES:
-            return self._error("not found", 404)
-        self._send(200, data, "image/png")
+        self._render_html(path)
 
     # ---- open / drop ------------------------------------------------------
 
@@ -511,10 +506,6 @@ class Handler(BaseHTTPRequestHandler):
             result = appfile.open_app(file)
         except appfile.AppFileError as exc:
             return self._error(str(exc))
-        try:
-            dock_store.record_open(file, result["name"])
-        except OSError:  # the dock is a convenience; opening the app is not
-            logger.warning("could not record %s in dock.json", file, exc_info=True)
         env.ensure(result["dir"])
         result["view"] = "/render?path=" + urllib.parse.quote(result["entry"], safe="/")
         result["install"] = env.status(result["dir"])
@@ -578,140 +569,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(str(exc))
         self._json({"file": dest})
 
-    # ---- menu-bar dock (dock_store.py) --------------------------------------
-
-    @staticmethod
-    def _dock_running() -> set[str]:
-        hook = native_hooks.get("open_files")
-        if hook is None:
-            return set()
-        try:
-            return set(hook())
-        except Exception:  # noqa: BLE001 — a broken hook must not 500 the dock
-            logger.exception("open_files hook failed")
-            return set()
-
-    def _dock_icon(self, q: dict) -> None:
-        file = q.get("file") or ""
-        data = appfile.icon_bytes(file) if os.path.isabs(file) else None
-        if data is None:
-            return self._error("not found", 404)
-        headers = {"Cache-Control": "no-cache"}
-        # The png fallback (appfile.ICON_NAMES) is a raster: nothing to
-        # recolour, served as is; the tile clips it to its rounded corners.
-        if appfile.is_png(data):
-            return self._send(200, data, "image/png", headers)
-        # A picked glyph names its colour and strokes in currentColor; the
-        # dock's <img> cannot see the page's theme, so resolve it here.
-        data = icon_color.theme_icon_svg(data, q.get("theme") or "")
-        self._send(200, data, "image/svg+xml", headers)
-
-    def _dock_preview(self, q: dict) -> None:
-        file = q.get("file") or ""
-        data = appfile.preview_bytes(file) if os.path.isabs(file) else None
-        if data is None:
-            return self._error("not found", 404)
-        # A preview can run to megabytes and is fetched on every hover; the
-        # page keys the URL on previewVersion (a new preview is a new URL),
-        # so the bytes may be cached for good.
-        self._send(200, data, "image/png", {"Cache-Control": "max-age=31536000, immutable"})
-
-    def _dock(self, action: str) -> None:
-        if action not in ("open", "pin", "remove", "order", "reveal", "choose", "home", "size"):
-            return self._error("not found", 404)
-        if not self._guarded():
-            return
-        body = self._json_body() or {}
-        if action == "order":
-            files = body.get("files")
-            if not isinstance(files, list):
-                return self._error("'files' must be a list of paths")
-            dock_store.reorder([f for f in files if isinstance(f, str)])
-            return self._json({"apps": dock_store.list_apps(self._dock_running())})
-        if action == "size":
-            # Separator drag: the page sends the size it is showing; the reply
-            # is what was stored (clamped), so the page can settle on it.
-            return self._json({"tilesize": dock_store.set_tilesize(body.get("tilesize"))})
-        if action == "choose":
-            hook = native_hooks.get("choose_file")
-            if hook is None:
-                return self._json({"ok": False})
-            hook()
-            return self._json({"ok": True})
-        if action == "home":
-            hook = native_hooks.get("show_home")
-            if hook is None:
-                return self._json({"ok": False, "view": "/"})
-            hook()
-            return self._json({"ok": True})
-        file = body.get("file")
-        if not isinstance(file, str) or not file or not os.path.isabs(file):
-            return self._error("'file' must be an absolute .fused file path")
-        file = os.path.abspath(file)
-        if action == "pin":
-            dock_store.set_pinned(file, bool(body.get("pinned")))
-        elif action == "remove":
-            dock_store.remove(file)
-        elif action == "open":
-            if not _openable(file):
-                return self._error(f"no such file: {file}")
-            hook = native_hooks.get("focus_or_open")
-            if hook is None:
-                return self._json({"ok": True, "native": False,
-                                   "view": "/open?_file=" + urllib.parse.quote(file, safe="/")})
-            hook(file)
-            return self._json({"ok": True, "native": True})
-        elif action == "reveal":
-            subprocess.Popen(["open", "-R", file])
-            return self._json({"ok": True})
-        self._json({"apps": dock_store.list_apps(self._dock_running())})
-
-    # ---- launcher ---------------------------------------------------------
-
-    @staticmethod
-    def _launcher_status() -> dict:
-        out = launcher.settings()
-        hook = native_hooks.get("launcher_hotkey_bound")
-        bound = None
-        if hook is not None:
-            try:
-                bound = hook()
-            except Exception:  # noqa: BLE001
-                logger.exception("launcher_hotkey_bound hook failed")
-        out["bound"] = bound
-        hook = native_hooks.get("launcher_pinned_bound")
-        pinned_bound = None
-        if hook is not None:
-            try:
-                pinned_bound = hook()
-            except Exception:  # noqa: BLE001
-                logger.exception("launcher_pinned_bound hook failed")
-        out["pinnedBound"] = pinned_bound
-        return out
-
-    def _launcher_settings(self) -> None:
-        if not self._guarded():
-            return
-        body = self._json_body() or {}
-        try:
-            if "rowModifier" in body:
-                launcher.set_row_modifier(body.get("rowModifier"))
-            spec = launcher.set_hotkey(body.get("hotkey")) if "hotkey" in body else None
-        except hotkey.SpecError as e:
-            return self._error(str(e))
-        # Rebinding is native and main-thread: the hook hops there itself
-        # and returns at once; the reply's ``bound`` reflects the previous
-        # state, the page re-reads a moment later. spec None: only another
-        # setting changed — the panel's page is told, the pinned shortcuts
-        # re-read their modifier.
-        hook = native_hooks.get("launcher_rebind")
-        if hook is not None:
-            try:
-                hook(spec)
-            except Exception:  # noqa: BLE001
-                logger.exception("launcher_rebind hook failed")
-        self._json(self._launcher_status())
-
     # ---- runPython --------------------------------------------------------
 
     def _api_run(self) -> None:
@@ -749,8 +606,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = self._json_body()
         page = urllib.parse.unquote(self.headers.get("X-Fused-Page") or "")
+        # A model worker reports its own download/load progress here under a
+        # reserved `sys:` id that pages may not write. `X-Fused-Worker` carries
+        # the token the supervisor passed into that worker's environment; only
+        # an exact match against a LIVE worker unlocks the prefix (upstream
+        # routers/jobs.py). Without it every byte tick of a weights fetch was
+        # refused, the row went `stalled`, and `fused_ai.models.download`
+        # gave up on a download that was still running.
+        from fused_render_app.ai import supervisor
+        is_worker = supervisor.is_worker_token(self.headers.get("X-Fused-Worker") or "")
+        if not page and is_worker and isinstance(body, dict) and isinstance(body.get("page"), str):
+            page = body["page"]
         try:
-            self._json(jobs.upsert(body if body is not None else {}, page=page))
+            self._json(jobs.upsert(body if body is not None else {}, page=page, server=is_worker))
         except jobs.JobError as exc:
             self._error(str(exc))
 
@@ -776,9 +644,9 @@ class Handler(BaseHTTPRequestHandler):
         if manager is None:
             return self._error("self-update is not available here", 404)
         if action == "check":
-            # Throttled (mac_update.MIN_CHECK_GAP_S): the launcher fires this
-            # when the app comes back to the front, and a run of focus flips
-            # must not become a run of CDN fetches.
+            # Throttled (mac_update.MIN_CHECK_GAP_S): a page may fire this
+            # whenever the app comes back to the front, and a run of focus
+            # flips must not become a run of CDN fetches.
             return self._json(manager.check())
         if action == "install":
             body = self._json_body() or {}
@@ -1260,7 +1128,8 @@ def start_ai() -> None:
                      ("hub-metadata", ai_routes.supervisor.start_hub_metadata_refresh),
                      ("background-apps", _start_background_apps),
                      ("tasks", _start_tasks),
-                     ("user-plugin", _start_user_plugin)):
+                     ("user-plugin", _start_user_plugin),
+                     ("bots", bots_registry.start)):
         try:
             fn()
         except Exception:  # noqa: BLE001
@@ -1271,6 +1140,10 @@ def stop_ai() -> None:
     """Evict resident models (kills their worker processes), the warm Claude
     instance, and every background-app daemon (fused.daemon). Called on quit."""
     _bg_shutdown.set()
+    try:
+        bots_registry.shutdown()  # every bot's task and Chrome
+    except Exception:  # noqa: BLE001
+        logger.exception("bots shutdown failed")
     remove_server_json()
     try:
         engine_host.stop_all()

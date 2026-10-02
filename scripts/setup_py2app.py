@@ -1,4 +1,6 @@
-"""py2app setup for RenderApp.app.
+"""py2app setup for FusedBot.app (RenderApp.app before 0.11.0: the display
+name changed, the bundle id `io.fused.render.app` and the `render-app://`
+scheme did not — a new id would reset every TCC grant and orphan installs).
 
 Invoked by build_dmg.sh with FUSED_RENDER_ICNS set. Packaged the same way as
 fused-render's FusedRender.app: the bundle carries the shell's own imports
@@ -109,8 +111,8 @@ OPTIONS = {
     "no_report_missing_conditional_import": True,
     "plist": {
         "CFBundleIdentifier": "io.fused.render.app",
-        "CFBundleName": "RenderApp",
-        "CFBundleDisplayName": "Render App",
+        "CFBundleName": "FusedBot",
+        "CFBundleDisplayName": "FusedBot",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "12.0",
@@ -130,7 +132,7 @@ OPTIONS = {
         # hands the http(s) target to the open page; fetch.py downloads it.
         "CFBundleURLTypes": [
             {
-                "CFBundleURLName": "Render App link",
+                "CFBundleURLName": "FusedBot link",
                 "CFBundleURLSchemes": ["render-app"],
                 "CFBundleTypeRole": "Viewer",
             }
@@ -145,29 +147,29 @@ OPTIONS = {
                 "UTTypeTagSpecification": {"public.filename-extension": ["fused"]},
             }
         ],
-        "NSDesktopFolderUsageDescription": "Render App opens .fused apps from your Desktop.",
-        "NSDocumentsFolderUsageDescription": "Render App opens .fused apps from your Documents folder.",
-        "NSDownloadsFolderUsageDescription": "Render App opens .fused apps from your Downloads folder.",
+        "NSDesktopFolderUsageDescription": "FusedBot opens .fused apps from your Desktop.",
+        "NSDocumentsFolderUsageDescription": "FusedBot opens .fused apps from your Documents folder.",
+        "NSDownloadsFolderUsageDescription": "FusedBot opens .fused apps from your Downloads folder.",
         # Pages run inside the app's own WKWebView (mainwindow.py), so a
         # .fused app's getUserMedia is THIS process asking for the camera or
         # microphone. fused.capture's audio recording (capture/_darwin.py) is
         # this process opening the mic natively too. Without the usage string
         # the OS kills the app instead of prompting. (Screen recording has no
         # plist key or entitlement: the OS prompts on first ScreenCaptureKit use.)
-        "NSCameraUsageDescription": "Render App uses the camera when a .fused app you opened asks for it.",
-        "NSMicrophoneUsageDescription": "Render App uses the microphone when a .fused app you opened asks for it.",
+        "NSCameraUsageDescription": "FusedBot uses the camera when a .fused app you opened asks for it.",
+        "NSMicrophoneUsageDescription": "FusedBot uses the microphone when a .fused app you opened asks for it.",
         # Same for navigator.geolocation: mainwindow.py grants our own pages,
         # then CoreLocation asks the OS, and without these strings that
         # second prompt never appears (the request just fails).
-        "NSLocationUsageDescription": "Render App uses your location when a .fused app you opened asks for it.",
-        "NSLocationWhenInUseUsageDescription": "Render App uses your location when a .fused app you opened asks for it.",
+        "NSLocationUsageDescription": "FusedBot uses your location when a .fused app you opened asks for it.",
+        "NSLocationWhenInUseUsageDescription": "FusedBot uses your location when a .fused app you opened asks for it.",
     },
 }
 
 if __name__ == "__main__":
     setup(
         app=APP,
-        name="RenderApp",
+        name="FusedBot",
         version=VERSION,
         options={"py2app": OPTIONS},
         setup_requires=["py2app"],

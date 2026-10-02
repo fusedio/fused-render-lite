@@ -40,4 +40,6 @@ path = "fused_render_app/__init__.py"
 packages = ["fused_render_app"]
 # The built React shell (scripts/build_shell.sh -> static/shell-dist/) is
 # gitignored, which hatch would otherwise honour and leave out of the wheel.
-artifacts = ["fused_render_app/static/shell-dist/**"]
+# The Browser Bots starter apps' uv.lock files are gitignored repo-wide (uv.lock)
+# but must ship: bots/starters.py copies each starter folder as-is.
+artifacts = ["fused_render_app/static/shell-dist/**", "fused_render_app/bots/starters/**/uv.lock"]

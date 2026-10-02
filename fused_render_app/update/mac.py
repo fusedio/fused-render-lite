@@ -1,16 +1,16 @@
 """macOS in-app updater, ported from fused-render's `fused_render/update/mac.py`.
 
 A silent background loop checks the signed manifest and surfaces a newer
-version only through `GET /api/update` — the launcher page (static/index.html)
-shows a banner. Nothing else in the app does: a .fused app's own window is
-never interrupted. Downloading and installing happen solely on an explicit
+version only through `GET /api/update` (the old launcher page's banner was its
+reader; the FusedBot page's update banner reads it now). Nothing interrupts an
+open window. Downloading and installing happen solely on an explicit
 `POST /api/update/install`.
 
 ONE install path: download the signed DMG, verify it, and swap the .app
 bundle in place. Replacing the bundle under a running process is the same
 thing a manual DMG drag does; the running process keeps its open files on the
 old inode, `status()` notices the bundle on disk is now the new version and
-reports "installed", and the banner offers "Restart Render App"
+reports "installed", and the banner offers "Restart FusedBot"
 (`POST /api/update/relaunch`), which quits through the normal teardown and
 respawns from the bundle now on disk.
 
@@ -49,8 +49,8 @@ BUNDLE_ID = "io.fused.render.app"  # scripts/setup_py2app.py + macapp.BUNDLE_ID
 MANIFEST_URL = os.environ.get(
     "FUSED_RENDER_APP_UPDATE_MANIFEST_URL",
     "https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/latest.json")
-# The first check runs right after boot so the launcher's banner appears on
-# its first polls rather than minutes into the session; every check after it
+# The first check runs right after boot so a page polling /api/update sees it
+# on its first polls rather than minutes into the session; every check after it
 # is common.CHECK_INTERVAL_S apart.
 STARTUP_DELAY_S = 1.0
 # A CHECK-ONLY MANAGER IN A DEV RUN. `start()` refuses to run outside a bundle
@@ -61,8 +61,14 @@ STARTUP_DELAY_S = 1.0
 # (`check_only`), so the banner hides its Update button. Never read by a
 # packaged app.
 DEV_MANAGER_ENV = "FUSED_RENDER_APP_UPDATE_DEV_MANAGER"
+# DEV-ONLY, and only honoured together with DEV_MANAGER_ENV: the version the
+# check-only manager PRETENDS to be running, so a source run (whose real
+# `__version__` is the newest) can see the "available" banner against the live
+# manifest. Read only inside start()'s dev-manager branch; a packaged app and a
+# dev run without DEV_MANAGER_ENV never look at it.
+DEV_VERSION_ENV = "FUSED_RENDER_APP_UPDATE_DEV_VERSION"
 NO_AUTO_UPDATE_ENV = "FUSED_RENDER_APP_NO_AUTO_UPDATE"
-# Floor between two checks that actually hit the network. The launcher checks
+# Floor between two checks that actually hit the network. A page may check
 # on its own when the app comes back to the front, and a run of focus flips
 # must not become a run of CDN fetches. Only the throttled path
 # (POST /api/update/check) is affected — the auto loop passes force=True.
@@ -72,7 +78,14 @@ MIN_CHECK_GAP_S = 60.0
 # each firing check-on-return during an outage must not each cost a 15-second
 # fetch.
 FAILED_CHECK_GAP_S = 5.0
-_DOWNLOAD_PREFIX = "RenderApp-"
+# Only the temp-file prefix of the download in <home>/updates (mkstemp). No
+# manifest URL or DMG name is ever matched against it: `_find_app` takes the
+# image's one .app and `_verify_app` checks its bundle id, so a manifest still
+# naming a pre-rename RenderApp-<ver>.dmg installs exactly like a
+# FusedBot-<ver>.dmg one. The swap keeps the installed bundle's own path
+# (an existing RenderApp.app stays RenderApp.app; the next fresh DMG install
+# is FusedBot.app).
+_DOWNLOAD_PREFIX = "FusedBot-"
 _DOWNLOAD_SUFFIX = ".dmg"
 # The download and the staged .app copy coexist briefly during the swap.
 _DISK_SPACE_FACTOR = 3
@@ -434,7 +447,7 @@ class UpdateManager:
             self._progress_total = None
         mount = None
         old = None
-        swap_in = os.path.join(parent, ".RenderApp-update.app")
+        swap_in = os.path.join(parent, ".FusedBot-update.app")
         try:
             mount = self._attach(dmg)
             source = self._find_app(mount)
@@ -451,7 +464,7 @@ class UpdateManager:
             # Both renames happen inside `parent`, so each is atomic on the
             # volume; the running process keeps its open files on the old
             # inode.
-            old = os.path.join(parent, f".RenderApp-old-{os.getpid()}.app")
+            old = os.path.join(parent, f".FusedBot-old-{os.getpid()}.app")
             os.rename(bundle, old)
             try:
                 os.rename(swap_in, bundle)
@@ -573,14 +586,16 @@ def start() -> UpdateManager | None:
     """Create the singleton and start its background checks. Called once from
     macapp's server bootstrap; idempotent. No-op (returns None) when not
     running from a bundle, unless DEV_MANAGER_ENV asks for a check-only
-    manager."""
+    manager (which DEV_VERSION_ENV may give a pretend current version)."""
     global _manager
     with _manager_lock:
         if _manager is None:
             if bundle_path() is None:
                 if not os.environ.get(DEV_MANAGER_ENV):
                     return None
-                _manager = UpdateManager(bundle=None, check_only=True)
+                pretend = os.environ.get(DEV_VERSION_ENV)
+                _manager = (UpdateManager(bundle=None, check_only=True, current_version=pretend)
+                            if pretend else UpdateManager(bundle=None, check_only=True))
             else:
                 _manager = UpdateManager()
             _manager.start_auto_checks()

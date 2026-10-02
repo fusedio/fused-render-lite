@@ -1,298 +1,266 @@
 # fused-render-app
 
-Ships as **Render App** (`RenderApp.app`, `RenderApp-<version>.dmg`). Opens a `.fused` single-file app. Nothing else.
+Ships as **FusedBot** (`FusedBot.app`, `FusedBot-<version>.dmg`; the package,
+bundle id `io.fused.render.app`, `render-app://` scheme and `FUSED_RENDER_*`
+settings keep their Render App names). Since 0.11.0 the app is autonomous
+browsing bots that run on your own Mac. Each bot gets its own headless Chrome (private profile, cookies and
+history), a chat thread where you give it tasks, and an agent loop that reads
+the page, clicks, types and reports back. You can pause, resume or stop a bot,
+take over its browser by hand, give it routines on a schedule, and keep notes
+and reusable skills between tasks.
 
-Double-click a `.fused` in Finder (or drop one onto the placeholder page) and
-the app's entry page opens in a window of Render App — a native macOS window
-hosting a WKWebView, not a browser tab. Open as many as you like: every window
-is on the one local server. The URL behind a window carries the file:
+It is the OpenBot fused-render app (`~/Fused/sandbox/Showcase Drafts/OpenBot`)
+rebuilt behaviour for behaviour: the UI in React + shadcn
+(`frontend/src/apps/bots/`), the backend in the Render App server process
+(`fused_render_app/bots/`). `docs/BOT-APP.md` is the architecture and wire
+contract. Everything runs locally; the server binds 127.0.0.1 only.
+
+## The page
+
+`/` serves the FusedBot page in a native window. Three columns:
+
+- **Bots** (left): every bot, pinned first, then the ones waiting on you with
+  unread messages, then by your last message. "New bot" opens the bot dialog
+  (name, avatar, model, effort, standing instructions, approvals, browser
+  profile, encryption).
+- **Thread** (middle): the chat with the selected bot. Its thoughts, actions
+  (with a step thumbnail), questions, approval cards, offers and final answers
+  arrive as messages. Reply to a message, react to it, attach files (paste or
+  drop), dictate, search the thread (⌘F).
+- **Preview** (right): the bot's latest screenshot, its Inbox, routines, a
+  usage strip, and a side app when the bot shows one. Click the screenshot for
+  the full-screen **live view**: a CDP screencast of the bot's browser with a
+  tab strip. **Take over** forwards your mouse and keyboard to the page; hand
+  back and the bot carries on.
+
+Column widths and collapse state are remembered per browser.
+
+## Bots
+
+- **Tasks.** Whatever you send becomes the bot's task. Mid-task messages reach
+  it as instructions that override the task. Stop ends the task at once.
+- **Approvals.** With "Ask before irreversible actions" (the default) the bot
+  pauses on actions you cannot take back (buying, paying, sending, posting,
+  deleting, booking, uploading) and shows an approval card. "Never ask" turns the gate off.
+- **Questions.** A bot can ask you something (optionally with choices) and
+  waits; "log in" questions pop its browser window so you can sign in.
+- **Routines.** Recurring tasks: every N minutes, daily at a time, on given
+  weekdays, or once at a time. Three failures in a row disable a routine.
+- **Skills.** Reusable playbooks (name, trigger, text) the bot loads when a
+  task matches; it can learn one from a finished task.
+- **Memory.** Notes the bot keeps between tasks (capped at 200), readable and
+  editable in the bot's settings.
+- **Browser profile.** Import one of your own Chrome profiles (logins,
+  cookies, extensions) into a bot's browser, and optionally encrypt the
+  profile at rest (AES-256 while Chrome is closed, key in the macOS Keychain).
+- **Presets.** A new bot can start from a site preset (LinkedIn, YouTube, X,
+  Reddit, Gmail, GitHub, Google Docs, Apple Notes and more): the site's brand
+  mark as its avatar, read-only standing instructions, and four to six
+  playbooks copied into its own Skills. Presets ship in
+  `fused_render_app/bots/presets/<key>/`; add a folder to add one.
+
+## Inbox, Apps, Builds
+
+**Inbox.** What a bot produces for you lives in `~/Fused/bots/<bot name>/`,
+one subfolder per task: files it saves, downloads that arrived during the
+task, and a `README.md` with the task and its final answer. The preview
+column lists the newest items with a download link each. Deleting a bot
+leaves its Inbox alone.
+
+**Apps.** The Apps panel lists every fused app under `~/Fused/app`
+(`FUSED_RENDER_DIR` overrides `~/Fused`). Thumbnails and the viewer frame each
+app through `/embed`. "Upload app" (or a drop onto the panel) unpacks a
+`.fused` export (v1 zip or v2 container) or a zipped app folder into a new
+folder there; nothing is overwritten.
+
+**Starter apps.** Some apps ship with the package, ready to install rather
+than build: Google Docs Tabs, Google Sheets Tabs and Apple Notes, each
+exposing its actions as tools. They live in `fused_render_app/bots/starters/`;
+installing copies one into `~/Fused/app/<key>` and never overwrites an
+existing folder. A bot made from the matching preset installs its own. The
+starter's `*_status` tool tells whether it still needs setup, and Update
+replaces its files with a newer shipped version while keeping its `.fused/`.
+
+**Builds.** A bot builds or updates an app with its `build` action: a Claude
+Code task (the Tasks engine below) that writes the app under `~/Fused/app`.
+The Builds panel shows those tasks. A bot also **offers** apps on its own: one
+that already fits the task ("Use it" / "Not now"), or a new one when a task
+looks like something you will repeat ("Build it"). One offer per task, none on
+routines, and "Not now" keeps an app out of offers for a week.
+
+**App tools and skills.** Any fused app on this Mac that exposes MCP tools
+(an `mcp.toml`) is available to every bot through its `tool` action; reading
+tools run at once, tools that change something wait for approval. A `.py`
+beside an app's page is callable through the `py` action when the app's
+`SKILL.md` documents it; the call goes through the same `POST /api/run` the
+app's own page uses.
+
+**iMessage.** Give a bot a phone number or Apple ID (bot settings › Advanced ›
+iMessage) and texts from that sender become its tasks; answers, questions and
+errors are texted back. The bridge reads `~/Library/Messages/chat.db` and
+sends through Messages.app, so Messages must be signed in and Render App needs
+Full Disk Access. A bot can also text the contacts you list for it (its
+`text` action, approval-gated) and read their replies (`texts`).
+
+**botsend.** Other local scripts drop a task into a bot's inbox folder:
 
 ```
-http://127.0.0.1:2777/open?_file=/Users/you/Downloads/app.fused&n=80
+python -m fused_render_app.bots.botsend <bot name or id> "<task text>"
+python -m fused_render_app.bots.botsend --list
 ```
 
-Everything after `_file` is the app's own `fused.params` state.
+The scheduler picks it up within about 20 s and runs it as if typed in the
+chat.
 
-### Windows
+## Engines
+
+- **Claude Code** (`haiku`, `sonnet`, `opus`, `fable`): one `claude -p`
+  process per task, the bot's actions served to it as MCP tools by
+  `bots/botmcp.py`. Needs the `claude` CLI installed and logged in.
+- **Local** (`local-4b`, `local-9b`: Gemma 4B and 12B, MLX 4-bit): the
+  OpenBot JSON-action loop (`bots/steps_engine.py`) over `fused.ai`'s local
+  tier. Also used for any model when no `claude` CLI is found.
+
+## State
+
+Bot state lives under `~/.fused-render-app/bots/` (override the root with
+`FUSED_RENDER_APP_HOME`):
+
+```
+bots/data/<id>/      bot.json, events.jsonl, memory, skills, Chrome profile, downloads, files, inbox/ (botsend)
+bots/cache/<id>/     latest screenshot, step thumbnails; deletable any time
+bots/usage.jsonl     one line per model call (the usage dialog)
+bots/builds.json     the Builds panel's list
+```
+
+The Inbox (`~/Fused/bots/`) and the apps (`~/Fused/app/`) stay in the Fused
+workspace where you can see them.
+
+## Windows
 
 The macOS app (`macapp.py` + `mainwindow.py`) is a regular app: Dock icon,
-menu bar item, a main menu, and one window per opened `.fused`.
+menu-bar item, a main menu, native windows (`NSWindow` + `WKWebView`) all on
+the one local server.
 
 | in a window | what happens |
 | --- | --- |
-| Finder open, Dock click, File → Open… (⌘O), New Window (⌘N) | a new window (Dock click focuses the front one if any) |
-| `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window (`window.open` returns a live handle: `postMessage`, `opener`, `close()` work) |
-| `window.close()` from a page | closes that window |
+| New Window (⌘N), Dock click | a new Browser Bots window (a Dock click focuses the front one if any) |
+| Home (title-bar house, ⌘⇧H) | this window goes to the bots page (`/`); nothing happens if it is already there |
+| `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window (`window.open` returns a live handle) |
 | a link to another site | the default browser |
 | `<a download>`, `Content-Disposition: attachment`, a type WebKit can't show | saved to `~/Downloads` (Finder-style `name 2` on collision) |
 | `alert` / `confirm` / `prompt`, `<input type=file>` | native panels |
-| `getUserMedia`, `navigator.geolocation` from the app's own page | granted; the system camera/mic/location prompt still applies |
-| `requestPointerLock` (FPS-style mouse look) | granted, Esc releases |
-| `Notification.requestPermission` / `new Notification` from the app's own page | granted; shown as a macOS notification, click focuses the app |
+| `getUserMedia`, `navigator.geolocation`, `Notification` from the app's own page | granted; the system prompts still apply |
 | ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
 
-The app also posts its own macOS notifications for work it runs in the
-background: a model download or an app's environment install starting
-(silent), an install waiting for your approval, and every download, install,
-render, transcription or benchmark finishing or failing. A resident model
-load and a text generation stay quiet on success, as in fused-render. One
-banner per job: the "started" banner is replaced in place by the outcome.
-Clicking brings the app forward and, for an install, the app it was for
-(`jobnotify.py`, `notify_policy.py`).
+The title bar ends in Open in Browser (View → Open in Browser ⌘⇧L) and
+Home (View → Home ⌘⇧H), which takes that window back to the bots page.
+Window → Tasks (⌘⇧T) opens the Tasks page. Closing the last window does
+not quit. A click on the menu-bar item drops a Dock-like glass tray of
+tiles: Home, pinned bots and pinned apps, then up to three recently used bots
+and three recently changed apps. A bot tile selects that bot in a FusedBot
+window; an app tile opens the app in its own window. Right-click a tile to
+keep it in or remove it from the tray, show an app in Finder, or open either
+in the browser; drag the separator to resize the tiles. Right-click the
+menu-bar item for "Open FusedBot", "Tasks…", "Open in Browser", "Open App
+Logs" and "Quit FusedBot". Bots can also be pinned from the sidebar, apps
+from the app viewer's ⋯ menu ("Pin to menu bar").
+`FUSED_RENDER_APP_NO_BROWSER=1` suppresses the startup window.
 
-Closing the last window does not quit. The menu-bar item has four entries:
-"Open in app" (focus the front window or open the placeholder), "Open in
-browser", "Open app logs", "Quit". The Dock icon does the same as "Open in
-app"; ⌘Q and the Dock also quit. View → Open in Browser hands the current page
-to the default browser. `FUSED_RENDER_APP_NO_BROWSER=1` suppresses the
-startup window.
+The app posts macOS notifications for background work (model downloads,
+environment installs, AI jobs): one banner per job, replaced in place by the
+outcome (`jobnotify.py`, `notify_policy.py`).
 
-Every window's title bar ends in three buttons: Edit, Open in Browser, Home
-(View → Edit in fused-render ⌘⇧E, Open in Browser ⌘⇧L, Home ⌘⇧H). Edit hands
-the window's `.fused` to fused-render, the full editor, as a
-`fused-render://open?file=<path>` deep link: fused-render clones it into its
-workspace (`~/Fused/local/<name>`) and opens the copy for editing; when a
-copy already exists, fused-render asks whether to overwrite it with this
-`.fused` or open the copy as it is. Edit is disabled
-on Home. Without fused-render installed, a dialog offers to download the
-latest DMG (`render.fused.io/latest.json` → `dmg_url`, falling back to the
-download page) — `editlink.py`.
+Opening a `.fused` from Finder or a `render-app://` link is no longer a
+feature. The document type and URL scheme stay registered for now, and such
+an open shows the Browser Bots window.
 
-### Claude tasks
+## Claude tasks
 
-Window → Tasks (⌘⇧T), or "Tasks…" on the menu-bar item, opens fused-render's
-Tasks page — the same React page (List / Board / Cards / Calendar, filters,
-New task, the side peek with the chat in it): `frontend/` is the slice of
-fused-render's frontend those two routes import (copied verbatim, pruned to
-the import closure, no tests), built into `static/shell-dist/` by
-`scripts/build_shell.sh`, with Render App's own entry (`frontend/lite.html`,
-`src/lite.tsx`, `src/LiteApp.tsx`) hosting two routes: `/tasks`, and
-`/chat?_file=<folder>` — fused-render's native chat beside the folder's app
-(the explorer-style `/explorer/view/<path>?_side=claude` links the page
-makes open the same chat). A task is one `claude` session run by
-fused-render's chat engine, copied into the package
-(`fused_render_app/templates/claude/`): permission cards, follow-ups into a
-live session, snapshots, scheduling. Pages get the same thing
-programmatically as `fused.tasks.*` (fused-render D890). State lives under
-`~/.fused-render-app/claude-sessions/`, apart from fused-render's own; the
-transcripts are Claude Code's, under `~/.claude/projects`. Re-sync from a
-fused-render checkout with `scripts/sync_claude_tasks.py <path> --runtime
---frontend --skills`.
+Window → Tasks (⌘⇧T) opens fused-render's Tasks page, the same React page:
+`frontend/` is the slice of fused-render's frontend it imports (copied
+verbatim), built into `static/shell-dist/` with Render App's entries
+(`lite.html` for `/tasks` and `/chat`, `bots.html` for `/`). A task is one
+`claude` session run by fused-render's chat engine, copied into the package
+(`fused_render_app/templates/claude/`). Bot builds are such tasks. State lives
+under `~/.fused-render-app/claude-sessions/`, apart from fused-render's own.
+Re-sync from a fused-render checkout with
+`scripts/sync_claude_tasks.py <path> --runtime --frontend --skills`.
 
-Every session Render App spawns is handed fused-render's skills
-(`fused-render-authoring`, `fused-render-ai`, …) the way fused-render does it:
-the packaged copy under `fused_render_app/skills/` (synced verbatim from
-fused-render's `skills/`; Render App's differences — no `fileIndex`, no
-`snapshot`, `autoReload(true)` throws — are written into the skills
-themselves) is assembled into `~/.fused-render-app/skill-plugin/` at startup
-and passed as `claude --plugin-dir` (`skill_plugin.py`). For the user's own
-`claude` in a terminal or app folder, which that flag cannot reach, the
+Every session Render App spawns is handed fused-render's skills: the packaged
+copy under `fused_render_app/skills/` is assembled into
+`~/.fused-render-app/skill-plugin/` at startup and passed as
+`claude --plugin-dir` (`skill_plugin.py`). For the user's own `claude`, the
 published `fusedio/fused-render` plugin is installed or refreshed in their
-Claude config on a background thread (`user_plugin.py`) — same plugin id as
-full fused-render, so one machine running both keeps one install; an explicit
-`"fused-render@fused-render": false` under `enabledPlugins` in Claude's
-`settings.json` turns that off for good, and an uninstall is never undone.
+Claude config (`user_plugin.py`); `"fused-render@fused-render": false` under
+`enabledPlugins` in Claude's `settings.json` turns that off.
 
-⌥Space (change it in Settings — the gear on the home page — or from the
-search panel's footer; right-click the menu-bar item → "Search Apps…" opens
-it without a shortcut) drops a Spotlight-like search panel: empty, it lists the
-apps pinned in the menu-bar Dock; typing searches every app Render App
-remembers plus the showcase. ↑/↓ select, ↩ opens, ⌥1–⌥9 open the Nth row
-(the modifier is a setting), esc clears then closes. The same ⌥1–9 work
-from anywhere as global shortcuts for the Nth pinned Dock app; ⌥0 (and the
-last row) opens Render App itself. `FUSED_RENDER_APP_LAUNCHER_SHOW=1` shows it at
-startup and makes SIGUSR2 toggle it (dev). The CLI (`fused-render-app`, `scripts/dev.sh`) is unchanged
-and still opens a browser tab.
+## App runtime
 
-## What it supports
-
-The page runtime exposes these `fused.*` members:
+Apps the bots build or show run through `/render` and `/embed`, with
+`runtime.js` injected. The page runtime exposes these `fused.*` members:
 
 | API | Notes |
 | --- | --- |
 | `fused.runPython(py, params, opts?)` | runs `main(**params)` from the app's own venv, 600 s cap |
 | `fused.params.get/getAll/set/onChange` | URL-backed state, same semantics as fused-render |
-| `fused.readFile(path)` | text |
-| `fused.stat(path)` | `{path, name, is_dir, size, mtime, writable}` |
-| `fused.writeFile(path, content, opts?)` | optimistic lock + create-only, as in fused-render |
-| `fused.rawUrl(path)` | bytes URL, Range requests honoured |
-| `fused.ai.text / image / video / transcribe / embed`, `fused.ai.models.*`, `fused.ai.cancel` | fused-render's AI subsystem: Claude CLI tier + local runners (see AI below) |
-| `fused.uploadFile(path, blob)` / `fused.mkdir(path)` | binary save, directories |
+| `fused.readFile` / `stat` / `writeFile` / `rawUrl` / `uploadFile` / `mkdir` | files, as in fused-render |
+| `fused.ai.text / image / video / transcribe / embed`, `fused.ai.models.*`, `fused.ai.cancel` | fused-render's AI subsystem (see AI below) |
 | `fused.trackJob(spec)` / `fused.watchJob(id)` | in-process job rows; survive a reload, cancellable |
-| `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws (no live reload) |
-| `fused.daemon.status / start / stop / restart / setAutostart / run / call / watch` | the app's own long-running daemon, fused-render's implementation copied in (see Background daemons below) |
-| `fused.capture.screen / audio / screenshot / sources / list / attach` | native macOS screen / microphone / still capture, fused-render's contract, ScreenCaptureKit + AVFoundation (see Capture below) |
+| `fused.tasks.*` | Claude tasks (fused-render D890) |
+| `fused.daemon.*` | the app's own long-running daemon (`[tool.fused-render.app]` in its `pyproject.toml`, fused-render's contract) |
+| `fused.capture.*` | native macOS screen / microphone / still capture (ScreenCaptureKit + AVFoundation, macOS 13+) |
+| `fused.autoReload(false)` | accepted, no-op; `autoReload(true)` throws |
 
-Every other member the full fused-render runtime has (`fileIndex`,
-`snapshot`) is **not supported**. There are no stubs: calling one, or reading
-any property of `fused.fileIndex`, throws `<name> is not supported on Render
-App` and logs it to the console. An app that needs those belongs in full
-fused-render.
-
-## Background daemons (`fused.daemon`)
-
-Same contract as fused-render. An app opts in with a table in its own
-`pyproject.toml`, declaring exactly one of:
-
-```toml
-[tool.fused-render.app]
-main = "compute.py"      # the shipped worker calls main(**params); fused.daemon.run(params)
-                         # warm process, re-imported on edit, reaped after 15 min idle
-# or
-daemon = "daemon.py"     # your own HTTP server; fused.daemon.call(path, body)
-                         # resident until stop(); must answer GET /ping?t=<token> with {"ok": true, "version": <--version>}
-```
-
-The daemon runs on the app's own venv (the one `/api/open` builds), one
-instance per app, killed when Render App quits. Optional keys:
-`idle_timeout_s` (0 = resident), `retry_post = true` (POSTs are idempotent,
-may be retried after a heal-restart). `setAutostart(true)` brings it back at
-every launch; `start()` alone never does. State lives under
-`~/.fused-render-app/engines/<engine_id>/` (`daemon.log`) and
-`~/.fused-render-app/background_apps.json` (autostart list).
-
-## Capture (`fused.capture`)
-
-Same contract as fused-render, served natively: ScreenCaptureKit records the
-screen, AVFoundation the microphone (`capture/`, routes in
-`routes/capture.py`). Six verbs:
-
-```js
-const rec = await fused.capture.screen({ audio: "mic", maxSeconds: 600 });
-//  -> {id, jobId, path, url, state, stop(), cancel()}, resolved once recording
-await rec.stop();                      // {path, url, mime, seconds, bytes}; keeps the file
-await fused.capture.audio({ path: "notes.m4a" });   // mic only, same handle
-await fused.capture.screenshot({ path: "shot.png" }); // {path, url, width, height, bytes, mime}
-await fused.capture.sources();         // {video, audio, systemAudio, screenshot, displays, microphones}; never prompts
-await fused.capture.list();            // live recordings on this machine
-await fused.capture.attach(id);        // handle for one of them (a reload finds its recording here)
-```
-
-A recording is a job row (`sys:capture:<id>`, origin Capture, visible to
-`fused.watchJob(rec.jobId)`): ✕ on the row = `cancel()` = stop and delete;
-the `maxSeconds` cap (default 30 min) = `stop()` = keep. Files land in
-`~/.fused-render-app/recordings/` as `.mov` / `.m4a` / `.png|.jpg` unless the
-page names a `path`; a relative `path` resolves beside the page, like
-`readFile`. The file's extension picks png vs jpeg. A recording survives the
-page that started it. Rejections carry `.type`: `unavailable` (this machine
-cannot), `bad_request` (the arguments, or a preview trying to record),
-`capture_error` (the file failed to write on stop).
-
-Render App-specific: macOS only, 13+ (13–14 write the movie through an
-`AVAssetWriter` mux, 15+ through `SCRecordingOutput`); any other platform
-gets `unavailable`. fused-render's browser fallback (MediaRecorder streamed
-over a WebSocket) is not ported. A preview (`_preview=1`) refuses
-`screen` / `audio` / `screenshot` with `bad_request`; `sources` / `list` /
-`attach` still work there, so draw the record button off `sources()` and
-start a capture only from a click. Permissions: the Screen Recording grant is
-TCC, prompted on the first real capture and managed in System Settings (no
-plist key or entitlement); the microphone uses the app's existing
-`NSMicrophoneUsageDescription` + `audio-input` entitlement. None of this goes
-through the web view's `getUserMedia`.
+`fused.fileIndex` and `fused.snapshot` are **not supported**: calling one
+throws `<name> is not supported on Render App`.
 
 ## AI
 
 `fused.ai.*` is fused-render's AI subsystem, copied in. Two tiers:
 
 - **Claude** (`haiku`/`sonnet`/`opus`/`fable`, the default): runs `claude -p`
-  from Claude Code, so the machine needs the `claude` CLI installed and logged
-  in. One warm process, reset between calls.
-- **Local** (a Hugging Face repo id or `.gguf`, or `provider: "local"`): text,
-  image, video, transcribe, embed. Each backend is a runner folder under
-  `fused_render_app/ai/runners/` with its own `pyproject.toml`; the first call
-  builds its venv with `uv sync`, downloads the model into the Hugging Face
-  cache and spawns a worker process the server talks HTTP to. Nothing ML ships
-  in the DMG. Pages get `model_loading` + a `jobId` to `watchJob` while that
-  happens, then retry — fused-render's contract, unchanged.
+  from Claude Code. One warm process, reset between calls.
+- **Local** (a Hugging Face repo id or `.gguf`, or `provider: "local"`): each
+  backend is a runner folder under `fused_render_app/ai/runners/` with its own
+  `pyproject.toml`; the first call builds its venv with `uv sync`, downloads
+  the model into the Hugging Face cache and spawns a worker process. Nothing
+  ML ships in the DMG.
 
-The Apple-Intelligence tier needs a Swift helper the Render App build does not
-compile; it answers `unavailable`. Streaming is NDJSON over chunked HTTP.
-
-## Showcase apps
-
-The placeholder page (`/`) lists the showcase apps shipped inside the package,
-`fused_render_app/showcase/*.fused`, as cards; clicking one opens it through
-the ordinary `/open?_file=` path. They ride along in the wheel and the DMG with
-no build step. Two ship today: **Note taker** (HTML only, `readFile` /
-`writeFile`) and **Pipeline Intelligence** (`runPython` + its own
-`pyproject.toml`).
-
-To add one: drop the `.fused` into that folder, give it a `title` and
-`description` in `showcase/showcase.json`, and make sure it carries a
-`pyproject.toml` (even with `dependencies = []`) and a `preview.png` —
-`tests/test_showcase.py` checks both, and that it calls nothing Render App rejects.
-
-Any app's `preview.png` (a member of the `.fused`, or one written into the
-app's extract dir) also shows in the menu-bar dock: hovering the app's tile
-opens the name bubble with the picture above the name
-(`GET /api/dock/preview`; 8 MB cap, PNG only).
-
-## Local apps (`~/Fused/local`)
-
-The folder apps fused-render edits — one folder per app under
-`~/Fused/local/` (`FUSED_RENDER_DIR` overrides the `~/Fused` root, as in
-fused-render) — run here without an export. The home page's one rail lists
-them after the apps already opened and before the unopened showcase (recent,
-then local newest first, then showcase), and the ⌥Space launcher searches
-them with everything else. What makes a folder an app is
-fused-render's own rule (`localapps.py`, `appfile.dir_entry`): its first
-non-hidden direct-child `.html`, in name order, carrying
-`<meta name="fused-app">`; a folder with no marked page is not listed.
-
-Opening one is the same `/open?_file=<folder>` path as a `.fused`, but
-nothing is extracted: the folder itself is the app dir. `runPython` runs in a
-venv built from the folder's `pyproject.toml` under
-`~/.fused-render-app/venvs/` (fused-render's own `.venv` in the folder is not
-reused; `uv sync` may refresh the folder's `uv.lock`), an app without one
-gets the legacy set. The card's title is the entry's `<title>` (the folder
-name when absent) and its description the folder's `metadata.json` `description`
-when there is one; `preview.png` and `icon.svg` / `icon.png` in the folder
-serve the card, the dock tile and the hover bubble. The app's `.fused` state
-dir stays in the folder, never linked into `fused_data/`: it is
-fused-render's workspace, and the state must stay where the editor reads it.
-Once opened, the folder is a Recent / dock entry like any file (it leaves
-the dock when its marked page goes away). The title-bar Edit button is
-disabled for a folder app — the folder already IS the editable copy, so open
-it in fused-render directly. `fused-render-app <folder>` opens one from the
-command line, and a folder path pasted into the home page's path field works
-too. Finder does not hand folders to the app (the bundle registers only the
-`.fused` document type).
+The Apple-Intelligence tier needs a Swift helper compiled only on a macOS 26
+SDK build host; elsewhere it answers `unavailable`.
 
 ## Python environments
 
 No packages are bundled. The DMG ships one CPython 3.12 (py2app's real
-interpreter at `Contents/MacOS/python`, whole stdlib, self-locating through a
-`Contents/lib` symlink — packaged exactly as fused-render's FusedRender.app).
-Every environment is built on it. Each `.fused` app carries its own
-`pyproject.toml`; on open, `uv sync --python <that interpreter>` builds a venv
-for it under `~/.fused-render-app/venvs/` and `runPython` runs inside it. An app without a `pyproject.toml` runs in one
-shared "legacy" venv holding fused-render's implicit set (numpy, pandas,
-requests, httpx, pillow, openpyxl, python-pptx, msgpack, fpdf2, drain3;
-not pyarrow, duckdb, botocore or google-auth), also built
-on first use, so older `.fused` exports keep working.
-
-`uv` ships inside the app (`Contents/Resources/bin/uv`, copied from the build
-host exactly as fused-render does). Running from source, it is looked for at
+interpreter at `Contents/MacOS/python`, whole stdlib, packaged exactly as
+fused-render's FusedRender.app). Every environment is built on it: an app with
+a `pyproject.toml` gets its own venv under `~/.fused-render-app/venvs/`
+(`uv sync`); an app without one runs in a shared "legacy" venv holding
+fused-render's implicit set. `uv` ships inside the app
+(`Contents/Resources/bin/uv`); from source it is looked for at
 `FUSED_RENDER_APP_UV`, beside the interpreter, in `~/.fused-render-app/bin/`
-and on `PATH` (a uv older than 0.8 is skipped), and failing those is downloaded
-once (pinned version, sha256-verified). The Apple-Intelligence helper
-(`fused-apple-ai`) is compiled and bundled when the build host has the macOS 26
-SDK; below that the apple tier reports itself unavailable.
+and on `PATH`, and failing those is downloaded once (pinned, sha256-verified).
 
-Version, DMG/app size and the full supported/unsupported API table live in
-[STATUS.md](STATUS.md).
+Version, DMG size and per-version notes live in [STATUS.md](STATUS.md).
 
 ## Run from source
 
 ```
-pip install -e ".[dev]"
-fused-render-app ~/Downloads/app.fused
-pytest
+scripts/dev.sh
 ```
 
-Or `scripts/dev.sh`: bootstraps a Python 3.12 `.venv` with `[dev,app]`, runs the
-server with auto-reload on `.py` edits, on a per-branch port and state dir so it
-never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
+`dev.sh` bootstraps a Python 3.12 `.venv` with `[dev,app]`, builds the React
+pages when `static/shell-dist/` is missing, and runs the server with auto-reload on `.py` edits, on a
+per-branch port and state dir so it never collides with the installed app
+(see `.claude/skills/setting-up-dev-env`). The frontend needs
+[bun](https://bun.sh): `scripts/build_shell.sh` rebuilds it,
+`cd frontend && bun run watch` rebuilds on edit. Tests:
+
+```
+.venv/bin/python -m pytest -q
+cd frontend && bun run build && bun test
+```
 
 ## Install (Homebrew)
 
@@ -300,17 +268,12 @@ never collides with the installed app (see `.claude/skills/setting-up-dev-env`).
 brew install --cask fusedio/tap/render-app
 ```
 
-Installs `RenderApp.app` (macOS 12+), signed + notarized. `brew update &&
-brew upgrade --cask render-app` upgrades.
-
-The app also updates itself: it checks a signed manifest on the CDN every
-five minutes and, when a newer version is out, the launcher page (Home) shows
-a banner with an **Update** button — download, verify, swap the bundle in
-place, then **Restart Render App**. Only the launcher shows it; an open
-`.fused` app's window is never interrupted. Nothing runs `brew`.
-`FUSED_RENDER_APP_NO_AUTO_UPDATE=1` disables the background check;
-`FUSED_RENDER_APP_UPDATE_DEV_MANAGER=1` lets a source run show the banner
-(check-only, no bundle to swap).
+Installs `RenderApp.app` (macOS 12+), signed and notarized.
+`brew upgrade --cask render-app` upgrades. The app also checks a signed update
+manifest on the CDN every five minutes and can download, verify and swap its
+own bundle (`update/mac.py`, `GET/POST /api/update*`). The update banner lived
+on the old home page; no page in the Browser Bots app shows it yet.
+`FUSED_RENDER_APP_NO_AUTO_UPDATE=1` disables the background check.
 
 ## Build the macOS app
 
@@ -319,37 +282,31 @@ pip install ".[app]"            # rumps + pyobjc, for the menu-bar shell
 bash scripts/build_dmg.sh       # dist/RenderApp-<version>.dmg
 ```
 
-The DMG is ad-hoc signed by default (runs on the building machine; other
-Macs need right-click → Open). `FUSED_RENDER_SIGN=1` or a
+The DMG is ad-hoc signed by default (runs on the building machine; other Macs
+need right-click → Open). `FUSED_RENDER_SIGN=1` or a
 `FUSED_RENDER_CODESIGN_IDENTITY` switches to Developer ID signing with the
-hardened runtime, and `FUSED_RENDER_NOTARY_PROFILE` (a `notarytool`
-keychain profile) additionally notarizes and staples.
+hardened runtime, and `FUSED_RENDER_NOTARY_PROFILE` (a `notarytool` keychain
+profile) additionally notarizes and staples. The build needs bun for the
+React pages.
 
 ### Release pipeline (GitHub Actions)
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`, fusedio/fused-render's
-macOS release job step for step:
-`prepare-release` creates the GitHub Release, then on `macos-26` an ephemeral
-keychain gets the Developer ID cert and an App Store Connect API key,
-`build_dmg.sh` builds + signs + notarizes + staples, the ticket is verified, the
-DMG is uploaded to the `fused-render` S3 bucket under `render-app-dmgs/` (served
-by the same CloudFront distribution as fused-render, at
-`https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg`; the
-CI assumes `github_render_app_role` via OIDC, which can only write that prefix),
-the signed update manifest `render-app-dmgs/latest.json` is published next to
-it (`scripts/generate_update_manifest.py`, key in the
-`FUSED_RENDER_UPDATE_SIGNING_KEY` secret — skipped with a warning when unset),
-the DMG + wheel land on the Release, and the Release notes get the CDN
-download link as their first line (assets can't redirect, so the fast
-CloudFront copy is linked from the notes; the attached DMG is the fallback).
-`bump-homebrew` then rewrites
-`Casks/render-app.rb` of [fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap)
-to point at the CDN copy and pushes, so `brew upgrade --cask render-app` picks
-the release up. To rebuild an existing tag:
-`gh workflow run release --ref v0.6.0 -f tag=v0.6.0` (the run must build the
-tag's own commit). `test.yml` runs the same ad-hoc DMG smoke build whenever
-packaging files change. Signing needs these repository secrets (values are
-write-only on GitHub; re-enter them from the originals):
+Pushing a `v*` tag runs `.github/workflows/release.yml`: `prepare-release`
+creates the GitHub Release, then on `macos-26` an ephemeral keychain gets the
+Developer ID cert and an App Store Connect API key, `build_dmg.sh` builds,
+signs, notarizes and staples, and the DMG is uploaded to the `fused-render` S3
+bucket under `render-app-dmgs/` (served at
+`https://d2ic19jpchjovp.cloudfront.net/render-app-dmgs/RenderApp-X.Y.Z.dmg`;
+CI assumes `github_render_app_role` via OIDC). The signed update manifest
+`render-app-dmgs/latest.json` is published next to it
+(`scripts/generate_update_manifest.py`, key in the
+`FUSED_RENDER_UPDATE_SIGNING_KEY` secret, skipped with a warning when unset).
+The DMG and wheel land on the Release, whose notes lead with the CDN link.
+`bump-homebrew` then rewrites `Casks/render-app.rb` in
+[fusedio/homebrew-tap](https://github.com/fusedio/homebrew-tap). To rebuild an
+existing tag: `gh workflow run release --ref v0.6.0 -f tag=v0.6.0`. `test.yml`
+runs an ad-hoc DMG smoke build whenever packaging files change. Signing needs
+these repository secrets:
 
 | secret | what |
 | --- | --- |
@@ -359,32 +316,50 @@ write-only on GitHub; re-enter them from the originals):
 | `KEYCHAIN_PASSWORD` | any string; unlocks the ephemeral keychain |
 | `NOTARY_API_KEY_P8` | App Store Connect API key (`.p8` contents) |
 | `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID` | its key id and issuer id |
-| `TAP_PUSH_TOKEN` | PAT with push to fusedio/homebrew-tap (same one fused-render uses); only the `bump-homebrew` job fails without it |
+| `TAP_PUSH_TOKEN` | PAT with push to fusedio/homebrew-tap; only the `bump-homebrew` job fails without it |
 
-Without them the workflow still runs and publishes an ad-hoc-signed DMG (Render App-only fallback).
+Without them the workflow still publishes an ad-hoc-signed DMG.
 
 ## Layout
 
 ```
 fused_render_app/
-  appfile.py      open a .fused (v2 container or legacy v1 zip) into ~/.fused-render-app/apps
-  container.py    the FUSEDAPP v2 format (stdlib)
-  env.py          uv lookup/download, per-app `uv sync`, running a .py in its venv
+  bots/           the Browser Bots backend (docs/BOT-APP.md §1)
+    bot.py          one bot: lifecycle, memory, skills, Inbox, routines, offers, builds, take over
+    agent_engine.py the Claude Code engine: one `claude -p` per task, tools over MCP
+    steps_engine.py the OpenBot JSON-action loop (local models, no-CLI fallback)
+    tools.py        the tool table both engines share; the approval risk rule
+    botmcp.py       stdio MCP server `claude` spawns; forwards to POST /api/bots/<id>/tool
+    browser.py      per-bot Chrome over CDP, accessibility-tree snapshot, screenshots
+    apptools.py     APPS / APP TOOLS / app SKILL.md for the prompt
+    imessage.py     the iMessage bridge
+    apps.py         list / import / mkdir / reveal under ~/Fused/app
+    presets.py      site presets (presets/<key>/: preset.json + playbooks) applied at create
+    starters.py     starter apps (starters/<key>/) installed into ~/Fused/app
+    registry.py     the bot registry, scheduler (routines, file inbox), iMessage thread
+    routes.py       /api/bots/*, /api/apps/*
+    store.py, paths.py  bot.json, events.jsonl, the usage ledger; state roots
+    botsend.py      CLI: drop a task into a bot's inbox
   server.py       the HTTP surface (http.server; binds 127.0.0.1)
-  cli.py          `fused-render-app [file] [--port] [--no-browser]`
-  macapp.py       macOS shell: server thread, menu-bar item, Finder open events -> windows
+  cli.py          `fused-render-app [--port] [--no-browser]` (dev server)
+  macapp.py       macOS shell: server thread, menu-bar item, windows
   mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
-  window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts (tested)
-  menubar_dock.py the menu-bar Dock tray (static/dock.html in a floating panel); dock_store.py its list
-  launcher_panel.py  the ⌥Space launcher (static/launcher.html in a floating panel)
-  launcher.py     launcher search over the Dock's apps + showcase; launcher.json (shortcut)
-  hotkey.py       the global shortcut: Carbon RegisterEventHotKey via ctypes; spec parsing (tested)
-  _child.py       worker: import the .py, call main(**params), print JSON
-  capture/        fused.capture: ScreenCaptureKit / AVFoundation recorder (_darwin, _darwin_mux, _mixdown)
-  routes/         Handler route groups: ai_routes, ai_relay, ai_metrics, capture
-  static/         runtime.js, placeholder (index.html), open page (open.html), dock.html, launcher.html, settings.html
-  showcase.py     lists showcase/*.fused for the placeholder; serves their preview.png
-  showcase/       showcase .fused apps + showcase.json (title, description)
+  menubar_dock.py the menu-bar tray: glass NSPanel + WKWebView on /dock, tile and utility menus
+  window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts
+  appfile.py, container.py, localapps.py  .fused (v2 container, v1 zip) and folder apps, for POST /api/open
+  env.py          uv lookup/download, per-app `uv sync`, running a .py in its venv
+  ai/, routes/    the AI subsystem and the routers copied from fused-render
+  capture/        fused.capture (ScreenCaptureKit / AVFoundation)
+  templates/claude/  fused-render's Claude chat engine (Tasks, bot builds)
+  skills/         fused-render's skills, synced verbatim
+  update/         the in-app updater
+  static/         runtime.js, the FusedBot icon (fusedbot-icon.svg → fusedbot-icon-1024.png / -64.png,
+                  menubar.svg → menubar.png / menubar@2x.png; scripts/render_icons.py), shell-dist/ (built: bots.html, lite.html)
+frontend/
+  bots.html, lite.html   the two Vite entries
+  src/apps/bots/  the FusedBot React app: components/, dialogs/, apps/, builds/, state/, lib/, styles/
+  src/            fused-render's frontend slice (Tasks page, Claude chat), copied verbatim
+docs/BOT-APP.md   architecture and wire contract
 ```
 
 State lives in `~/.fused-render-app/` (override with `FUSED_RENDER_APP_HOME`).

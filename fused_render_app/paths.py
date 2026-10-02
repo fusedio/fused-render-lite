@@ -91,3 +91,16 @@ def fix_process_env() -> None:
         if os.path.isdir(p) and p not in parts:
             parts.append(p)
     os.environ["PATH"] = os.pathsep.join(parts)
+    # urllib's process-wide default opener is built on the FIRST urlopen()
+    # call and, in Python 3.12, its HTTPSHandler loads the CA bundle right
+    # then — not per request. A plain http call made before this repair (the
+    # launcher's /api/health probe for a running server) froze a context with
+    # no certificates in it, and every later HTTPS urlopen in the process
+    # (update check, hub metadata, model downloads) failed with
+    # CERTIFICATE_VERIFY_FAILED. Drop it so the next call rebuilds under the
+    # repaired environment.
+    try:
+        import urllib.request
+        urllib.request._opener = None
+    except Exception:  # noqa: BLE001 — a missing urllib is not this function's problem
+        pass

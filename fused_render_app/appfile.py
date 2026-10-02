@@ -23,7 +23,7 @@ folders, what fused-render edits, open in place: nothing is extracted, the
 folder IS the app dir, and its ``.fused`` state dir stays where fused-render
 put it (never symlinked into ``fused_data``). Every ``appfile.*`` reader
 (icon, preview, app id, extract dir) answers for a folder as for a file, so
-the dock, the launcher and the home page need no second code path.
+callers need no second code path.
 """
 from __future__ import annotations
 
@@ -517,9 +517,8 @@ def open_app_file(fused_path: str) -> dict:
 
 # The app icon names, in PRECEDENCE order (fused-render's app_listing.
 # ICON_NAMES): `icon.svg` wins, `icon.png` stands in when there is no svg. An
-# svg owns its own plate and is drawn as is; a png is a plain square raster the
-# dock tile clips to its rounded corners (`.tile { overflow: hidden }` +
-# `object-fit: cover` in dock.html).
+# svg owns its own plate and is drawn as is; a png is a plain square raster a
+# caller clips to its own rounded corners.
 ICON_NAMES = ("icon.svg", "icon.png")
 # The svg — the name the picker writes on the fused-render side, and the one
 # that outranks a png dropped in beside it.
@@ -637,9 +636,8 @@ def icon_bytes(fused_path: str) -> bytes | None:
     app that WRITES its own icon into its extract wins over the shipped one:
     the extracted dir (if any; svg then png), then the container member /
     the v1 zip's ``files/`` (svg then png). Anything over its cap
-    (`icon_cap`) counts as absent and the walk goes on — the dock polls this
-    for every card and a file that size is not an icon. `dock_store._card_info`
-    walks the same candidates, so ``hasIcon`` and this route agree.
+    (`icon_cap`) counts as absent and the walk goes on — a file that size is
+    not an icon.
     """
     try:
         fused_path = os.path.abspath(fused_path)
@@ -659,9 +657,8 @@ def icon_bytes(fused_path: str) -> bytes | None:
 
 # ---- preview -----------------------------------------------------------------
 
-# The app's screenshot, ``preview.png`` (the showcase cards' image, and the
-# picture the menu-bar dock shows in a tile's hover bubble). One name, one
-# cap, shared with showcase.py. A png only: the dock's <img> is fed it as is.
+# The app's screenshot, ``preview.png``. One name, one cap. A png only: an
+# <img> is fed it as is.
 PREVIEW_NAME = "preview.png"
 PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 
@@ -708,12 +705,10 @@ def has_shipped_preview(fused_path: str) -> bool:
 
 
 def preview_bytes(fused_path: str) -> bytes | None:
-    """The app's ``preview.png`` for the dock's hover bubble, or None. Never
-    raises. Same walk as `icon_bytes`: the extract dir first (an app that
-    writes its own preview wins), then the shipped member / the v1 zip's
-    ``files/``; anything over `PREVIEW_MAX_BYTES` counts as absent.
-    `dock_store._card_info` walks the same candidates, so ``hasPreview`` and
-    ``/api/dock/preview`` agree.
+    """The app's ``preview.png``, or None. Never raises. Same walk as
+    `icon_bytes`: the extract dir first (an app that writes its own preview
+    wins), then the shipped member / the v1 zip's ``files/``; anything over
+    `PREVIEW_MAX_BYTES` counts as absent.
     """
     try:
         fused_path = os.path.abspath(fused_path)

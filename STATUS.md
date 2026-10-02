@@ -75,6 +75,103 @@ sha256-verified) unless built with `FUSED_RENDER_BUNDLE_UV=1`.
 
 ---
 
+## 0.11.0
+
+Minor: Render App becomes the **Browser Bots** app. The OpenBot fused-render
+app is rebuilt inside Render App, behaviour for behaviour
+(`docs/BOT-APP.md`), and the old product surface goes. Package, bundle id,
+DMG name and release pipeline keep their names. Packaging change: the
+`showcase/` `.fused` bundles no longer ship; the React build gains a second
+entry (`bots.html`).
+
+- **Backend (`fused_render_app/bots/`)**: bots run in the server process, no
+  daemon. Each bot has its own Chrome over CDP (accessibility-tree snapshot,
+  JPEG screenshots), a chat of events, memory, skills, routines, an Inbox
+  under `~/Fused/bots/<bot>/`, app offers and builds, app tools and app
+  skills, iMessage and `botsend`. Two engines: Claude Code (`haiku` / `sonnet`
+  / `opus` / `fable`, one `claude -p` per task, tools over a stdio MCP server)
+  and the OpenBot JSON-action loop for the local Gemma models (`local-4b`,
+  `local-9b`) or when no `claude` CLI is found. HTTP API under `/api/bots/*`
+  and `/api/apps/*`. State under `~/.fused-render-app/bots/`.
+- **Frontend (`frontend/src/apps/bots/`)**: the OpenBot page in React +
+  shadcn, served at `/` from `static/shell-dist/bots.html`: bot list, thread,
+  preview column, full-screen live view with take over, the bot / face /
+  routines / skills / usage dialogs, the Apps and Builds panels. `/embed`
+  frames an app for the gallery and cards.
+- **Removed (UI surfaces)**: the showcase home (`showcase.py`, `showcase/`,
+  `static/index.html`, `/api/showcase*`), the `.fused` opener page
+  (`static/open.html`, `/open`), the old Dock (`menubar_dock.py`,
+  `dock_store.py`, `icon_color.py`, `static/dock.html`, `/dock`; the
+  `/api/dock*` names are reused by the new menu-bar dock below), the ⌥Space launcher and its settings page (`launcher.py`,
+  `launcher_panel.py`, `hotkey.py`, `static/launcher.html`,
+  `static/settings.html`, `/launcher`, `/settings`, `/api/launcher*`), and
+  the title-bar Edit and Home buttons with their View menu items
+  (`editlink.py`). File → Open… is gone too.
+- **Kept (plumbing)**: `POST /api/open`, `/api/open/status`, `/api/drop`,
+  `/api/fetch`, `/render`, `appfile.py`, `container.py`, `localapps.py`,
+  `fetch.py`, `window_policy.py`, the job notifications (no longer consult
+  the Dock's list).
+- **Shell**: windows are titled "FusedBot"; the startup window, New Window
+  and the menu-bar "Open FusedBot" show `/`. A Finder or `render-app://` open
+  of a `.fused` is logged and shows the FusedBot window; the document type
+  and URL scheme stay registered for now.
+- **Updates**: the in-app updater (`/api/update*`) shows its banner on the
+  Browser Bots page (Update / Cancel / Restart / Retry;
+  `FUSED_RENDER_APP_UPDATE_DEV_VERSION` lets a dev-manager run show it).
+  Fixed in the packaged app: every update check failed with
+  `CERTIFICATE_VERIFY_FAILED` because Python 3.12's HTTPSHandler loads the
+  CA bundle when an opener is *built*, and two openers were built before
+  `paths.fix_process_env()` repaired py2app's dangling `SSL_CERT_FILE` (the
+  updater's at import, urllib's global one on the launcher's health probe).
+  The updater now builds its opener per call, `fix_process_env()` also
+  drops urllib's global opener, and the launcher repairs the environment
+  before its first request. The same frozen store would have broken hub
+  metadata and model downloads from the server process.
+- **Presets**: "+" first asks what kind of bot. 25 presets ship under
+  `fused_render_app/bots/presets/<key>/` (LinkedIn, YouTube, X, Reddit,
+  Instagram, Facebook, TikTok, Gmail, Calendar, Slack, GitHub, Hacker News,
+  Amazon, News, Indeed, Maps, Notion, Google Docs, Google Sheets, Linkme,
+  ShopMy, LTK, Amazon Associates, Twitch, Apple Notes) plus four named blank
+  bots; a preset bot gets the site's brand mark as its avatar, read-only
+  standing instructions and 4-6 playbooks copied into its Skills.
+  `GET /api/bots/presets`, `POST /api/bots {preset}`.
+- **Starter apps**: three complete fused apps ship under
+  `fused_render_app/bots/starters/` (Apple Notes, Google Docs Tabs, Google
+  Sheets Tabs, each with mcp.toml tools). The Apps panel lists them in a row
+  above the gallery with Install / Update / Open and an Installed / Needs
+  setup / Ready badge; the Google Docs, Google Sheets and Apple Notes presets
+  install theirs when a bot is made from them. `/api/apps/starters*`.
+- **Inbox and attached files** open the file in a new tab with a ↓ download
+  beside each (lite has no file explorer, so the raw file is shown inline);
+  approval and question cards settle on the first click.
+- **Name**: the app is FusedBot (bundle `FusedBot.app`, DMG
+  `FusedBot-<ver>.dmg`; window titles, main menu, menu-bar title, page title,
+  update banner, TCC prompts and notification fallback all say FusedBot);
+  identifiers unchanged — package `fused_render_app`, bundle id
+  `io.fused.render.app`, `render-app://`, `FUSED_RENDER_*`,
+  `~/.fused-render-app`, the manifest URL, the cask token `render-app`, the
+  `RenderAppWindow` frame names and the `RenderApp/<ver>` UA marker. An
+  in-app update keeps the installed bundle's path (an existing
+  `RenderApp.app` stays put); the release workflow reads the version from
+  either DMG name.
+- **Icon**: the bots' orange "cloud" face on a dark rounded square,
+  hand-written as `static/fusedbot-icon.svg` and rendered by
+  `scripts/render_icons.py` (resvg) to
+  `static/fusedbot-icon-1024.png` — build_dmg.sh resizes that into the
+  `.icns` — plus the 64 px favicon (`/favicon.ico`, bots.html) and the
+  menu-bar template `static/menubar.png` / `menubar@2x.png` from
+  `static/menubar.svg`.
+- **Menu-bar dock**: Render App's floating glass tray is back
+  (`menubar_dock.py`, page `/dock` built from `frontend/`), its tiles now a
+  Home tile, pinned bots, pinned apps, then up to 3 recent bots and 3 recent
+  apps; a bot opens selected in a FusedBot window, an app in its own.
+  Right-click on a tile: Open, Keep in / Remove from Dock, Show in Finder,
+  Open in Browser. Right-click on the status item: Open FusedBot / Tasks /
+  Open in Browser / Open App Logs / Quit (also the fallback menu if the tray
+  cannot be built). Tile size from the separator drag is saved.
+  `bots/dock.py`, `GET /api/dock`, `POST /api/dock/{open,home,reveal,pin,order,pin-bot,size}`;
+  app pins and tile size in `~/.fused-render-app/bots/dock.json`.
+
 ## 0.10.3
 
 Patch: three PRs syncing Render App's Claude sessions with fused-render.

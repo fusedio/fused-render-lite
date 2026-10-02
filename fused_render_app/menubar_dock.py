@@ -1,11 +1,14 @@
-"""The menu-bar Dock: a click on the status item drops a macOS-Dock-like tray
-of the .fused apps you have opened — pinned ones first, then recent — each a
-tile with the app's own ``icon.svg`` (or ``icon.png``), its name beneath, and a dot when it is
-open in a window. A click focuses the app's window if there is one, else
-opens it; right-click pins, reveals, forgets.
+"""The menu-bar Dock: a click on the FusedBot status item drops a
+macOS-Dock-like tray of bots and apps (``bots/dock.py``: a Home tile, the
+pinned bots and apps, then up to three recent bots and three recent apps),
+each a tile — the bot's face or the app's own ``icon.svg`` / ``icon.png`` —
+with its name beneath, and a dot when a bot is busy. A click shows the bot in
+a FusedBot window or opens the app in its own; right-click pins, reveals,
+opens in the browser.
 
-The tray is HTML (``static/dock.html``, served at ``/dock`` by the in-process
-server) inside a transparent ``WKWebView``. It floats: the host is a
+The tray is HTML (``static/shell-dist/dock.html``, built from ``frontend/``
+and served at ``/dock`` by the in-process server) inside a transparent
+``WKWebView``. It floats: the host is a
 borderless, non-opaque ``NSPanel`` under the status item, and the glass is an
 ``NSVisualEffectView`` with rounded corners sized to the tray rect the page
 reports — nothing else is drawn, so there is no popover box around the Dock
@@ -28,7 +31,7 @@ the tray under the icon itself.
 Status item: rumps attached an ``NSMenu`` to it, which AppKit opens on every
 click without ever firing the button's action. The menu is taken off; left
 click toggles the panel, right click (or ⌃-click) shows a small utility menu
-(launcher, browser, logs, quit) so Quit stays one click away.
+(FusedBot, Tasks, browser, logs, quit) so Quit stays one click away.
 
 macOS-only, like rumps. ``macapp.py`` builds this lazily after the run loop is
 up and keeps rumps' menu when construction fails — the app is never left
@@ -39,7 +42,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import subprocess
 import time
 
 import AppKit
@@ -83,8 +85,8 @@ from WebKit import (
     WKWebViewConfiguration,
 )
 
-from fused_render_app import dock_store, server
-from fused_render_app.cli import open_url
+from fused_render_app import server
+from fused_render_app.bots import dock as bot_dock
 from fused_render_app.mainwindow import USER_AGENT_MARKER, _open_external
 
 logger = logging.getLogger(__name__)
@@ -272,11 +274,8 @@ class _Target(NSObject):
     def statusItemClicked_(self, _sender):
         self._c.status_item_clicked()
 
-    def openLauncher_(self, _s):
+    def openHome_(self, _s):
         self._c.actions["show_home"]()
-
-    def showSearch_(self, _s):
-        self._c.actions["show_launcher"]()
 
     def openBrowser_(self, _s):
         self._c.actions["open_browser"]()
@@ -290,25 +289,27 @@ class _Target(NSObject):
     def quitApp_(self, _s):
         self._c.actions["quit"]()
 
-    # ---- per-tile menu (representedObject = the .fused path) -------------------
+    # ---- per-tile menu (representedObject = "bot:<id>" / "app:<dir>") ---------
+
+    @objc.python_method
+    def _tile(self, sender):
+        kind, _, key = str(sender.representedObject() or "").partition(":")
+        return kind, key
 
     def itemOpen_(self, sender):
-        self._c.item_open(sender.representedObject())
+        self._c.item_open(*self._tile(sender))
 
     def itemPin_(self, sender):
-        self._c.item_pin(sender.representedObject(), True)
+        self._c.item_pin(*self._tile(sender), True)
 
     def itemUnpin_(self, sender):
-        self._c.item_pin(sender.representedObject(), False)
+        self._c.item_pin(*self._tile(sender), False)
 
     def itemReveal_(self, sender):
-        self._c.item_reveal(sender.representedObject())
+        self._c.item_reveal(*self._tile(sender))
 
     def itemBrowser_(self, sender):
-        self._c.item_browser(sender.representedObject())
-
-    def itemForget_(self, sender):
-        self._c.item_forget(sender.representedObject())
+        self._c.item_browser(*self._tile(sender))
 
 
 class _ScriptHandler(NSObject):
@@ -419,7 +420,9 @@ class DockController:
     """Owns the status-item click, the floating panel and its web view.
 
     ``actions``: app-level callbacks for the right-click menu —
-    ``show_home`` / ``open_browser`` / ``open_logs`` / ``quit``.
+    ``show_home`` / ``show_tasks`` / ``open_browser`` / ``open_logs`` / ``quit``.
+    A tile click goes through ``server.native_hooks["dock_open"]`` (macapp.py
+    installs it), the same hook the page's ``POST /api/dock/open`` reaches.
     Main thread only, like everything AppKit.
     """
 
@@ -620,23 +623,21 @@ class DockController:
         logger.info("status item: menu removed, Dock panel on click")
 
     def _show_utility_menu(self) -> None:
-        menu = NSMenu.alloc().initWithTitle_("Render App")
+        menu = NSMenu.alloc().initWithTitle_("FusedBot")
 
         def item(title, action, key=""):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
             it.setTarget_(self._target)
             menu.addItem_(it)
 
-        item("Open Launcher", b"openLauncher:")
-        if self.actions.get("show_launcher"):
-            item("Search Apps…", b"showSearch:")
+        item("Open FusedBot", b"openHome:")
         if self.actions.get("show_tasks"):
             item("Tasks…", b"showTasks:")
         item("Open in Browser", b"openBrowser:")
         menu.addItem_(NSMenuItem.separatorItem())
         item("Open App Logs", b"openLogs:")
         menu.addItem_(NSMenuItem.separatorItem())
-        item("Quit Render App", b"quitApp:", "q")
+        item("Quit FusedBot", b"quitApp:", "q")
         # With a menu set, a click on the button opens it and fires no
         # action; set it just for this synthetic click, then take it off so
         # the next real click reaches statusItemClicked: again.
@@ -647,10 +648,14 @@ class DockController:
     # ---- per-tile context menu: a real NSMenu, laid out like the Dock's ------------
 
     def show_item_menu(self, data: dict) -> None:
-        file = str(data.get("file") or "")
-        if not file:
+        """The page's ``{type: "menu", kind: "bot"|"app", id | dir, name,
+        pinned, running, x, y}``: the tile's menu at (x, y) in page px."""
+        kind = str(data.get("kind") or "")
+        key = str(data.get("id") or "") if kind == "bot" else str(data.get("dir") or "")
+        if kind not in ("bot", "app") or not key:
             return
-        name = str(data.get("name") or os.path.basename(file))
+        tile = f"{kind}:{key}"
+        name = str(data.get("name") or (os.path.basename(key) if kind == "app" else "Bot"))
         pinned = bool(data.get("pinned"))
         running = bool(data.get("running"))
         menu = NSMenu.alloc().initWithTitle_(name)
@@ -660,19 +665,19 @@ class DockController:
         def add(m, title, action=None, key="", enabled=True, state=False, indent=0):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
             it.setTarget_(self._target if action else None)
-            it.setRepresentedObject_(file)
+            it.setRepresentedObject_(tile)
             it.setEnabled_(enabled and action is not None)
             it.setState_(1 if state else 0)
             it.setIndentationLevel_(indent)
             m.addItem_(it)
             return it
 
-        # Header, like the Dock's window list: the app's name, checked when open.
+        # Header, like the Dock's window list: the tile's name, checked while
+        # the bot is busy. "Open" always: a busy bot still needs showing.
         add(menu, name, None, state=running, enabled=False)
         menu.addItem_(NSMenuItem.separatorItem())
-        if not running:  # the Dock offers Open only for apps that are not running
-            add(menu, "Open", b"itemOpen:")
-            menu.addItem_(NSMenuItem.separatorItem())
+        add(menu, "Open", b"itemOpen:")
+        menu.addItem_(NSMenuItem.separatorItem())
 
         options = NSMenu.alloc().initWithTitle_("Options")
         options.setAutoenablesItems_(False)
@@ -681,15 +686,12 @@ class DockController:
         else:
             add(options, "Keep in Dock", b"itemPin:")
         options.addItem_(NSMenuItem.separatorItem())
-        add(options, "Show in Finder", b"itemReveal:")
+        if kind == "app":
+            add(options, "Show in Finder", b"itemReveal:")
         add(options, "Open in Browser", b"itemBrowser:")
         opt_item = add(menu, "Options", None)
         opt_item.setEnabled_(True)
         menu.setSubmenu_forItem_(options, opt_item)
-
-        if not pinned:
-            menu.addItem_(NSMenuItem.separatorItem())
-            add(menu, "Forget", b"itemForget:")
 
         try:
             x = float(data.get("x", 0))
@@ -699,31 +701,44 @@ class DockController:
         # WKWebView is flipped, so page coordinates are view coordinates.
         menu.popUpMenuPositioningItem_atLocation_inView_(None, NSMakePoint(x, y), self._webview)
 
-    def _refresh_page(self) -> None:
+    def refresh(self) -> None:
+        """Have the page re-read ``GET /api/dock`` (after a pin change)."""
         self._webview.evaluateJavaScript_completionHandler_(
             "window.dockShown && window.dockShown();", None)
 
-    def item_open(self, file: str) -> None:
-        hook = server.native_hooks.get("focus_or_open")
-        if hook is not None:
-            hook(file)
-        else:
-            self.close()
+    def _origin(self) -> str:
+        return f"http://127.0.0.1:{self._port}"
 
-    def item_pin(self, file: str, pinned: bool) -> None:
-        dock_store.set_pinned(file, pinned)
-        self._refresh_page()
-
-    def item_forget(self, file: str) -> None:
-        dock_store.remove(file)
-        self._refresh_page()
-
-    def item_reveal(self, file: str) -> None:
-        subprocess.Popen(["open", "-R", file])
-
-    def item_browser(self, file: str) -> None:
+    def item_open(self, kind: str, key: str) -> None:
         self.close()
-        _open_external(open_url(self._port, file))
+        hook = server.native_hooks.get("dock_open")
+        if hook is not None and kind in ("bot", "app") and key:
+            hook(kind, key)
+
+    def item_pin(self, kind: str, key: str, pinned: bool) -> None:
+        try:
+            if kind == "bot":
+                bot_dock.set_bot_pinned(key, pinned)
+            elif kind == "app":
+                bot_dock.set_app_pinned(key, pinned)
+        except Exception:  # noqa: BLE001 — a vanished bot / app: just refresh
+            logger.warning("dock pin %s %s -> %s failed", kind, key, pinned, exc_info=True)
+        self.refresh()
+
+    def item_reveal(self, kind: str, key: str) -> None:
+        if kind != "app":
+            return
+        try:
+            bot_dock.reveal_app(key)
+        except ValueError:
+            logger.warning("dock reveal refused: %s", key)
+
+    def item_browser(self, kind: str, key: str) -> None:
+        self.close()
+        if kind == "bot":
+            _open_external(self._origin() + bot_dock.bot_view_path(key))
+        elif kind == "app":
+            _open_external(self._origin() + bot_dock.app_render_path(key))
 
     # ---- panel -------------------------------------------------------------------
 
@@ -758,8 +773,9 @@ class DockController:
         ucc.addScriptMessageHandler_name_(self._handler, MESSAGE_NAME)
         config.setUserContentController_(ucc)
         # Same marker as the app windows: the page skips its dev backdrop and
-        # its own glass when it sees "RenderApp/" in the UA.
-        config.setApplicationNameForUserAgent_(f"{USER_AGENT_MARKER} RenderAppDock")
+        # its own glass when it sees "RenderApp/" in the UA ("FusedBotDock"
+        # says which page hosts it).
+        config.setApplicationNameForUserAgent_(f"{USER_AGENT_MARKER} FusedBotDock")
         try:
             config.preferences().setValue_forKey_(True, "developerExtrasEnabled")
         except Exception:  # noqa: BLE001

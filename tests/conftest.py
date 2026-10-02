@@ -98,12 +98,19 @@ def _no_task_threads(monkeypatch):
     thread` / `_no_tasks_watch_thread` / `_no_queue_manager_across_tests`).
     Tests about them call `tick()` themselves."""
     from fused_render_app import queue_manager, schedule, tasks_watch
+    from fused_render_app.bots import registry as bots_registry
 
     monkeypatch.setattr(schedule, "start", lambda: None)
     monkeypatch.setattr(tasks_watch, "start", lambda: None)
+    # The bots' scheduler + iMessage bridge (`start_ai` -> bots.registry.start);
+    # tests drive `tick_routines()` themselves. Bots built by one test are
+    # forgotten before the next.
+    monkeypatch.setattr(bots_registry, "start", lambda: None)
+    bots_registry.reset_for_tests()
     queue_manager.reset_for_tests(None)
     yield
     queue_manager.reset_for_tests(None)
+    bots_registry.reset_for_tests()
 
 
 @pytest.fixture

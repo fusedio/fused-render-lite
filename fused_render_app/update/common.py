@@ -39,8 +39,8 @@ FETCH_TIMEOUT_S = 15.0
 DOWNLOAD_TIMEOUT_S = 300.0
 # Every five minutes, as fused-render settled on (one ~300-byte signed GET on
 # CloudFront; a release sitting unnoticed for part of a working day costs
-# more than 288 of those). The launcher page polls /api/update on top, and
-# checks again when the app comes back to the front.
+# more than 288 of those). A page may poll /api/update on top, and check
+# again when the app comes back to the front.
 CHECK_INTERVAL_S = 5 * 60
 MAX_MANIFEST_BYTES = 64 * 1024
 # The shipped DMG is ~42 MB (STATUS.md); 200 MB leaves room to grow several
@@ -68,11 +68,18 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(HttpsOnlyRedirect)
-
-
 def urlopen(url: str, timeout: float):
-    return _opener.open(url, timeout=timeout)
+    """A fresh opener per call, never a module-level one.
+
+    Python 3.12's HTTPSHandler builds its SSLContext — and so loads the CA
+    bundle — when the opener is CONSTRUCTED, not per request. An opener built
+    at import time inside the .app bundle froze a context that had loaded no
+    certificates at all (py2app's bootstrap points SSL_CERT_FILE at a
+    `no-such-file` path until paths.fix_process_env() repairs it, and macapp
+    imports this module before the server starts), so every update check in
+    the packaged app failed with CERTIFICATE_VERIFY_FAILED for the life of
+    the process. A handful of fetches per hour do not need a cached opener."""
+    return urllib.request.build_opener(HttpsOnlyRedirect).open(url, timeout=timeout)
 
 
 def signing_message(version: str, sha256: str) -> bytes:
@@ -122,7 +129,7 @@ def is_newer(candidate: str, current: str) -> bool:
 
 
 def download_verified(manifest: dict, *, dir: str | None = None,
-                      prefix: str = "RenderApp-update-", suffix: str = "",
+                      prefix: str = "FusedBot-update-", suffix: str = "",
                       max_bytes: int = MAX_ARTIFACT_BYTES,
                       progress=None, should_abort=None, urlopen_fn=None) -> str:
     """Stream the artifact to a temp file (in `dir`, or the system temp dir)
