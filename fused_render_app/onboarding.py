@@ -211,14 +211,14 @@ def _observe(stages: dict) -> None:
 
     # Local models: one of the bots' local models on disk = complete; none
     # here but one downloading = partial. Otherwise only a stored
-    # complete/partial is walked back to pending.
+    # complete/partial is walked back to pending. `_local_models_here`, not
+    # `local_model_picks`: this runs on every /api/config read, and the fit
+    # verdict the picks carry is for the Models step alone.
     try:
-        picks = local_model_picks()
-        here = [p["id"] for p in picks if p["downloaded"]]
+        here, downloading = _local_models_here()
         if here:
             _put(stages, "models", "complete", here=here)
         else:
-            downloading = [p["id"] for p in picks if p["downloading"]]
             if downloading:
                 _put(stages, "models", "partial", here=[], downloading=downloading)
             elif stages.get("models", {}).get("status") in ("complete", "partial"):
@@ -235,6 +235,43 @@ def _observe(stages: dict) -> None:
         log.debug("onboarding: bot observe failed", exc_info=True)
 
 
+def _local_models_here() -> tuple[list[str], list[str]]:
+    """`(here, downloading)`: which of the bots' local models are on disk
+    (`hub_cache.has_cached_snapshot`, memoised on the cache folders' mtimes)
+    and which have a download job running. The cheap half of
+    `local_model_picks` — what `_observe` needs on every /api/config read."""
+    from fused_render_app.bots import bot as botmod
+
+    here: list[str] = []
+    downloading: list[str] = []
+    running: set[str] = set()
+    try:
+        from fused_render_app import jobs
+        from fused_render_app.ai import supervisor
+
+        for r in jobs.list_jobs():
+            if (
+                str(r.get("id", "")).startswith(supervisor.JOB_PREFIX)
+                and r.get("kind") == "download"
+                and r.get("state") == "running"
+            ):
+                running.add(str(r.get("model") or r.get("title") or ""))
+    except Exception:  # noqa: BLE001
+        log.debug("onboarding: jobs read failed", exc_info=True)
+    for repo_id in botmod.LOCAL_MODELS.values():
+        try:
+            from fused_render_app.ai import hub_cache
+
+            if hub_cache.has_cached_snapshot(repo_id):
+                here.append(repo_id)
+                continue
+        except Exception:  # noqa: BLE001
+            log.debug("onboarding: hub cache read failed", exc_info=True)
+        if repo_id in running:
+            downloading.append(repo_id)
+    return here, downloading
+
+
 def local_model_picks() -> list[dict]:
     """The local models the Models step offers: the bots' own
     `LOCAL_MODELS` table (bot.py), NOT the AI catalog's `recommended` row —
@@ -245,32 +282,12 @@ def local_model_picks() -> list[dict]:
     when it cannot judge)."""
     from fused_render_app.bots import bot as botmod
 
+    here, downloading_ids = _local_models_here()
     rows = []
     for alias, repo_id in botmod.LOCAL_MODELS.items():
         size_gb = botmod.LOCAL_MODEL_SIZES_GB.get(repo_id)
-        downloaded = False
-        try:
-            from fused_render_app.ai import hub_cache
-
-            downloaded = bool(hub_cache.has_cached_snapshot(repo_id))
-        except Exception:  # noqa: BLE001
-            log.debug("onboarding: hub cache read failed", exc_info=True)
-        downloading = False
-        try:
-            from fused_render_app import jobs
-            from fused_render_app.ai import supervisor
-
-            for r in jobs.list_jobs():
-                if (
-                    str(r.get("id", "")).startswith(supervisor.JOB_PREFIX)
-                    and r.get("kind") == "download"
-                    and r.get("state") == "running"
-                    and (r.get("model") == repo_id or r.get("id", "").endswith(repo_id))
-                ):
-                    downloading = True
-                    break
-        except Exception:  # noqa: BLE001
-            log.debug("onboarding: jobs read failed", exc_info=True)
+        downloaded = repo_id in here
+        downloading = repo_id in downloading_ids
         fit = None
         try:
             from fused_render_app.ai import fit as fitmod
