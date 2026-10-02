@@ -91,6 +91,7 @@ from fused_render_app.routes import schedule as schedule_routes
 from fused_render_app.routes import tasks as tasks_routes
 from fused_render_app.bots import routes as bots_routes  # noqa: E402
 from fused_render_app.bots import dock_routes  # noqa: E402
+from fused_render_app.routes import claude_health as claude_health_routes  # noqa: E402
 import fused_render_app.bots.registry as bots_registry  # noqa: E402
 
 AI_ROUTER = APIRouter()
@@ -112,6 +113,9 @@ AI_ROUTER.include_router(claude_artifacts_routes.router)
 AI_ROUTER.include_router(bots_routes.router)
 # The menu-bar dock's lists and the apps' "Pin to menu bar" (bots/dock.py).
 AI_ROUTER.include_router(dock_routes.router)
+# Claude Code health, install, sign-in and doctor (routes/claude_health.py):
+# /api/claude/*, read by the wizard's Claude step and anything that asks first.
+AI_ROUTER.include_router(claude_health_routes.router)
 
 logger = logging.getLogger(__name__)
 
@@ -1041,9 +1045,12 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
         # is no CLI. Exporting the tuple itself raised TypeError (swallowed
         # below), so the packaged app never told agent.py where `claude` is
         # and a Finder launch, with launchd's PATH, could not find it.
-        bin_path, _source = claude_health.resolve()
-        if bin_path and not os.environ.get("FUSED_RENDER_CLAUDE_BIN"):
-            os.environ["FUSED_RENDER_CLAUDE_BIN"] = bin_path
+        # runnable(): a stale user override is not a CLI to export. adopt()
+        # publishes it only when the user set nothing, and records the
+        # source so the health report stays honest about where it was found.
+        bin_path = claude_health.runnable()
+        if bin_path:
+            claude_health.adopt(bin_path, source="candidate")
     except Exception:  # noqa: BLE001 — no CLI is the chat's problem, not the server's
         logger.debug("claude CLI not resolved at startup", exc_info=True)
     write_server_json(srv.server_address[1], host)

@@ -320,7 +320,7 @@ def _engine_for(meta) -> str:
         return "steps"
     try:
         from fused_render_app import claude_health
-        if claude_health.resolve()[0] is None:
+        if claude_health.runnable() is None:
             return "steps"
     except Exception:  # noqa: BLE001
         return "steps"

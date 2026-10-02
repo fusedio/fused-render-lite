@@ -1,0 +1,1057 @@
+"""Tests for fused_render_app/claude_health.py and GET /api/claude/health.
+
+The point of this module is to say something TRUE about the machine before
+anything needs Claude Code, so the tests are mostly about the ways a health
+report can lie: claiming an install is too old when the version could not be
+read, claiming a macOS user is signed out because a file is missing, serving a
+cached answer after the binary changed underneath it.
+
+No test runs a real `claude`: resolution is driven through a fake tree plus a
+patched PATH, and the version probe's one subprocess hop is patched at the
+module boundary (the same discipline as test_server_ai.py).
+"""
+import json
+import os
+import sys
+import time
+
+import pytest
+
+from fused_render_app import claude_health
+
+
+# Captured before any fixture stubs them, so a test that wants the REAL probe
+# can ask for it by name. Cleaner than `monkeypatch.undo()`, which would drop
+# the whole isolation fixture along with the one stub the test wants gone.
+_REAL_SHELL_PROBE = claude_health._shell_probe
+_REAL_AUTH_STATUS = claude_health._auth_status
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Every test gets its own shell home (so the cache file is its own) and a
+    PATH/override/credential environment that inherits nothing from the machine
+    running the suite — which may well have a real, signed-in Claude Code."""
+    monkeypatch.setenv("FUSED_RENDER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    monkeypatch.delenv(claude_health.BIN_ENV, raising=False)
+    monkeypatch.delenv(claude_health.APP_BIN_ENV, raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    # The two probes that would spawn something real: the login-shell probe
+    # would source the SUITE RUNNER's own profile, and the auth probe would ask
+    # the developer's actual Claude Code whether they are signed in. Both off by
+    # default; the tests that care restore the real one by name.
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: None)
+    monkeypatch.setattr(claude_health, "_auth_status", lambda path: None)
+    # Same discipline for the doctor probe: it is gated to the unhealthy path,
+    # so only the tests that BUILD an unhealthy machine would reach it — and
+    # those must not spawn the suite runner's real CLI to find that out.
+    monkeypatch.setattr(claude_health, "_doctor", lambda path: None)
+    monkeypatch.delenv("DISABLE_UPDATES", raising=False)
+    # Adoption is module state that outlives a test (it mirrors an env var the
+    # process publishes once). Without this reset, a test that adopts leaves the
+    # next one resolving through a path it never set up.
+    monkeypatch.setattr(claude_health, "_ADOPTED", None)
+
+
+def _fake_cli(tmp_path, name="claude", executable=True):
+    """An executable stand-in for the CLI, in its own dir. Returns the path.
+
+    Never actually spawned by anything below (every test here patches
+    `probe_version`/`subprocess.run` rather than running it) — it only has to
+    be a file `resolve()`'s real `shutil.which` can find on PATH. That is a
+    file with an exec bit on POSIX and a file with a PATHEXT extension on
+    Windows, which is why the name gets `.exe` there: a bare `claude` with a
+    shebang is invisible to Windows' extension-based PATH lookup no matter
+    what `chmod` says about it.
+    """
+    d = tmp_path / "fake-bin"
+    d.mkdir(exist_ok=True)
+    if os.name == "nt" and not name.lower().endswith((".exe", ".cmd", ".bat")):
+        name += ".exe"
+    p = d / name
+    p.write_text("#!/bin/sh\necho 2.1.220\n")
+    p.chmod(0o755 if executable else 0o644)
+    return str(p)
+
+
+# -- version parsing and the floor -------------------------------------------
+
+
+@pytest.mark.parametrize("text,want", [
+    ("2.1.220", (2, 1, 220)),
+    ("2.1.220 (Claude Code)", (2, 1, 220)),
+    ("claude 1.0.88\n", (1, 0, 88)),
+    ("  2.0  ", (2, 0)),
+    ("", None),
+    ("no digits here", None),
+])
+def test_parse_version(text, want):
+    assert claude_health.parse_version(text) == want
+
+
+def test_is_outdated_compares_numerically_not_lexically():
+    # The bug a string compare would have: "2.1.9" > "2.1.10" lexically.
+    assert claude_health.is_outdated("2.1.9", "2.1.10") is True
+    assert claude_health.is_outdated("2.1.10", "2.1.9") is False
+
+
+def test_is_outdated_zero_pads_a_shorter_version():
+    """"2" is 2.0.0, not something below it — otherwise a CLI reporting a bare
+    major would be called stale for having a short version string."""
+    assert claude_health.is_outdated("2", "2.0.0") is False
+    assert claude_health.is_outdated("2.0", "2.0.0") is False
+    assert claude_health.is_outdated("1", "2.0.0") is True
+
+
+def test_unreadable_version_is_never_outdated():
+    """THE ASSERTION THAT MATTERS MOST HERE. A version we could not read says
+    nothing about age, and answering True would put "your Claude Code is too
+    old" in front of someone whose install is fine."""
+    assert claude_health.is_outdated(None) is False
+    assert claude_health.is_outdated("") is False
+    assert claude_health.is_outdated("unknown") is False
+
+
+def test_the_declared_floor_admits_the_verified_version():
+    """MIN_VERSION must not reject the version the spawn line is verified
+    against (server/ai.py's --tools= note pins that at 2.1.220)."""
+    assert claude_health.is_outdated("2.1.220") is False
+    assert claude_health.is_outdated("1.0.88") is True
+
+
+# -- resolution ---------------------------------------------------------------
+
+
+def test_override_wins_and_is_reported_as_such(tmp_path, monkeypatch):
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.setenv(claude_health.BIN_ENV, "/opt/custom/claude")
+    assert claude_health.resolve() == ("/opt/custom/claude", "override")
+
+
+def test_a_stale_override_is_reported_not_silently_replaced(tmp_path, monkeypatch):
+    """A pointing-at-nothing override is a real finding — it is exactly why a
+    session will not start — so it must not be papered over by a working install
+    that other code paths (which trust the override blindly) would never use."""
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.setenv(claude_health.BIN_ENV, str(tmp_path / "gone" / "claude"))
+    path, source = claude_health.resolve()
+    assert source == "override"
+    assert path != bin_path
+    # ...and it must not be called usable.
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: None)
+    assert claude_health._measure()["found"] is False
+
+
+def test_path_beats_the_candidate_list(tmp_path, monkeypatch):
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    resolved, source = claude_health.resolve()
+    # normcase, not a bare ==: shutil.which() on Windows matches "claude"
+    # against PATHEXT (.COM;.EXE;...) and returns it with THAT extension's
+    # case, e.g. "claude.EXE", regardless of the actual on-disk filename's
+    # case ("claude.exe" here) — a case difference on a filesystem where it is
+    # not a different file. Same idiom as templates/claude/agent.py's
+    # containment check.
+    assert os.path.normcase(resolved) == os.path.normcase(bin_path)
+    assert source == "path"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fakes os.name='posix' on a real filesystem — executable()'s "
+           "os.access(X_OK) branch that gates on it is then a REAL syscall, "
+           "and on real Windows os.access(X_OK) is true for any existing "
+           "file regardless of chmod (see executable()'s own docstring), so "
+           "the POSIX candidate-list behaviour this exercises can only be "
+           "tested where os.name='posix' is also true.",
+)
+def test_candidate_dirs_are_probed_when_path_is_stripped(tmp_path, monkeypatch):
+    """A Finder/Dock-launched .app inherits the supervisor's PATH, not a
+    shell's, so the known install dirs are all that is left."""
+    home = tmp_path / "userhome"
+    (home / ".bun" / "bin").mkdir(parents=True)
+    cli = home / ".bun" / "bin" / "claude"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(claude_health.os.path, "expanduser",
+                        lambda p: p.replace("~", str(home), 1))
+    monkeypatch.setattr(claude_health.os, "name", "posix")
+    # ~/.bun/bin is the case that used to resolve for the Claude-config tab and
+    # not for fused.ai — the divergence the shared list closes.
+    assert claude_health.resolve() == (str(cli), "candidate")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="fakes os.name='posix' on a real filesystem — see the skip on "
+           "test_candidate_dirs_are_probed_when_path_is_stripped just above "
+           "for why that's unsafe on real Windows.",
+)
+def test_a_non_executable_file_does_not_shadow_a_real_install(tmp_path, monkeypatch):
+    """isfile alone was not enough: a non-executable file in an earlier
+    candidate dir would win and then fail to spawn."""
+    home = tmp_path / "userhome"
+    (home / ".local" / "bin").mkdir(parents=True)
+    dud = home / ".local" / "bin" / "claude"
+    dud.write_text("not executable")
+    dud.chmod(0o644)
+    (home / ".bun" / "bin").mkdir(parents=True)
+    real = home / ".bun" / "bin" / "claude"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    monkeypatch.setattr(claude_health.os.path, "expanduser",
+                        lambda p: p.replace("~", str(home), 1))
+    monkeypatch.setattr(claude_health.os, "name", "posix")
+    assert claude_health.resolve()[0] == str(real)
+
+
+def test_nothing_installed_resolves_to_nothing():
+    assert claude_health.resolve() == (None, None)
+
+
+def test_a_shell_only_install_is_adopted_as_the_override(monkeypatch):
+    """THE POINT OF PROBING THE SHELL AT ALL.
+
+    Neither spawn path shells out — server/ai.py:_claude_bin and the chat
+    template both go override → PATH → candidates — so a volta/fnm/nvm install
+    is invisible to both until the discovered path is published. Without this
+    the health report says "found" while every session still fails to start.
+    """
+    monkeypatch.delenv(claude_health.BIN_ENV, raising=False)
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: "/opt/volta/bin/claude")
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+
+    snap = claude_health._measure()
+    assert snap["source"] == "shell"          # still honest about HOW we found it
+    assert os.environ[claude_health.BIN_ENV] == "/opt/volta/bin/claude"
+
+    # ...and the spawn path now finds exactly that, which is the whole objective.
+    from fused_render_app.routes import ai_relay as _server_ai
+
+    assert _server_ai._claude_bin() == "/opt/volta/bin/claude"
+
+
+def test_an_adoption_that_goes_stale_recovers_instead_of_trapping(tmp_path, monkeypatch):
+    """AN ADOPTION IS A CONVENIENCE AND MUST NEVER BECOME A TRAP (Bugbot #621).
+
+    `resolve` trusts a user's override without checking it, on purpose. Applied
+    to a value we published ourselves that rule is a trap: when the path goes
+    (upgrade, volta switching versions, an uninstall) every later measure would
+    report a dead override, never fall through to PATH/candidates/a fresh shell
+    probe, and render a card blaming the user for an environment variable they
+    never set — with no recovery short of restarting the process.
+    """
+    gone = tmp_path / "volta" / "claude"
+    gone.parent.mkdir()
+    gone.write_text("#!/bin/sh\n")
+    gone.chmod(0o755)
+    monkeypatch.delenv(claude_health.BIN_ENV, raising=False)
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: str(gone))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+
+    assert claude_health._measure()["source"] == "shell"
+    assert os.environ[claude_health.BIN_ENV] == str(gone)
+
+    # The CLI moves. A later find must win rather than the dead adoption.
+    moved = tmp_path / "volta2" / "claude"
+    moved.parent.mkdir()
+    moved.write_text("#!/bin/sh\n")
+    moved.chmod(0o755)
+    gone.unlink()
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: str(moved))
+
+    snap = claude_health._measure()
+    assert snap["found"] is True
+    assert snap["path"] == str(moved)
+    # ...and emphatically NOT the user-blaming card
+    assert snap["source"] != "override"
+    assert os.environ[claude_health.BIN_ENV] == str(moved)
+
+
+def test_a_stale_adoption_with_nothing_to_fall_back_to_is_missing_not_override(
+        tmp_path, monkeypatch):
+    """With the CLI genuinely gone the honest answer is "not found", which the
+    strip turns into "install Claude Code" — never "your override is broken"
+    about a variable the user never set."""
+    gone = tmp_path / "volta" / "claude"
+    gone.parent.mkdir()
+    gone.write_text("#!/bin/sh\n")
+    gone.chmod(0o755)
+    monkeypatch.delenv(claude_health.BIN_ENV, raising=False)
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: str(gone))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+    claude_health._measure()
+
+    gone.unlink()
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: None)
+    snap = claude_health._measure()
+    assert snap["found"] is False
+    assert snap["source"] is None
+    assert claude_health.BIN_ENV not in os.environ
+
+
+def test_a_users_own_stale_override_is_still_reported_not_dropped(monkeypatch):
+    """The opposite case, and it must keep its old behaviour: a value the user
+    set is why their sessions fail, so it is named rather than quietly replaced
+    by something that happens to work."""
+    monkeypatch.setenv(claude_health.BIN_ENV, "/opt/gone/claude")
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: "/opt/volta/bin/claude")
+    path, source = claude_health.resolve()
+    assert (path, source) == ("/opt/gone/claude", "override")
+    assert os.environ[claude_health.BIN_ENV] == "/opt/gone/claude"
+
+
+def test_adopting_never_overwrites_the_user_s_own_override(monkeypatch):
+    """Someone who set it deliberately has said which binary to run; a probe
+    replacing it would be the app overruling an explicit instruction."""
+    monkeypatch.setenv(claude_health.BIN_ENV, "/my/choice/claude")
+    assert claude_health.adopt("/opt/volta/bin/claude") is False
+    assert os.environ[claude_health.BIN_ENV] == "/my/choice/claude"
+
+
+def test_only_a_shell_find_is_adopted(tmp_path, monkeypatch):
+    """A binary already on PATH or in a candidate dir needs no publishing —
+    both spawn paths find it unaided, and pinning an override for one would
+    outlive the CLI later moving."""
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.delenv(claude_health.BIN_ENV, raising=False)
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+
+    snap = claude_health._measure()
+    assert snap["source"] == "path"
+    assert claude_health.BIN_ENV not in os.environ
+
+
+def test_shell_probe_is_the_last_resort_and_is_labelled(monkeypatch):
+    """A binary only the login shell can see is a DIFFERENT diagnosis from a
+    missing one: the app's own PATH is the problem, and the fix is the override
+    rather than another install. `source` is how the UI can say so."""
+    monkeypatch.setattr(claude_health, "_shell_probe", lambda: "/opt/volta/bin/claude")
+    assert claude_health.resolve() == ("/opt/volta/bin/claude", "shell")
+    # ...and it is skippable, because it costs seconds.
+    assert claude_health.resolve(allow_shell=False) == (None, None)
+
+
+def test_shell_probe_scrubs_the_bundled_interpreter_vars(monkeypatch):
+    """The packaged app exports PYTHONHOME/PYTHONPATH for its own interpreter;
+    a child that inherits them and is not that interpreter dies with
+    "No module named 'encodings'"."""
+    monkeypatch.setenv("PYTHONHOME", "/bundle/python")
+    monkeypatch.setenv("PYTHONPATH", "/bundle/lib")
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs.get("env") or {})
+
+        class R:
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+    _REAL_SHELL_PROBE()  # the isolation fixture stubs the module attribute
+    assert "PYTHONHOME" not in seen
+    assert "PYTHONPATH" not in seen
+
+
+def test_augmented_path_appends_install_dirs_without_duplicating(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    parts = claude_health.augmented_path().split(os.pathsep)
+    assert parts[0] == "/usr/bin"
+    assert len(parts) == len(set(parts))
+    # candidates() (and so the dirs augmented_path() appends) is platform-
+    # specific — WINDOWS_CANDIDATES on os.name == "nt", POSIX_CANDIDATES
+    # elsewhere — so "/opt/homebrew/bin" is only ever a real member of that
+    # list on the POSIX branch; asserting it unconditionally is a POSIX-only
+    # literal masquerading as a platform-independent one. Deriving the
+    # expectation from candidates() itself is what makes this check the same
+    # guarantee on both platforms.
+    for candidate in claude_health.candidates():
+        expected_dir = os.path.dirname(
+            os.path.expanduser(os.path.expandvars(candidate)))
+        assert expected_dir in parts
+
+
+# -- the version probe --------------------------------------------------------
+
+
+def test_probe_version_reads_stdout(tmp_path, monkeypatch):
+    def fake_run(argv, **kwargs):
+        class R:
+            returncode, stdout, stderr = 0, "2.1.220 (Claude Code)\n", ""
+        return R()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+    assert claude_health.probe_version("/x/claude") == "2.1.220"
+
+
+def test_probe_version_falls_back_to_stderr(monkeypatch):
+    def fake_run(argv, **kwargs):
+        class R:
+            returncode, stdout, stderr = 0, "", "2.0.5\n"
+        return R()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+    assert claude_health.probe_version("/x/claude") == "2.0.5"
+
+
+@pytest.mark.parametrize("outcome", [
+    {"returncode": 1, "stdout": "2.1.220", "stderr": ""},   # exited non-zero
+    {"returncode": 0, "stdout": "", "stderr": ""},           # said nothing
+    {"returncode": 0, "stdout": "nope", "stderr": ""},       # nothing parseable
+])
+def test_probe_version_is_none_when_it_would_not_tell_us(monkeypatch, outcome):
+    def fake_run(argv, **kwargs):
+        return type("R", (), outcome)()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+    assert claude_health.probe_version("/x/claude") is None
+
+
+def test_probe_version_survives_a_hung_or_missing_binary(monkeypatch):
+    import subprocess as sp
+
+    def boom(argv, **kwargs):
+        raise sp.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(claude_health.subprocess, "run", boom)
+    assert claude_health.probe_version("/x/claude") is None
+
+    monkeypatch.setattr(claude_health.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    assert claude_health.probe_version("/x/claude") is None
+
+
+def test_a_windows_cmd_shim_goes_through_cmd_exe(monkeypatch):
+    """npm installs claude as a .cmd, which CreateProcess cannot run directly.
+    Without the hop both probes OSError on every npm-installed Windows CLI and
+    report everything as unknown."""
+    monkeypatch.setattr(claude_health.os, "name", "nt")
+    cmd = claude_health._probe_cmd(r"C:\Users\A B\npm\claude.cmd", "auth", "status")
+    assert isinstance(cmd, str)
+    # every element quoted, so a space in the path cannot re-split the line
+    assert cmd == r'"C:\Users\A B\npm\claude.cmd" "auth" "status"'
+    # ...and an .exe on the same platform stays a plain argv list
+    assert claude_health._probe_cmd(r"C:\npm\claude.exe", "--version") == [
+        r"C:\npm\claude.exe", "--version"]
+
+
+def test_a_posix_path_is_never_shelled(monkeypatch):
+    monkeypatch.setattr(claude_health.os, "name", "posix")
+    # a POSIX file that merely ENDS in .cmd is still exec'd directly
+    assert claude_health._probe_cmd("/home/a/claude.cmd", "--version") == [
+        "/home/a/claude.cmd", "--version"]
+
+
+def test_a_quote_in_the_path_is_refused_not_misquoted(monkeypatch):
+    monkeypatch.setattr(claude_health.os, "name", "nt")
+    with pytest.raises(ValueError):
+        claude_health._probe_cmd('C:\\ev"il\\claude.cmd', "auth", "status")
+    # and the probes turn that into "unknown" rather than a 500
+    monkeypatch.setattr(claude_health, "_auth_status", _REAL_AUTH_STATUS)
+    assert claude_health.probe_version('C:\\ev"il\\claude.cmd') is None
+    assert claude_health.signed_in('C:\\ev"il\\claude.cmd') is None
+
+
+def test_the_version_probe_never_forks(monkeypatch):
+    """close_fds=False is what keeps CPython on posix_spawn: a fork() with
+    libproj resident in the server runs PROJ's atfork handler into a SIGSEGV
+    before exec (rc -11, no output). Same discipline as every other subprocess
+    in the package."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+
+        class R:
+            returncode, stdout, stderr = 0, "2.1.220", ""
+        return R()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+    claude_health.probe_version("/x/claude")
+    assert seen["close_fds"] is False
+    assert seen["encoding"] == "utf-8"
+    assert seen["errors"] == "replace"
+    assert seen["timeout"] > 0
+
+
+# -- sign-in ------------------------------------------------------------------
+
+
+def _auth_says(monkeypatch, stdout, returncode=0, stderr=""):
+    """Put the REAL `_auth_status` back (the isolation fixture stubs it) over a
+    fake `claude auth status`, so the parse itself is what's under test."""
+    monkeypatch.setattr(claude_health, "_auth_status", _REAL_AUTH_STATUS)
+
+    def fake_run(argv, **kwargs):
+        assert argv[1:] == ["auth", "status"], argv
+        return type("R", (), {"returncode": returncode, "stdout": stdout,
+                              "stderr": stderr})()
+
+    monkeypatch.setattr(claude_health.subprocess, "run", fake_run)
+
+
+def test_the_cli_is_asked_and_believed(monkeypatch):
+    """`claude auth status` is the only party that actually knows, and it knows
+    on every platform."""
+    _auth_says(monkeypatch, '{"loggedIn": false, "authMethod": "none"}')
+    assert claude_health.signed_in("/x/claude") is False
+    _auth_says(monkeypatch, '{"loggedIn": true, "authMethod": "oauth_token"}')
+    assert claude_health.signed_in("/x/claude") is True
+
+
+def test_the_cli_beats_local_evidence(monkeypatch, tmp_path):
+    """A credentials file left behind by a since-revoked login must not
+    outvote the CLI saying it is signed out."""
+    cfg = tmp_path / "claude"
+    cfg.mkdir()
+    (cfg / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    _auth_says(monkeypatch, '{"loggedIn": false}')
+    assert claude_health.signed_in("/x/claude") is False
+
+
+@pytest.mark.parametrize("stdout,rc,stderr", [
+    # a CLI too old for the subcommand: nothing on stdout, error on stderr
+    ("", 1, "error: unknown command 'status'"),
+    ("not json at all", 0, ""),
+    ('{"loggedIn": "yes"}', 0, ""),     # right key, wrong type
+    ('{"authMethod": "none"}', 0, ""),  # no loggedIn at all
+    ("[]", 0, ""),                      # JSON, but not an object
+])
+def test_an_unreadable_answer_is_unknown_never_false(monkeypatch, stdout, rc, stderr):
+    """Guessing "signed out" from output we could not read is how a signed-in
+    user gets told to go and sign in."""
+    _auth_says(monkeypatch, stdout, returncode=rc, stderr=stderr)
+    assert claude_health.signed_in("/x/claude") is None
+
+
+def test_a_hung_or_missing_cli_is_unknown(monkeypatch):
+    import subprocess as sp
+
+    monkeypatch.setattr(claude_health, "_auth_status", _REAL_AUTH_STATUS)
+    monkeypatch.setattr(claude_health.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(sp.TimeoutExpired("claude", 1)))
+    assert claude_health.signed_in("/x/claude") is None
+    monkeypatch.setattr(claude_health.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+    assert claude_health.signed_in("/x/claude") is None
+
+
+def test_signed_in_from_a_credentials_file_when_the_cli_cannot_be_asked(tmp_path, monkeypatch):
+    cfg = tmp_path / "claude"
+    cfg.mkdir()
+    (cfg / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    assert claude_health.signed_in() is True
+
+
+@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"])
+def test_signed_in_from_an_env_token(monkeypatch, name):
+    monkeypatch.setenv(name, "sk-whatever")
+    assert claude_health.signed_in() is True
+
+
+def test_a_blank_env_token_is_not_a_credential(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    assert claude_health.signed_in() is not True
+
+
+def test_absent_local_evidence_is_never_false_on_any_platform(monkeypatch):
+    """THE REGRESSION THIS REPLACED A PLATFORM RULE TO PREVENT.
+
+    This used to conclude "no credentials file on Linux/Windows, therefore
+    signed out". Measured on a container that is demonstrably logged in
+    (`claude auth status` → loggedIn: true) with no credentials file and no
+    token in the environment, that rule answered False: the credential arrived
+    on an inherited file descriptor. Absence of a file is not evidence of being
+    signed out, on any platform — only the CLI's own answer is.
+    """
+    for platform in ("linux", "win32", "darwin"):
+        monkeypatch.setattr(claude_health.os, "name",
+                            "nt" if platform == "win32" else "posix")
+        assert claude_health.signed_in() is None, platform
+
+
+def test_a_missing_binary_is_not_asked_for_its_auth_state(monkeypatch):
+    """Nothing to spawn, so nothing to ask — and the answer stays unknown
+    rather than becoming a False nobody established."""
+    spawned = []
+    monkeypatch.setattr(claude_health.subprocess, "run",
+                        lambda *a, **k: spawned.append(a) or None)
+    monkeypatch.setattr(claude_health, "resolve", lambda **k: (None, None))
+    snap = claude_health._measure()
+    assert snap["found"] is False
+    assert snap["signed_in"] is None
+    assert spawned == []
+
+
+def test_config_dir_prefers_claude_code_s_own_variable(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/a")
+    monkeypatch.setenv("CLAUDE_DIR", "/b")
+    assert claude_health.config_dir() == "/a"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    assert claude_health.config_dir() == "/b"
+
+
+# -- the cached snapshot ------------------------------------------------------
+
+
+def test_snapshot_is_cached_then_served_from_disk(tmp_path, monkeypatch):
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    calls = []
+    monkeypatch.setattr(claude_health, "probe_version",
+                        lambda p: calls.append(p) or "2.1.220")
+
+    first = claude_health.snapshot()
+    assert first["found"] is True and first["version"] == "2.1.220"
+    assert os.path.isfile(claude_health._cache_path())
+
+    second = claude_health.snapshot()
+    assert second["version"] == "2.1.220"
+    assert len(calls) == 1, "a warm cache must not re-probe"
+
+
+def test_an_upgraded_binary_invalidates_the_cache(tmp_path, monkeypatch):
+    """`claude update` rewrites the file in place, so mtime is how an upgrade
+    announces itself — without this the cache would keep reporting the old
+    version (and a stale `outdated`) forever."""
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    versions = iter(["2.0.1", "2.1.220"])
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: next(versions))
+
+    assert claude_health.snapshot()["version"] == "2.0.1"
+    os.utime(bin_path, (1, 1))  # an in-place upgrade
+    assert claude_health.snapshot()["version"] == "2.1.220"
+
+
+def test_a_new_override_invalidates_the_cache(tmp_path, monkeypatch):
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+    assert claude_health.snapshot()["source"] == "path"
+    monkeypatch.setenv(claude_health.BIN_ENV, "/opt/custom/claude")
+    assert claude_health.snapshot()["source"] == "override"
+
+
+def test_refresh_re_probes_even_on_a_valid_cache(tmp_path, monkeypatch):
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    calls = []
+    monkeypatch.setattr(claude_health, "probe_version",
+                        lambda p: calls.append(p) or "2.1.220")
+    claude_health.snapshot()
+    claude_health.snapshot(refresh=True)
+    assert len(calls) == 2
+
+
+def test_refresh_answers_with_the_measurement_it_just_took(tmp_path, monkeypatch):
+    """"Check again" must never answer with the snapshot it was pressed to get
+    past.
+
+    An unwritable home is tolerated by design, so a refresh that re-read through
+    the cache would serve the STALE file — the user installs Claude Code, presses
+    the button, and is told again that it is missing (Bugbot #621).
+    """
+    bin_path = _fake_cli(tmp_path)
+    versions = iter(["1.0.88", "2.1.220"])
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: next(versions))
+
+    # First measurement: nothing on PATH, an old CLI. This one lands in the cache.
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    assert claude_health.summary()["version"] == "1.0.88"
+
+    # Now the cache cannot be updated — and the refresh must still answer fresh.
+    monkeypatch.setattr(claude_health.storage, "write_json",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    refreshed = claude_health.summary_refreshed()
+    assert refreshed["version"] == "2.1.220"
+    assert refreshed["outdated"] is False
+    # and it is still the endpoint's shape, not the internal one
+    assert "fingerprint" not in refreshed
+
+
+def test_refresh_does_not_probe_twice(tmp_path, monkeypatch):
+    """The old form measured, then re-read through summary() — which probed a
+    second time whenever there was no cache to read."""
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    calls = []
+    monkeypatch.setattr(claude_health, "probe_version",
+                        lambda p: calls.append(p) or "2.1.220")
+    claude_health.summary_refreshed()
+    assert len(calls) == 1
+
+
+def test_signing_out_is_noticed_without_pressing_check_again(tmp_path, monkeypatch):
+    """THE BUG A FINGERPRINT-ONLY CACHE CANNOT SEE.
+
+    Signing out moves no path, changes no PATH and touches no file, so the
+    fingerprint is identical on both sides of it — and the cache is on disk, so
+    not even a restart cleared it. The strip stayed silent on a signed-out
+    machine indefinitely, which is what this was reported as.
+    """
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+    state = {"in": True}
+    monkeypatch.setattr(claude_health, "signed_in", lambda path=None: state["in"])
+
+    assert claude_health.summary()["signed_in"] is True
+    state["in"] = False                      # the user runs /logout
+
+    # Inside the window the cached answer still stands...
+    assert claude_health.summary()["signed_in"] is True
+    # ...and past it, the next read re-measures on its own. The real clock is
+    # captured BEFORE patching: `claude_health.time` is the time module itself,
+    # so a lambda that re-imported it would call the patch from inside the patch.
+    real_time = time.time
+    monkeypatch.setattr(claude_health.time, "time",
+                        lambda: real_time() + claude_health._MAX_AGE_S + 1)
+    assert claude_health.summary()["signed_in"] is False
+
+
+def test_a_snapshot_from_an_older_build_is_discarded(tmp_path, monkeypatch):
+    """A cache is a record of what a PREVIOUS VERSION of this code believed. The
+    sign-in probe used to answer null on macOS by rule; without the version in
+    the fingerprint, every one of those snapshots would keep being served to the
+    fixed code — the strip silent because a stale file said so."""
+    bin_path = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(bin_path))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: "2.1.220")
+    monkeypatch.setattr(claude_health, "signed_in", lambda path=None: None)
+    claude_health.summary()
+
+    monkeypatch.setattr(claude_health, "signed_in", lambda path=None: False)
+    monkeypatch.setattr(claude_health, "_CACHE_VERSION", claude_health._CACHE_VERSION + 1)
+    assert claude_health.summary()["signed_in"] is False
+
+
+@pytest.mark.parametrize("taken", [None, "recently", True, float("nan")])
+def test_a_snapshot_that_cannot_date_itself_is_re_measured(tmp_path, monkeypatch, taken):
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: None)
+    assert claude_health._too_old({"checked_at": taken}) is True
+
+
+def test_a_clock_that_went_backwards_does_not_park_a_snapshot(monkeypatch):
+    """A future timestamp would otherwise sit beyond every later expiry check —
+    the one way this could go permanently stale again."""
+    assert claude_health._too_old({"checked_at": time.time() + 3600}) is True
+
+
+def test_a_corrupt_cache_is_re_measured_not_raised(tmp_path, monkeypatch):
+    """A cache is disposable and entirely re-derivable, so a damaged one has
+    nothing to recover and nothing to report. (User DATA is the opposite case
+    and is not what lives in this file.)"""
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: None)
+    os.makedirs(os.path.dirname(claude_health._cache_path()), exist_ok=True)
+    with open(claude_health._cache_path(), "w") as f:
+        f.write("{ this is not json")
+    assert claude_health.snapshot()["found"] is False
+
+
+def test_an_unwritable_home_still_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_health.storage, "write_json",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: None)
+    assert "found" in claude_health.snapshot()
+
+
+def test_summary_withholds_the_fingerprint(tmp_path, monkeypatch):
+    """It is cache bookkeeping, and it carries the machine's whole PATH — which
+    has no business in a browser."""
+    monkeypatch.setattr(claude_health, "probe_version", lambda p: None)
+    summary = claude_health.summary()
+    assert "fingerprint" not in summary
+    assert "found" in summary and "min_version" in summary
+    # and it must survive a JSON round trip, being an HTTP payload
+    assert json.loads(json.dumps(summary))["min_version"] == claude_health.MIN_VERSION
+
+
+def test_warm_in_background_never_raises(monkeypatch):
+    monkeypatch.setattr(claude_health, "snapshot",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    claude_health.warm_in_background()  # must not propagate
+
+
+# -- the endpoint -------------------------------------------------------------
+
+
+def _client():
+    from _claude_router_client import client
+
+    return client()
+
+
+def test_endpoint_answers_the_snapshot(monkeypatch):
+    monkeypatch.setattr(claude_health, "summary",
+                        lambda: {"found": True, "version": "2.1.220"})
+    body = _client().get("/api/claude/health").json()
+    assert body == {"found": True, "version": "2.1.220"}
+
+
+def test_refresh_requires_the_fused_header(monkeypatch):
+    called = []
+    monkeypatch.setattr(claude_health, "summary_refreshed",
+                        lambda: called.append(1) or {"found": False})
+    client = _client()
+    assert client.post("/api/claude/health/refresh").status_code != 200
+    assert called == []
+    ok = client.post("/api/claude/health/refresh", headers={"X-Fused": "1"})
+    assert ok.status_code == 200 and called == [1]
+
+
+def test_the_health_endpoint_is_not_on_api_config():
+    """/api/config is read on every page load and by the status-banner poll;
+    these facts are backed by process spawns and must stay off it."""
+    import re
+
+    src = open(os.path.join(os.path.dirname(__file__), "..", "fused_render_app",
+                            "server.py")).read()
+    body = re.search(r"def _config\(\) -> dict:\n(.*?)\n    def ", src, re.S).group(1)
+    assert "claude_health" not in body
+
+
+# -- doctor, the install method, and whether an update can work ----------------
+#
+# Three questions the module never used to ask. The first two are how "the
+# install is broken" becomes something sayable; the third is the whole of "do
+# not offer an update that would do nothing".
+
+_REAL_DOCTOR_OUTPUT = """Claude Code doctor
+
+Running: native (2.1.246)
+Commit: 1ba9d2211ae1
+Platform: linux-x64
+Path: /opt/claude-code/bin/claude
+Config install method: unknown
+Search: OK (/usr/bin/rg)
+Auto-updates: enabled
+
+3 warnings found
+- Running native installation but config install method is 'unknown'
+  Fix: Run claude install to update configuration
+- claude command at /root/.local/bin/claude missing or broken
+  Fix: Run claude install to repair the installation.
+- Leftover npm global installation at /opt/node22/bin/claude
+  Fix: Run: npm -g uninstall @anthropic-ai/claude-code
+"""
+
+
+def test_parse_doctor_reads_the_method_and_every_warning_fix_pair():
+    """Pinned against output captured from a real `claude doctor` (2.1.246).
+
+    The warnings are the CLI's own words about its own installation, which is
+    the entire reason the broken-install card has anything to show — anything we
+    inferred instead would be a guess dressed as a diagnosis."""
+    report = claude_health.parse_doctor(_REAL_DOCTOR_OUTPUT)
+    assert report["install_method"] == "native"
+    assert len(report["warnings"]) == 3
+    assert report["warnings"][1] == {
+        "problem": "claude command at /root/.local/bin/claude missing or broken",
+        "fix": "Run claude install to repair the installation.",
+    }
+
+
+def test_parse_doctor_survives_output_it_does_not_recognise():
+    """Never raises, and never invents. A future doctor that changes its layout
+    degrades to "no method, no warnings" — which produces no advice, rather than
+    wrong advice."""
+    report = claude_health.parse_doctor("something else entirely")
+    assert report["install_method"] is None
+    assert report["warnings"] == []
+    assert report["text"] == "something else entirely"
+
+
+def test_doctor_wins_over_the_path_when_it_names_a_method():
+    """The path sniffing is a fallback and genuinely a guess; doctor reads its
+    own install config. A Homebrew-looking path that doctor calls `native` is
+    native."""
+    doctor = {"install_method": "native", "warnings": [], "text": ""}
+    assert claude_health.install_method("/opt/homebrew/bin/claude", doctor) == "native"
+
+
+@pytest.mark.parametrize("path,want", [
+    ("/opt/homebrew/bin/claude", "brew"),
+    ("/home/u/.local/bin/claude", "native"),
+    ("/usr/bin/claude", "system"),
+    (r"C:\Users\a\AppData\Local\Microsoft\WinGet\Links\claude.exe", "winget"),
+    (r"C:\Users\a\AppData\Roaming\npm\claude.cmd", "npm"),
+    ("/home/u/.npm-global/bin/claude", "npm"),
+    # Somewhere nobody's list knows about. UNKNOWN IS THE RIGHT ANSWER — a
+    # guess here would decide whether an Update button appears.
+    ("/somewhere/nobody/guessed/claude", None),
+])
+def test_install_method_from_the_path_when_doctor_could_not_be_asked(path, want):
+    assert claude_health.install_method(path, None) == want
+
+
+def test_doctor_saying_unknown_is_not_a_method():
+    """Doctor prints `Config install method: unknown` on a perfectly fine
+    install. Treating that string as a method name would put it in neither the
+    self-updating list nor the managed one, which is the same place as None —
+    but by accident rather than on purpose."""
+    doctor = {"install_method": "unknown", "warnings": [], "text": ""}
+    assert claude_health.install_method("/somewhere/odd/claude", doctor) is None
+
+
+@pytest.mark.parametrize("method,updatable,command", [
+    # These update through the CLI, so the app can run it.
+    ("native", True, "claude update"),
+    ("npm", True, "claude update"),
+    # These do not: `claude update` answers "Claude is up to date!" and changes
+    # nothing, so we name the command that WOULD work and offer no button.
+    ("brew", False, "brew upgrade claude-code"),
+    ("winget", False, "winget upgrade Anthropic.ClaudeCode"),
+    ("apt", False, "sudo apt update && sudo apt upgrade claude-code"),
+    ("dnf", False, "sudo dnf upgrade claude-code"),
+    ("apk", False, "apk update && apk upgrade claude-code"),
+    # A system bindir tells us a package manager owns it and NOT which one, so
+    # there is no command to name. Naming `claude update` anyway would be
+    # offering the one answer we know is wrong.
+    ("system", False, None),
+])
+def test_update_plan_knows_which_installs_can_update_themselves(method, updatable, command):
+    plan = claude_health.update_plan(method)
+    assert plan["updatable"] is updatable
+    assert plan["command"] == command
+
+
+@pytest.mark.parametrize("method", [None, "something-new"])
+def test_an_unknown_method_still_offers_the_update(method):
+    """NOT KNOWING IS NOT A NO, and this is the same rule `signed_in` follows:
+    only an authoritative negative may withhold an offer. `claude update` is the
+    CLI's own generic answer, and an install method we could not read is no
+    evidence against it."""
+    plan = claude_health.update_plan(method)
+    assert plan["updatable"] is None
+    assert plan["command"] == "claude update"
+
+
+def test_disable_updates_beats_the_install_method():
+    """DISABLE_UPDATES blocks manual updates too, where DISABLE_AUTOUPDATER stops
+    only the background check and leaves `claude update` working. Reading the
+    wrong one of those two is the difference between a button that works and a
+    button that silently does nothing."""
+    plan = claude_health.update_plan("native", {"DISABLE_UPDATES": "1"})
+    assert plan["updatable"] is False
+    assert plan["command"] is None
+    # The autoupdater flag alone must NOT withhold the button.
+    still_on = claude_health.update_plan("native", {"DISABLE_AUTOUPDATER": "1"})
+    assert still_on["updatable"] is True
+
+
+def test_the_install_command_matches_the_platform(monkeypatch):
+    monkeypatch.setattr(claude_health.os, "name", "posix")
+    assert claude_health.install_command() == claude_health.INSTALL_COMMAND_POSIX
+    monkeypatch.setattr(claude_health.os, "name", "nt")
+    assert claude_health.install_command() == claude_health.INSTALL_COMMAND_WINDOWS
+
+
+# -- the gate: doctor runs only when there is something to explain -------------
+
+
+def _measure_with(monkeypatch, tmp_path, version, calls):
+    """Measure one machine with a findable CLI reporting `version`, recording
+    every doctor spawn into `calls`."""
+    cli = _fake_cli(tmp_path)
+    monkeypatch.setenv("PATH", os.path.dirname(cli))
+    monkeypatch.setattr(claude_health, "probe_version", lambda path: version)
+
+    def _doctor(path):
+        calls.append(path)
+        return {"install_method": "brew", "warnings": [], "text": "…"}
+
+    monkeypatch.setattr(claude_health, "_doctor", _doctor)
+    return claude_health._measure(allow_shell=False)
+
+
+def test_a_healthy_machine_never_pays_for_a_doctor_probe(monkeypatch, tmp_path):
+    """The gate, and the reason it exists: doctor is a ~1.2s spawn. It is fine to
+    pay for a card that renders while something is wrong and is not fine on every
+    health read of a machine that is fine."""
+    calls = []
+    snap = _measure_with(monkeypatch, tmp_path, "2.1.220", calls)
+    assert calls == []
+    assert snap["doctor"] is None
+    assert snap["broken"] is False
+    # And with no method read, the update offer stays open rather than being
+    # withheld on a guess.
+    assert snap["updatable"] is None
+
+
+def test_a_cli_that_will_not_report_a_version_is_broken_and_gets_a_doctor(
+        monkeypatch, tmp_path):
+    """The silent state, finally said out loud. It was measured all along — the
+    module refuses to guess a cause from one failed probe — and so a user with a
+    half-replaced install got silence and an app that did not work."""
+    calls = []
+    snap = _measure_with(monkeypatch, tmp_path, None, calls)
+    assert snap["broken"] is True
+    assert len(calls) == 1
+    assert snap["doctor"]["install_method"] == "brew"
+
+
+def test_an_outdated_cli_gets_a_doctor_so_the_update_offer_can_be_decided(
+        monkeypatch, tmp_path):
+    """Doctor is the only party that authoritatively reports the install method,
+    and the method is what decides whether an Update button can work at all."""
+    calls = []
+    snap = _measure_with(monkeypatch, tmp_path, "1.0.0", calls)
+    assert snap["outdated"] is True
+    assert len(calls) == 1
+    assert snap["install_method"] == "brew"
+    assert snap["updatable"] is False
+    assert snap["update_command"] == "brew upgrade claude-code"
+
+
+def test_a_missing_cli_is_never_broken_and_never_asked_for_a_doctor(monkeypatch, tmp_path):
+    """`broken` means "it is here and it will not answer". A machine with no
+    Claude Code at all has its own, louder finding, and spawning a diagnostic on
+    a path that does not exist would waste a spawn on a certain failure."""
+    calls = []
+    monkeypatch.setattr(claude_health, "_doctor", lambda p: calls.append(p))
+    snap = claude_health._measure(allow_shell=False)
+    assert snap["found"] is False
+    assert snap["broken"] is False
+    assert calls == []
+
+
+def test_the_snapshot_carries_the_platform_and_its_own_install_line(monkeypatch, tmp_path):
+    """The UI used to guess which install line to show and guessed wrong on
+    Windows. The server knows its own platform, so it states it."""
+    snap = claude_health._measure(allow_shell=False)
+    assert snap["platform"] == sys.platform
+    assert snap["install_command"] == claude_health.install_command()
+
+
+@pytest.mark.parametrize("path", [
+    # Caught on a real machine: `/bin/` as a SUBSTRING matches almost every path
+    # a binary sits in, so this npm install — which updates itself perfectly
+    # well — was classified `system` and had its update offer withheld.
+    "/opt/node22/bin/claude",
+    "/opt/anything/bin/claude",
+    # Ambiguous by construction: a common npm prefix, an Intel-Mac Homebrew link
+    # target and a hand-install location all at once.
+    "/usr/local/bin/claude",
+])
+def test_a_generic_bindir_is_unknown_rather_than_guessed_as_system(path):
+    """UNKNOWN KEEPS THE UPDATE ON OFFER; a wrong guess takes it away. That
+    asymmetry is why the generic needles are anchored and the ambiguous one is
+    absent altogether."""
+    assert claude_health.install_method(path, None) is None
+    assert claude_health.update_plan(claude_health.install_method(path, None))[
+        "updatable"] is None
+
+
+@pytest.mark.parametrize("path", ["/usr/bin/claude", "/bin/claude", "/usr/lib/claude/claude"])
+def test_a_real_system_bindir_is_still_recognised(path):
+    assert claude_health.install_method(path, None) == "system"
