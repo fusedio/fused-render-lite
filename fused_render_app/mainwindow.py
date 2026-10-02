@@ -553,14 +553,19 @@ class _Window:
             self.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(url)))
 
     def _add_titlebar_button(self) -> None:
-        """An "Open in Browser" button at the right end of the title bar.
+        """"Open in Browser" and "Home" buttons at the right end of the title
+        bar — Home rightmost, Browser to its left.
 
         A titlebar accessory keeps the standard titled window (title stays
         centred, traffic lights untouched) — no toolbar row, no
-        full-size-content-view mask. Same action as the ⌘⇧L menu item.
+        full-size-content-view mask. Same actions as the ⌘⇧L / ⌘⇧H menu
+        items. Home takes THIS window to the bots page (`/`); the saved
+        frame does not follow (it belongs to the window as opened, see
+        `app_id` above).
         """
         specs = (  # left to right
             ("safari", "Open in Browser", "Open in Browser (⌘⇧L)", b"openInBrowser:"),
+            ("house", "Home", "Home (⌘⇧H)", b"goHome:"),
         )
         buttons = []
         for symbol, desc, tip, action in specs:
@@ -758,6 +763,17 @@ class _MenuTarget(NSObject):
 
     def showTasks_(self, _s):
         self._m.show_tasks()
+
+    def goHome_(self, _s):
+        """Title-bar Home / View → Home (⌘⇧H): the key window goes to the
+        bots page; a no-op when it is already there. No window: open one."""
+        w = self._m.key()
+        if w is None or w.webview is None:
+            self._m.open(self._m.home_url)
+            return
+        if urllib.parse.urlsplit(w.current_url() or "").path in ("/", "/index.html"):
+            return
+        w.webview.loadRequest_(NSURLRequest.requestWithURL_(_nsurl(self._m.home_url)))
 
     def openInBrowser_(self, _s):
         w = self._m.key()
@@ -1081,6 +1097,7 @@ def _build_main_menu(target) -> NSMenu:
         item("Back", b"goBack:", "["),
         item("Forward", b"goForward:", "]"),
         sep(),
+        item("Home", b"goHome:", "H", CMD | _SHIFT),
         item("Open in Browser", b"openInBrowser:", "L", CMD | _SHIFT),
         item("Copy URL", b"copyUrl:", "C", CMD | _SHIFT),
         sep(),
