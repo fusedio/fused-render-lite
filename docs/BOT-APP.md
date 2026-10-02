@@ -601,14 +601,23 @@ playbooks copied, read-only instructions prefilled, "created … Comes with 6
 github playbooks" line, greeting); the Starter apps strip; Apple Notes
 Install → copied to `~/Fused/app/apple-notes`, viewer opened, badge
 "Installed"; "Pin to menu bar" from the viewer's ⋯ → `dock.json` written and
-the menu-bar dock rebuilt within one tick ("Pinned | Apple Notes | Recent
-bots | GitHub bot | Recent apps | …"); `/favicon.ico` is the FusedBot PNG;
-the menu-bar cloud icon shows. Not clicked (AppKit cannot be driven from
-here): the dock's items themselves — a bot item selecting its bot in an open
-window (`WindowManager.show_bot`), an app item opening `/render`
-(`show_url`) — a pinned *bot* in the dock, the `?bot=` boot deep link; and
-the Google starters' "Needs setup → Ready" badge (needs a service-account
-key).
+the (then rumps-menu) dock rebuilt within one tick — that menu has since
+been replaced by the glass tray; `/favicon.ico` is the FusedBot PNG; the
+menu-bar cloud icon shows.
+
+Third round, the glass tray (installed `/Applications/FusedBot.app` 0.11.0 on
+the real home, shown with `FUSED_RENDER_APP_DOCK_SHOW=1` + SIGUSR1): the tray
+drops under the status item on native glass with the Home tile, the
+separator and the three app tiles (Apple Notes icon, T, L); the title bar
+ends in Open in Browser + Home; `/dock` and `/api/dock` answer; the update
+check passes. A source run with seeded bots showed bot and app tiles both
+sides of the separator. Not clicked (AppKit cannot be driven from here): a
+tile (`menubar_dock.item_open` → `show_bot` / `show_url`), the tile's
+right-click NSMenu, the status item's right-click utility menu, pinning from
+the menu, the separator drag, the Home button (`mainwindow.goHome_`); a
+plate-less bot tile has not been seen natively (the page rules are in
+`frontend/dock.html`); the `?bot=` boot deep link; the Google starters'
+"Needs setup → Ready" badge (needs a service-account key).
 
 Not exercised live: dictation (needs a microphone grant), iMessage (needs
 Full Disk Access), Chrome profile import and encryption at rest (unit
