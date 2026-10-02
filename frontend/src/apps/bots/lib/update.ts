@@ -1,4 +1,4 @@
-// Render App's self-update, read off GET /api/update (fused_render_app/update/mac.py's UpdateManager.status()).
+// FusedBot's self-update, read off GET /api/update (fused_render_app/update/mac.py's UpdateManager.status()).
 // Pure on purpose: describeUpdate() is the whole state -> banner decision and pollDelay() the whole cadence, so
 // both are table-tested (update.test.ts) and UpdateBanner.tsx only owns the timer and the clicks. No top-level
 // window/document here, so bun imports it bare.
@@ -43,7 +43,7 @@ export interface UpdateView {
   progress: { fraction: number | null } | null;
 }
 
-const NAME = "Browser Bots";
+const NAME = "FusedBot";
 
 /** What the banner shows for a status, or null for nothing (no updater, idle, up to date, checking). */
 export function describeUpdate(s: UpdateStatus | null | undefined): UpdateView | null {

@@ -53,7 +53,7 @@ jobs:
           fi
           PREV_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n1 || true)"
           gh release create "$TAG" --target "${{ github.sha }}" \
-            --title "RenderApp $TAG" \
+            --title "FusedBot $TAG" \
             --generate-notes ${PREV_TAG:+--notes-start-tag "$PREV_TAG"}
 
   build-sign-notarize-release:
@@ -196,7 +196,7 @@ jobs:
           # only after the S3 upload succeeds, so the cask never points at a
           # DMG that never made it onto the CDN. Version + hash come from the
           # DMG that was actually built, not from the git tag.
-          echo "version=$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')" >> "$GITHUB_OUTPUT"
+          echo "version=$(basename "$DMG_PATH" .dmg | sed -E 's/^(FusedBot|RenderApp)-//')" >> "$GITHUB_OUTPUT"
           echo "dmg_sha256=$DMG_SHA256" >> "$GITHUB_OUTPUT"
           echo "dmg_url=https://${CDN_DOMAIN}/${S3_PREFIX}/$(basename "$DMG_PATH")" >> "$GITHUB_OUTPUT"
           echo "cdn_host=${CDN_DOMAIN}" >> "$GITHUB_OUTPUT"
@@ -220,7 +220,7 @@ jobs:
             echo "::warning::FUSED_RENDER_UPDATE_SIGNING_KEY is not set — no update manifest published; in-app updates will not see this release"
             exit 0
           fi
-          VERSION="$(basename "$DMG_PATH" .dmg | sed 's/^RenderApp-//')"
+          VERSION="$(basename "$DMG_PATH" .dmg | sed -E 's/^(FusedBot|RenderApp)-//')"
           # Never move latest.json BACKWARDS: rebuilding an older tag
           # (workflow_dispatch --ref vX.Y.Z) must not point every install at
           # that older version. Compare against the live manifest; a 404 (no
@@ -298,7 +298,7 @@ jobs:
           git clone --depth 1 "https://x-access-token:${TAP_PUSH_TOKEN}@github.com/fusedio/homebrew-tap.git" /tmp/homebrew-tap
           cd /tmp/homebrew-tap
           # Write the whole cask instead of sed-ing version/sha256: the DMG and
-          # .app names (RenderApp-*.dmg, RenderApp.app) live here too, so a
+          # .app names (FusedBot-*.dmg, FusedBot.app; RenderApp-* before 0.11.0) live here too, so a
           # rename ships atomically with the first release built under the new
           # name. The cask token is render-app. The download comes from the
           # CDN (same as fused-render's cask); `verified:` is required because
@@ -311,9 +311,9 @@ jobs:
             version "${VERSION}"
             sha256 "${DMG_SHA256}"
 
-            url "https://${CDN_HOST}/render-app-dmgs/RenderApp-#{version}.dmg",
+            url "https://${CDN_HOST}/render-app-dmgs/FusedBot-#{version}.dmg",
                 verified: "${CDN_HOST}/render-app-dmgs/"
-            name "Render App"
+            name "FusedBot"
             desc "Lightweight runtime for .fused apps: Python-powered interactive HTML views"
             homepage "https://github.com/fusedio/fused-render-lite"
 
@@ -324,7 +324,7 @@ jobs:
 
             depends_on macos: :monterey
 
-            app "RenderApp.app"
+            app "FusedBot.app"
 
             uninstall quit: "io.fused.render.app"
           end

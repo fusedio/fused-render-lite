@@ -125,7 +125,7 @@ def _screen_granted() -> bool:
 _MIC_AUTHORIZED = 3
 _MIC_UNDETERMINED = 0
 
-MIC_GRANT = ("Microphone access is not granted to Render App — allow it in "
+MIC_GRANT = ("Microphone access is not granted to FusedBot — allow it in "
              "System Settings › Privacy & Security › Microphone, then try again")
 
 
@@ -420,7 +420,7 @@ def _display(display_id) -> object:
     # answered. Either way the page must get the 409 `unavailable` shape with
     # the System Settings sentence, so it can tell the user to grant and retry,
     # not a 500 that runtime.js files under `bad_request`.
-    grant = ("Screen Recording is not granted to Render App — allow it in "
+    grant = ("Screen Recording is not granted to FusedBot — allow it in "
              "System Settings › Privacy & Security › Screen & System Audio "
              "Recording, then try again")
     try:

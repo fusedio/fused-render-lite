@@ -43,10 +43,22 @@ def test_bots_page_and_removed_pages(client):
             assert status == 503 and b"Run scripts/build_shell.sh" in body
         assert headers["Content-Type"].startswith("text/html")
     # The old product surface is gone: the `.fused` opener, the showcase home,
-    # the menu-bar dock, the launcher and its settings page.
+    # the old dock page, the launcher and its settings page. (`/api/dock` is
+    # back, as the FusedBot menu-bar dock's lists: tests/test_bots_dock.py.)
     for route in ("/open?_file=/nope/x.fused", "/api/showcase", "/dock", "/launcher",
-                  "/settings", "/api/dock", "/api/launcher"):
+                  "/settings", "/api/launcher"):
         assert client.get(route)[0] == 404, route
+
+
+def test_favicon_is_the_fusedbot_png(client):
+    from fused_render_app import server
+
+    with open(os.path.join(server.STATIC_DIR, server.FAVICON_NAME), "rb") as f:
+        png = f.read()
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    for route in ("/favicon.ico", "/static/fusedbot-icon-64.png"):
+        status, headers, body = client.get(route)
+        assert status == 200 and headers["Content-Type"].startswith("image/png") and body == png, route
 
 
 def test_embed_route(client, tmp_path):

@@ -96,7 +96,7 @@ TERMINAL_STATES = ("done", "error", "cancelled")
 
 TITLE_MAX = 80
 BODY_MAX = 150
-FALLBACK_TITLE = "Render App"
+FALLBACK_TITLE = "FusedBot"
 
 
 @dataclass(frozen=True)

@@ -129,7 +129,7 @@ def is_newer(candidate: str, current: str) -> bool:
 
 
 def download_verified(manifest: dict, *, dir: str | None = None,
-                      prefix: str = "RenderApp-update-", suffix: str = "",
+                      prefix: str = "FusedBot-update-", suffix: str = "",
                       max_bytes: int = MAX_ARTIFACT_BYTES,
                       progress=None, should_abort=None, urlopen_fn=None) -> str:
     """Stream the artifact to a temp file (in `dir`, or the system temp dir)

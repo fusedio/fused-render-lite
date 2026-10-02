@@ -100,9 +100,9 @@ entry (`bots.html`).
   frames an app for the gallery and cards.
 - **Removed (UI surfaces)**: the showcase home (`showcase.py`, `showcase/`,
   `static/index.html`, `/api/showcase*`), the `.fused` opener page
-  (`static/open.html`, `/open`), the menu-bar Dock (`menubar_dock.py`,
-  `dock_store.py`, `icon_color.py`, `static/dock.html`, `/dock`,
-  `/api/dock*`), the ⌥Space launcher and its settings page (`launcher.py`,
+  (`static/open.html`, `/open`), the old Dock (`menubar_dock.py`,
+  `dock_store.py`, `icon_color.py`, `static/dock.html`, `/dock`; the
+  `/api/dock*` names are reused by the new menu-bar dock below), the ⌥Space launcher and its settings page (`launcher.py`,
   `launcher_panel.py`, `hotkey.py`, `static/launcher.html`,
   `static/settings.html`, `/launcher`, `/settings`, `/api/launcher*`), and
   the title-bar Edit and Home buttons with their View menu items
@@ -111,9 +111,9 @@ entry (`bots.html`).
   `/api/fetch`, `/render`, `appfile.py`, `container.py`, `localapps.py`,
   `fetch.py`, `window_policy.py`, the job notifications (no longer consult
   the Dock's list).
-- **Shell**: windows are titled "Browser Bots"; the startup window, New Window
-  and the menu-bar "Open in app" show `/`. A Finder or `render-app://` open of
-  a `.fused` is logged and shows the Browser Bots window; the document type
+- **Shell**: windows are titled "FusedBot"; the startup window, New Window
+  and the menu-bar "Open FusedBot" show `/`. A Finder or `render-app://` open
+  of a `.fused` is logged and shows the FusedBot window; the document type
   and URL scheme stay registered for now.
 - **Updates**: the in-app updater (`/api/update*`) shows its banner on the
   Browser Bots page (Update / Cancel / Restart / Retry;
@@ -127,6 +127,29 @@ entry (`bots.html`).
   drops urllib's global opener, and the launcher repairs the environment
   before its first request. The same frozen store would have broken hub
   metadata and model downloads from the server process.
+- **Name**: the app is FusedBot (bundle `FusedBot.app`, DMG
+  `FusedBot-<ver>.dmg`; window titles, main menu, menu-bar title, page title,
+  update banner, TCC prompts and notification fallback all say FusedBot);
+  identifiers unchanged — package `fused_render_app`, bundle id
+  `io.fused.render.app`, `render-app://`, `FUSED_RENDER_*`,
+  `~/.fused-render-app`, the manifest URL, the cask token `render-app`, the
+  `RenderAppWindow` frame names and the `RenderApp/<ver>` UA marker. An
+  in-app update keeps the installed bundle's path (an existing
+  `RenderApp.app` stays put); the release workflow reads the version from
+  either DMG name.
+- **Icon**: the bots' orange "cloud" face on a dark rounded square,
+  hand-written as `static/fusedbot-icon.svg` and rendered by
+  `scripts/render_icons.py` (resvg) to
+  `static/fusedbot-icon-1024.png` — build_dmg.sh resizes that into the
+  `.icns` — plus the 64 px favicon (`/favicon.ico`, bots.html) and the
+  menu-bar template `static/menubar.png` / `menubar@2x.png` from
+  `static/menubar.svg`.
+- **Menu-bar dock**: the menu-bar item lists Pinned (pinned bots, then apps
+  pinned from the app viewer's ⋯ "Pin to menu bar"), Recent bots (3) and
+  Recent apps (3) above Open FusedBot / Tasks / Open in browser / Open app
+  logs / Quit; a bot opens selected in a FusedBot window, an app in its own.
+  `bots/dock.py`, `GET /api/dock`, `POST /api/dock/pin`; app pins in
+  `~/.fused-render-app/bots/dock.json`.
 
 ## 0.10.3
 

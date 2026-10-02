@@ -1,7 +1,8 @@
 """The whole HTTP surface of fused-render-app, on the stdlib server.
 
 Pages
-  GET  /, /index.html       the Browser Bots page (static/shell-dist/bots.html)
+  GET  /, /index.html       the FusedBot (bots) page (static/shell-dist/bots.html)
+  GET  /favicon.ico         the 64 px FusedBot icon (static/fusedbot-icon-64.png)
   GET  /tasks, /chat, /explorer/*   fused-render's React shell (static/shell-dist/lite.html)
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
   GET  /embed?path=<abs>    the same, for an existing .html/.htm file only (no folder redirect)
@@ -29,6 +30,8 @@ API (the six supported fused.* calls, plus what the shell needs)
                                                404 when no update manager runs (dev server, CLI)
   GET  /api/prefs, /api/config, /api/current-apps, POST /api/current-apps/*   what the React shell reads
   /api/bots/*, /api/apps/*  Browser Bots (bots/routes.py, docs/BOT-APP.md §3)
+  GET  /api/dock                               the menu-bar dock: {pinned, recent_bots, recent_apps}
+  POST /api/dock/pin        {dir, pinned}      -> {ok, pinned_apps}   (bots/dock_routes.py)
   fused.daemon (background_routes.py, copied from fused-render):
   GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
   POST /api/apps/background/start|stop|restart {html}     /autostart {html, autostart}
@@ -85,6 +88,7 @@ from fused_render_app.routes import queue_events as queue_events_routes
 from fused_render_app.routes import schedule as schedule_routes
 from fused_render_app.routes import tasks as tasks_routes
 from fused_render_app.bots import routes as bots_routes  # noqa: E402
+from fused_render_app.bots import dock_routes  # noqa: E402
 import fused_render_app.bots.registry as bots_registry  # noqa: E402
 
 AI_ROUTER = APIRouter()
@@ -104,10 +108,13 @@ AI_ROUTER.include_router(drafts_routes.router)
 AI_ROUTER.include_router(claude_artifacts_routes.router)
 # Browser Bots: /api/bots/* and /api/apps/* (docs/BOT-APP.md §3).
 AI_ROUTER.include_router(bots_routes.router)
+# The menu-bar dock's lists and the apps' "Pin to menu bar" (bots/dock.py).
+AI_ROUTER.include_router(dock_routes.router)
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+FAVICON_NAME = "fusedbot-icon-64.png"  # served at /favicon.ico (and /static/…)
 MAX_DROP_BYTES = 1024 * 1024 * 1024
 _HEAD_RE = re.compile(r"<head[^>]*>", re.I)
 
@@ -259,7 +266,9 @@ class Handler(BaseHTTPRequestHandler):
 
                 return self._json({"apps": current_apps.list_apps()})
             if route == "/favicon.ico":
-                return self._send(204, b"", "image/x-icon")
+                # The FusedBot mark, for any page that does not name its own
+                # icon (bots.html links /static/fusedbot-icon-64.png itself).
+                return self._favicon()
             if route == "/api/apps/background/status":
                 return background_routes.status(self, q)
             if route == "/api/apps/background/running":
@@ -370,6 +379,16 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         self._send(200, data, ctype)
 
+    def _favicon(self) -> None:
+        """`/favicon.ico`: the 64 px FusedBot icon as PNG (every browser takes
+        a PNG under that name). 204 if the file is missing, as before."""
+        try:
+            with open(os.path.join(STATIC_DIR, FAVICON_NAME), "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._send(204, b"", "image/x-icon")
+        self._send(200, data, "image/png", {"Cache-Control": "max-age=86400"})
+
     @staticmethod
     def _config() -> dict:
         """`GET /api/config`: what fused-render's React shell reads at boot
@@ -410,8 +429,8 @@ class Handler(BaseHTTPRequestHandler):
         into `static/shell-dist/bots.html`. Not built: a 503 HTML page saying how."""
         path = os.path.join(STATIC_DIR, "shell-dist", "bots.html")
         if not os.path.isfile(path):
-            return self._html("<!doctype html><meta charset=\"utf-8\"><title>Browser Bots</title>"
-                              "<p>Browser Bots page not built "
+            return self._html("<!doctype html><meta charset=\"utf-8\"><title>FusedBot</title>"
+                              "<p>FusedBot page not built "
                               "(fused_render_app/static/shell-dist/bots.html missing). "
                               "Run scripts/build_shell.sh.</p>", 503)
         with open(path, "r", encoding="utf-8") as f:

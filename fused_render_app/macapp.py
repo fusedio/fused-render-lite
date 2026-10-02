@@ -1,14 +1,20 @@
-"""macOS app shell: the HTTP server on a thread, a menu-bar item, and the
-app's own windows (mainwindow.py) — the Browser Bots page (``/``) and the
+"""macOS app shell of FusedBot: the HTTP server on a thread, a menu-bar item,
+and the app's own windows (mainwindow.py) — the bots page (``/``) and the
 Tasks page in native windows, any number of them, all on the one server. The
 default browser is only ever an explicit "Open in browser".
+
+The menu-bar item is a small dock (bots/dock.py): pinned bots and apps, the
+three most recent bots, the three most recent apps, then the fixed items
+(Open FusedBot, Tasks, Open in browser, Open app logs, Quit). rumps has no
+"menu will open" hook, so a 5-second timer re-reads the lists and rebuilds the
+menu only when they changed.
 
 Launch order matters: the AppKit run loop starts first and the server boots
 in the background after it; the first window opens once the server answers.
 
 Opening a ``.fused`` (Finder double-click, ``render-app://`` link, argv) is
 no longer a feature: the document type and URL scheme stay registered for
-now, and any such open just shows the Browser Bots window.
+now, and any such open just shows the FusedBot window.
 
 A second launch (a CLI-style ``open -a`` while the app already runs) finds the
 live server through the pidfile and hands over to the running app via
@@ -25,10 +31,12 @@ import socket
 import subprocess
 import sys
 import threading
+import urllib.parse
 import urllib.request
 import webbrowser
 
 from fused_render_app import __version__, appfile, fetch, paths, server
+from fused_render_app.bots import dock as bots_dock
 from fused_render_app.cli import open_url
 from fused_render_app.update import mac as mac_update
 
@@ -40,6 +48,8 @@ BUNDLE_ID = "io.fused.render.app"  # must match scripts/setup_py2app.py
 # to finalise (~1.4 s each measured), short enough that logout does not show
 # "app not responding" while ScreenCaptureKit stalls (up to ~135 s per stop).
 QUIT_STOP_BUDGET_S = 20.0
+# How often the menu-bar dock re-reads its lists (see the module docstring).
+DOCK_REFRESH_S = 5
 
 
 def _is_alive(pid: int) -> bool:
@@ -91,6 +101,30 @@ def pick_port(start: int = DEFAULT_PORT, tries: int = 20) -> int:
     return 0  # let the OS pick
 
 
+def _menubar_image(path: str):
+    """The menu-bar template icon as ONE NSImage carrying both
+    representations — ``menubar.png`` (36 px) and ``menubar@2x.png`` (72 px)
+    — at rumps's 20×20 pt, so a Retina menu bar draws the 72 px one instead of
+    upscaling the 36 (rumps itself loads only the single file it is given).
+    None when neither file loads; the caller keeps rumps's own image then."""
+    try:
+        from AppKit import NSImage, NSImageRep
+
+        image = NSImage.alloc().initWithSize_((20, 20))
+        for p in (path, path[:-len(".png")] + "@2x.png"):
+            if os.path.isfile(p):
+                for rep in NSImageRep.imageRepsWithContentsOfFile_(p) or ():
+                    rep.setSize_((20, 20))
+                    image.addRepresentation_(rep)
+        if not image.representations():
+            return None
+        image.setTemplate_(True)
+        return image
+    except Exception:  # noqa: BLE001 — cosmetic; rumps's single-file image stands
+        logger.debug("menu-bar icon: @2x image not built", exc_info=True)
+        return None
+
+
 def _install_window_hooks(manager) -> None:
     """`server.native_hooks` for the window manager, callable from the HTTP
     thread: each hook hops to the main thread itself and returns at once,
@@ -115,7 +149,7 @@ def main() -> None:
 
     # Files or links handed on argv (open -a … file, a CLI-style launch).
     # Opening them is no longer a feature (module docstring): they are only
-    # logged, and the launch shows the Browser Bots window like any other.
+    # logged, and the launch shows the FusedBot window like any other.
     argv_ignored = [a for a in sys.argv[1:]
                     if fetch.url_from_link(a)
                     or (a.lower().endswith(".fused") and os.path.isfile(a)) or appfile.is_app_dir(a)]
@@ -164,7 +198,7 @@ def main() -> None:
         AppHelper.callAfter(manager.open, target)
 
     def show_home() -> None:
-        """Focus a Browser Bots window, or open a new one if none is open."""
+        """Focus a FusedBot window, or open a new one if none is open."""
         manager = state["windows"]
         if manager is None:
             webbrowser.open(open_url(port, None))
@@ -175,10 +209,10 @@ def main() -> None:
 
     def open_file(what: str) -> None:
         """A Finder / URL-scheme open of a .fused, a folder app or a link.
-        Opening those is no longer a feature: log it and show the Browser
-        Bots window. Before readiness, nothing — the startup window opens
-        once the server answers."""
-        logger.info("opening .fused files is no longer a feature; showing Browser Bots for %s", what)
+        Opening those is no longer a feature: log it and show the FusedBot
+        window. Before readiness, nothing — the startup window opens once
+        the server answers."""
+        logger.info("opening .fused files is no longer a feature; showing FusedBot for %s", what)
         if state["ready"]:
             show_home()
 
@@ -203,7 +237,7 @@ def main() -> None:
     rumps.rumps.NSApp.application_openURLs_ = application_openURLs_
 
     # Dock click / Finder double-click on the running app: bring the front
-    # window forward, or open Browser Bots if every window was closed. Before
+    # window forward, or open FusedBot if every window was closed. Before
     # readiness, nothing: the startup window is on its way.
     def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
         if state["ready"]:
@@ -229,9 +263,18 @@ def main() -> None:
             quit_app(None)
             return
         _write_pidfile(actual)
+        state["port"] = actual
         if state["windows"] is not None:
             state["windows"].set_port(actual)
         logger.info("server ready on port %s", actual)
+        # The menu-bar dock once more now the server is up (it was first
+        # built at kickoff; the timer keeps it fresh from here).
+        try:
+            from PyObjCTools import AppHelper
+
+            AppHelper.callAfter(app.refresh_dock)
+        except Exception:  # noqa: BLE001 — the timer covers it
+            logger.debug("dock refresh after ready not queued", exc_info=True)
         # The in-app updater (update/mac.py): a background manifest check
         # read through GET /api/update. No-op outside a bundle, and guarded
         # like everything else — no updates is a lesser outcome than no app.
@@ -239,7 +282,7 @@ def main() -> None:
             mac_update.start()
         except Exception:  # noqa: BLE001
             logger.exception("update manager unavailable")
-        # The Browser Bots window (`/`). Queued BEFORE the ready flip: an
+        # The FusedBot window (`/`). Queued BEFORE the ready flip: an
         # open or reopen event landing right after it then finds this window
         # (both hop to the main thread in order) instead of opening a second.
         # FUSED_RENDER_APP_NO_BROWSER keeps its name: "open no surface at
@@ -331,35 +374,108 @@ def main() -> None:
 
     icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "menubar.png")
 
+    def live_port() -> int:
+        return state.get("port") or port
+
+    def open_bot(bid: str) -> None:
+        """A bot item of the menu-bar dock: that bot, selected, in a FusedBot
+        window (an open one is pointed at it). Main thread (a menu click)."""
+        manager = state.get("windows")
+        if manager is None:
+            webbrowser.open(f"http://127.0.0.1:{live_port()}/?bot={urllib.parse.quote(bid, safe='')}")
+            return
+        manager.show_bot(bid)
+
+    def open_dock_app(app_dir: str) -> None:
+        """An app item of the menu-bar dock: the app in its own window."""
+        path = bots_dock.app_render_path(app_dir)
+        manager = state.get("windows")
+        if manager is None:
+            webbrowser.open(f"http://127.0.0.1:{live_port()}{path}")
+            return
+        manager.show_url(path)
+
+    def open_tasks(_sender) -> None:
+        manager = state.get("windows")
+        if manager is not None:
+            manager.show_tasks()
+        else:
+            webbrowser.open(f"http://127.0.0.1:{live_port()}/tasks")
+
     class App(rumps.App):
+        """The menu-bar item. Every item is a `rumps.MenuItem` with its own
+        callback — not `@rumps.clicked`, whose title bindings are applied once
+        at `run()` and would be lost on the first rebuild."""
+
         def __init__(self):
-            super().__init__("Render App", icon=icon if os.path.isfile(icon) else None,
+            super().__init__("FusedBot", icon=icon if os.path.isfile(icon) else None,
                              template=True, quit_button=None)
-            self.menu = ["Open in app", "Tasks", "Open in browser", "Open app logs", "Quit"]
+            if os.path.isfile(icon):
+                # Read by rumps at run() (its delegate sees this __dict__).
+                self._icon_nsimage = _menubar_image(icon) or self._icon_nsimage
+            self._fixed = [
+                rumps.MenuItem("Open FusedBot", callback=lambda _s: show_home()),
+                rumps.MenuItem("Tasks", callback=open_tasks),
+                rumps.MenuItem("Open in browser", callback=lambda _s: webbrowser.open(open_url(live_port(), None))),
+                rumps.MenuItem("Open app logs",
+                               callback=lambda _s: subprocess.run(["open", "-R", paths.log_path()], check=False)),
+                rumps.MenuItem("Quit", callback=quit_app),
+            ]
+            self._dock_items: list = []
+            self._dock_snapshot = None
+            self._dock_failures = 0
+            self.menu = self._fixed
 
-        @rumps.clicked("Open in app")
-        def open_in_app(self, _sender):
-            show_home()
+        def refresh_dock(self, _timer=None) -> None:
+            """Re-read the dock's lists (bot.json files, the apps folder: a
+            few stats and small reads) and rebuild the menu only when what it
+            would show changed, so the 5-second tick is a no-op almost always
+            and an open menu is not churned. Main thread (rumps.Timer)."""
+            try:
+                items = bots_dock.dock_menu_items(bots_dock.entries())
+            except Exception:  # noqa: BLE001 — a broken home must not kill the menu
+                self._dock_failures += 1
+                if self._dock_failures == 1 or self._dock_failures % 120 == 0:
+                    logger.exception("menu-bar dock refresh failed (%d so far)", self._dock_failures)
+                return
+            self._dock_failures = 0
+            if items == self._dock_snapshot:
+                return
+            self._dock_snapshot = items
+            self._rebuild(items)
+            logger.info("menu-bar dock rebuilt: %s",
+                        " | ".join(t for t, kind, _ in items if kind != "separator") or "(empty)")
 
-        @rumps.clicked("Tasks")
-        def open_tasks(self, _sender):
-            manager = state.get("windows")
-            if manager is not None:
-                manager.show_tasks()
-            else:
-                webbrowser.open(f"http://127.0.0.1:{port}/tasks")
-
-        @rumps.clicked("Open in browser")
-        def open_browser(self, _sender):
-            webbrowser.open(open_url(port, None))
-
-        @rumps.clicked("Open app logs")
-        def open_logs(self, _sender):
-            subprocess.run(["open", "-R", paths.log_path()], check=False)
-
-        @rumps.clicked("Quit")
-        def quit(self, _sender):
-            quit_app(_sender)
+        def _rebuild(self, items: list) -> None:
+            # rumps keeps a sender -> callback map on its delegate class and
+            # never prunes it; drop the dock items being replaced.
+            registry_map = getattr(rumps.rumps.NSApp, "_ns_to_py_and_callback", None)
+            if isinstance(registry_map, dict):
+                for old in self._dock_items:
+                    registry_map.pop(getattr(old, "_menuitem", None), None)
+            built: list = []
+            under_header = False
+            for title, kind, payload in items:
+                if kind == "separator":
+                    built.append(rumps.separator)
+                    under_header = False
+                    continue
+                if kind == "header":
+                    item = rumps.MenuItem(title)  # no callback: a greyed section label
+                    under_header = True
+                elif kind == "bot":
+                    item = rumps.MenuItem(title, callback=lambda _s, bid=payload: open_bot(bid))
+                else:
+                    item = rumps.MenuItem(title, callback=lambda _s, d=payload: open_dock_app(d))
+                if under_header and kind != "header":
+                    try:
+                        item._menuitem.setIndentationLevel_(1)
+                    except Exception:  # noqa: BLE001 — cosmetic
+                        pass
+                built.append(item)
+            self._dock_items = [i for i in built if isinstance(i, rumps.MenuItem)]
+            self.menu.clear()
+            self.menu = built + self._fixed
 
     app = App()
 
@@ -387,6 +503,12 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 logger.exception("job notifications unavailable")
             _install_window_hooks(state["windows"])
+        # The menu-bar dock: built now (it reads files only, no server
+        # needed), then refreshed every DOCK_REFRESH_S — rumps has no
+        # will-open hook, and an unchanged list costs no rebuild.
+        app.refresh_dock()
+        app.dock_timer = rumps.Timer(app.refresh_dock, DOCK_REFRESH_S)
+        app.dock_timer.start()
         threading.Thread(target=bootstrap, daemon=True).start()
 
     # Held on `app`: an unreferenced rumps.Timer is collected before it fires.

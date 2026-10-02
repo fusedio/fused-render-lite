@@ -14,25 +14,25 @@ describe("describeUpdate", () => {
     ["idle after a failed check", st({ check_error: "timed out" }), null],
     ["checking", st({ state: "checking" }), null],
     ["available", st({ state: "available", latest_version: "0.12.0" }), {
-      tone: "info", text: "Browser Bots 0.12.0 is available", sub: "You have 0.11.0",
+      tone: "info", text: "FusedBot 0.12.0 is available", sub: "You have 0.11.0",
       action: { kind: "install", label: "Update" }, progress: null }],
     ["available, check-only dev manager", st({ state: "available", latest_version: "0.12.0", check_only: true }), {
-      tone: "info", text: "Browser Bots 0.12.0 is available", sub: "Dev run: updates install only in the packaged app",
+      tone: "info", text: "FusedBot 0.12.0 is available", sub: "Dev run: updates install only in the packaged app",
       action: null, progress: null }],
     ["downloading, size known", st({ state: "installing", phase: "downloading", latest_version: "0.12.0", progress: 1048576 * 20, progress_total: 1048576 * 80 }), {
-      tone: "info", text: "Downloading Browser Bots 0.12.0", sub: "20.0 MB of 80.0 MB",
+      tone: "info", text: "Downloading FusedBot 0.12.0", sub: "20.0 MB of 80.0 MB",
       action: { kind: "cancel", label: "Cancel" }, progress: { fraction: 0.25 } }],
     ["downloading, size unknown", st({ state: "installing", phase: "downloading", latest_version: "0.12.0", progress: 1048576 * 3 }), {
-      tone: "info", text: "Downloading Browser Bots 0.12.0", sub: "3.0 MB",
+      tone: "info", text: "Downloading FusedBot 0.12.0", sub: "3.0 MB",
       action: { kind: "cancel", label: "Cancel" }, progress: { fraction: null } }],
     ["downloading, first byte not in yet", st({ state: "installing", phase: "downloading", latest_version: "0.12.0", progress: 0 }), {
-      tone: "info", text: "Downloading Browser Bots 0.12.0", sub: "",
+      tone: "info", text: "Downloading FusedBot 0.12.0", sub: "",
       action: { kind: "cancel", label: "Cancel" }, progress: { fraction: null } }],
     ["installing (swap, not cancellable)", st({ state: "installing", phase: "installing", latest_version: "0.12.0" }), {
-      tone: "info", text: "Installing Browser Bots 0.12.0…", sub: "", action: null, progress: { fraction: null } }],
+      tone: "info", text: "Installing FusedBot 0.12.0…", sub: "", action: null, progress: { fraction: null } }],
     ["installed", st({ state: "installed", latest_version: "0.12.0" }), {
-      tone: "info", text: "Browser Bots 0.12.0 is installed", sub: "Restart to finish",
-      action: { kind: "relaunch", label: "Restart Browser Bots" }, progress: null }],
+      tone: "info", text: "FusedBot 0.12.0 is installed", sub: "Restart to finish",
+      action: { kind: "relaunch", label: "Restart FusedBot" }, progress: null }],
     ["install failed", st({ state: "error", latest_version: "0.12.0", error: "not enough free disk space to download the update" }), {
       tone: "err", text: "Update failed: not enough free disk space to download the update", sub: "",
       action: { kind: "retry", label: "Retry" }, progress: null }],

@@ -1,7 +1,7 @@
-"""Browser Bots' windows — native NSWindows hosting the pages, not browser tabs.
+"""FusedBot's windows — native NSWindows hosting the pages, not browser tabs.
 
 Before this module the macOS app was a menu-bar process that pushed every
-surface into the default browser. Now each (the Browser Bots page at `/`,
+surface into the default browser. Now each (the bots page at `/`,
 the Tasks page, an app a page opens) is a window of this app: an `NSWindow`
 whose content view is a `WKWebView` pointed at the one in-process server.
 Any number of windows, all on that one server, sharing one
@@ -36,6 +36,7 @@ surface. Every method must run on the main thread; `macapp.py` hops with
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -100,10 +101,12 @@ from fused_render_app.cli import open_url
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "Browser Bots"
+APP_NAME = "FusedBot"
 DEFAULT_SIZE = (1200, 800)
 MIN_SIZE = (560, 360)
 # Rides on WebKit's own UA so a page can tell "inside the app" from "a browser".
+# An identifier, not a display name: it keeps the old spelling so a page that
+# sniffs it keeps working across the FusedBot rename.
 USER_AGENT_MARKER = f"RenderApp/{__version__}"
 
 _SHIFT = 1 << 17
@@ -117,7 +120,7 @@ def _nsurl(url: str):
 
 def app_file_of(url: str | None) -> str | None:
     """The absolute app path a window URL names (``/open?_file=…``), or None
-    for the Browser Bots page and everything else. The ``/open`` page is
+    for the bots page and everything else. The ``/open`` page is
     gone, so today every window answers None; kept because `jobnotify`'s
     banner click and `focus_or_open` key windows on it."""
     if not url:
@@ -869,7 +872,7 @@ class WindowManager:
     def reopen(self) -> None:
         """A macOS Dock-icon click on the running app: the front window if
         there is one (whatever it shows — the user put it there), else a
-        fresh Browser Bots window."""
+        fresh FusedBot window."""
         front = self.front()
         if front is not None:
             front.show()
@@ -893,9 +896,9 @@ class WindowManager:
         self.open(self.tasks_url)
 
     def show_home(self) -> None:
-        """The menu-bar "Open in app": a window not showing an app file (the
-        Browser Bots page, Tasks, …) comes to the front — the key/front one
-        if several — otherwise a fresh Browser Bots window opens."""
+        """The menu-bar "Open FusedBot": a window not showing an app file (the
+        bots page, Tasks, …) comes to the front — the key/front one if
+        several — otherwise a fresh FusedBot window opens."""
         homes = [w for w in self._windows if not w.app_file]
         if homes:
             win = homes[-1]
@@ -906,6 +909,41 @@ class WindowManager:
             win.show()
         else:
             self.open(self.home_url)
+
+    def show_url(self, path: str) -> _Window:
+        """A page of this server by ``path`` (``/render?path=…``): a window
+        already showing exactly that URL comes to the front, else a new one
+        opens. The menu-bar dock's app items. Main thread."""
+        url = f"http://127.0.0.1:{self.port}{path}"
+        for w in reversed(self._windows):
+            if w.current_url() == url:
+                w.show()
+                return w
+        return self.open(url)
+
+    def show_bot(self, bid: str) -> _Window:
+        """The menu-bar dock's bot items: select bot ``bid`` in a bots-page
+        window. An open one (the key/front one if several) is pointed at the
+        bot in place — ``?bot=`` rewritten and the page's own
+        ``fused:urlchange`` listener (frontend state/store.ts) follows it, no
+        reload — else a new window opens on ``/?bot=<id>``, which the page
+        reads at boot. Main thread."""
+        homes = [w for w in self._windows
+                 if not w.app_file and urllib.parse.urlsplit(w.current_url() or "").path in ("/", "/index.html")]
+        win = None
+        for w in reversed(homes):
+            if w is self.key() or w is self.front():
+                win = w
+                break
+        win = win or (homes[-1] if homes else None)
+        if win is None:
+            return self.open(f"{self.home_url.rstrip('/')}/?bot={urllib.parse.quote(bid, safe='')}")
+        js = ("(function(){var u=new URL(location.href);u.searchParams.set('bot',%s);"
+              "history.replaceState(history.state,'',u.href);"
+              "window.dispatchEvent(new Event('fused:urlchange'));})();" % json.dumps(bid))
+        win.webview.evaluateJavaScript_completionHandler_(js, None)
+        win.show()
+        return win
 
     def has_windows(self) -> bool:
         return bool(self._windows)
@@ -928,7 +966,7 @@ class WindowManager:
 
     def focus_or_open(self, fs_path: str) -> _Window:
         """An app already open comes to the front (its most recently used
-        window if several). Otherwise the Browser Bots window: there is no
+        window if several). Otherwise the FusedBot window: there is no
         page that opens a .fused any more."""
         win = self.window_for(fs_path)
         if win is not None:

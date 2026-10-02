@@ -2,7 +2,7 @@
 
 A silent background loop checks the signed manifest and surfaces a newer
 version only through `GET /api/update` (the old launcher page's banner was its
-reader; no page in the Browser Bots app shows it yet). Nothing interrupts an
+reader; the FusedBot page's update banner reads it now). Nothing interrupts an
 open window. Downloading and installing happen solely on an explicit
 `POST /api/update/install`.
 
@@ -10,7 +10,7 @@ ONE install path: download the signed DMG, verify it, and swap the .app
 bundle in place. Replacing the bundle under a running process is the same
 thing a manual DMG drag does; the running process keeps its open files on the
 old inode, `status()` notices the bundle on disk is now the new version and
-reports "installed", and the banner offers "Restart Render App"
+reports "installed", and the banner offers "Restart FusedBot"
 (`POST /api/update/relaunch`), which quits through the normal teardown and
 respawns from the bundle now on disk.
 
@@ -78,7 +78,14 @@ MIN_CHECK_GAP_S = 60.0
 # each firing check-on-return during an outage must not each cost a 15-second
 # fetch.
 FAILED_CHECK_GAP_S = 5.0
-_DOWNLOAD_PREFIX = "RenderApp-"
+# Only the temp-file prefix of the download in <home>/updates (mkstemp). No
+# manifest URL or DMG name is ever matched against it: `_find_app` takes the
+# image's one .app and `_verify_app` checks its bundle id, so a manifest still
+# naming a pre-rename RenderApp-<ver>.dmg installs exactly like a
+# FusedBot-<ver>.dmg one. The swap keeps the installed bundle's own path
+# (an existing RenderApp.app stays RenderApp.app; the next fresh DMG install
+# is FusedBot.app).
+_DOWNLOAD_PREFIX = "FusedBot-"
 _DOWNLOAD_SUFFIX = ".dmg"
 # The download and the staged .app copy coexist briefly during the swap.
 _DISK_SPACE_FACTOR = 3
@@ -440,7 +447,7 @@ class UpdateManager:
             self._progress_total = None
         mount = None
         old = None
-        swap_in = os.path.join(parent, ".RenderApp-update.app")
+        swap_in = os.path.join(parent, ".FusedBot-update.app")
         try:
             mount = self._attach(dmg)
             source = self._find_app(mount)
@@ -457,7 +464,7 @@ class UpdateManager:
             # Both renames happen inside `parent`, so each is atomic on the
             # volume; the running process keeps its open files on the old
             # inode.
-            old = os.path.join(parent, f".RenderApp-old-{os.getpid()}.app")
+            old = os.path.join(parent, f".FusedBot-old-{os.getpid()}.app")
             os.rename(bundle, old)
             try:
                 os.rename(swap_in, bundle)

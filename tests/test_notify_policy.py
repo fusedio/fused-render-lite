@@ -192,7 +192,7 @@ def test_identifier_stable_across_start_and_terminal():
 
 
 def test_title_hygiene():
-    assert np.decide(None, rec(MODEL, title="  \n ")).title == "Render App"
+    assert np.decide(None, rec(MODEL, title="  \n ")).title == "FusedBot"
     assert np.decide(None, rec(MODEL, title="\n a   b \nc")).title == "a b"
     t = np.decide(None, rec(MODEL, title="x" * 200)).title
     assert len(t) == 80 and t.endswith("…")

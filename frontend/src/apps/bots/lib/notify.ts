@@ -26,12 +26,12 @@ export function notifyEvents(bot: Bot, evs: BotEvent[]): void {
   }
 }
 
-/** "? Browser Bots" when another bot waits on you, "(n) Browser Bots" for n bots with unread messages. */
+/** "? FusedBot" when another bot waits on you, "(n) FusedBot" for n bots with unread messages. */
 export function updateTitle(): void {
   const S = getState();
   const n = S.bots.reduce((a, b) => a + (unreadCount(b) ? 1 : 0), 0);
   const q = S.bots.some((b) => b.status === "waiting" && b.id !== S.sel);
-  document.title = (q ? "? " : n ? `(${n}) ` : "") + "Browser Bots";
+  document.title = (q ? "? " : n ? `(${n}) ` : "") + "FusedBot";
 }
 
 /** Install the first-click permission ask and the visibility handler. Returns the teardown. */
