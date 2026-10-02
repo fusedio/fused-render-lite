@@ -3,10 +3,10 @@
 // Confirms queue: a second ask while one is up waits its turn instead of orphaning the first promise.
 import { useSyncExternalStore } from "react";
 import type { Face } from "../lib/api";
-import { faceOf, type FaceSubject } from "../lib/face";
+import { faceOf, type FaceDraft, type FaceSubject } from "../lib/face";
 
 export interface ConfirmReq { id: number; title: string; text: string; okLabel: string; danger: boolean; resolve: (v: boolean) => void }
-export interface FacePickReq { id: number; draft: { shape: string; color: string }; onPick?: (f: Face) => void; resolve: (f: { shape: string; color: string }) => void }
+export interface FacePickReq { id: number; draft: FaceDraft; onPick?: (f: Face) => void; resolve: (f: FaceDraft) => void }
 
 let confirms: ConfirmReq[] = [], pick: FacePickReq | null = null, seq = 0;
 const listeners = new Set<() => void>();
@@ -25,14 +25,14 @@ export function settleConfirm(id: number, v: boolean): void {
 export const useConfirm = (): ConfirmReq | null => useSyncExternalStore(subscribe, () => confirms[0] || null, () => confirms[0] || null);
 
 /** Face picker: every pick repaints and calls onPick; Done, Enter, Escape or the backdrop resolve with the draft. */
-export function pickFace(b: FaceSubject, onPick?: (f: Face) => void): Promise<{ shape: string; color: string }> {
+export function pickFace(b: FaceSubject, onPick?: (f: Face) => void): Promise<FaceDraft> {
   return new Promise((resolve) => {
     if (pick) pick.resolve({ ...pick.draft });  // one picker at a time
     pick = { id: ++seq, draft: { ...faceOf(b) }, onPick, resolve }; emit();
   });
 }
 /** A swatch was picked: update the draft and tell the opener. */
-export function updatePick(patch: Partial<{ shape: string; color: string }>): void {
+export function updatePick(patch: Partial<FaceDraft>): void {
   if (!pick) return;
   pick = { ...pick, draft: { ...pick.draft, ...patch } }; emit();
   pick.onPick?.({ ...pick.draft });

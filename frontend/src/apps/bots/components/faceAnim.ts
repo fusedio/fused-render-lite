@@ -3,7 +3,7 @@
 // selected bot, emoji reactions, pointer-tracking eyes and the picker's mood cycle. Off under reduced motion.
 // A module singleton: the roots are found by id at call time, like OpenBot's document.querySelectorAll.
 import { useEffect } from "react";
-import { animate, createTimeline, stagger, svg } from "animejs";
+import { animate as animeAnimate, createTimeline, stagger, svg, type AnimationParams, type TargetsParam } from "animejs";
 import type { Bot } from "../lib/api";
 import { FACE_RX, MOODS, PICK_CYCLE, fkey, moodOf, type FaceAction, type Mood } from "../lib/face";
 import { cur, useBotsSelector } from "../state/store";
@@ -13,6 +13,8 @@ type Actions = { q: (s: string) => NodeListOf<Element>; pose: (m: Mood, duration
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const blend = { composition: "blend" } as const;
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+// Brand faces have no eyes or tear: animating an empty selection makes anime warn, so those calls become no-ops.
+const animate = (t: NodeListOf<Element>, o: Parameters<typeof animeAnimate>[1]) => (t.length ? animeAnimate(t, o) : null);
 let lastMouse = 0;  // when the pointer last moved; the random glance yields to eye tracking while it is fresh
 
 function mk(...roots: string[]): Actions {
@@ -40,14 +42,15 @@ function mk(...roots: string[]): Actions {
     spin: () => {
       const rib = q(".ribbons path"); if (!rib.length) return;
       for (const g of q(".sparks g")) { const a = rnd(0, 6.28), r = rnd(40, 52); g.setAttribute("transform", `translate(${50 + r * Math.cos(a)} ${50 + r * Math.sin(a)})`); }
-      createTimeline({ defaults: { ease: "inOutSine" } })
-        .add(q(".eye"), { translateX: 16, scaleX: 0, duration: 220, ease: "inQuad" })
-        .add(q(".face"), { translateY: [0, -14, 0, -4, 0], duration: 1000, ease: "inOutQuad" }, 0)
-        .add(q(".body"), { scaleX: [1, .72, 1.12, .96, 1], scaleY: [1, 1.12, .84, 1.03, 1], rotate: [0, -12, 6, 0], duration: 1100, ease: "outElastic(1, .6)" }, 0)
-        .add(q(".ribbons"), { opacity: [1, 1, 0], rotate: [40, -50], duration: 1100, ease: "outCubic" }, 80)
-        .add(svg.createDrawable(rib as NodeListOf<SVGGeometryElement>), { draw: ["0 0", "0 .55", ".6 1", "1 1"], strokeWidth: [5, 5, 2.5, 1], duration: 900, delay: stagger(70), ease: "inOutQuad" }, 100)
-        .add(q(".sparks path"), { scale: [0, 1.4, 0], rotate: [0, 180], opacity: [0, 1, 0], duration: 620, delay: stagger(50, { start: 520 }), ease: "outQuad" }, 0)
-        .add(q(".eye"), { translateX: [-16, 0], scaleX: [0, 1], skewX: 0, duration: 420, ease: "outBack(1.6)" }, 640);
+      const tl = createTimeline({ defaults: { ease: "inOutSine" } });
+      const add = (t: NodeListOf<Element> | SVGGeometryElement[], o: AnimationParams, at: number) => { if (t.length) tl.add(t as TargetsParam, o, at); };
+      add(q(".eye"), { translateX: 16, scaleX: 0, duration: 220, ease: "inQuad" }, 0);
+      add(q(".face"), { translateY: [0, -14, 0, -4, 0], duration: 1000, ease: "inOutQuad" }, 0);
+      add(q(".body"), { scaleX: [1, .72, 1.12, .96, 1], scaleY: [1, 1.12, .84, 1.03, 1], rotate: [0, -12, 6, 0], duration: 1100, ease: "outElastic(1, .6)" }, 0);
+      add(q(".ribbons"), { opacity: [1, 1, 0], rotate: [40, -50], duration: 1100, ease: "outCubic" }, 80);
+      add(svg.createDrawable(rib as NodeListOf<SVGGeometryElement>), { draw: ["0 0", "0 .55", ".6 1", "1 1"], strokeWidth: [5, 5, 2.5, 1], duration: 900, delay: stagger(70), ease: "inOutQuad" }, 100);
+      add(q(".sparks path"), { scale: [0, 1.4, 0], rotate: [0, 180], opacity: [0, 1, 0], duration: 620, delay: stagger(50, { start: 520 }), ease: "outQuad" }, 0);
+      add(q(".eye"), { translateX: [-16, 0], scaleX: [0, 1], skewX: 0, duration: 420, ease: "outBack(1.6)" }, 640);
     },
   };
 }

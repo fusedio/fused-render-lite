@@ -8,11 +8,14 @@ import { askConfirm } from "./ask";
 export interface BotDialogValue {
   name: string; model: string; effort: string; instructions: string; memory: string; approval: string; buildAccess: string;
   encrypt: boolean; profile: string; face: Face; imessage: string; imessageTo: string;
+  /** The preset key the bot was made from ("" for a blank bot, and always "" in Settings). */
+  preset: string;
 }
 
-/** "+ New bot": create, then the iMessage fields, the Chrome profile and the face; select it and drop focus into the composer. */
+/** "+ New bot": create (with the preset, whose playbooks the backend copies), then the iMessage fields, the Chrome
+ *  profile and the face; select it and drop focus into the composer. */
 export async function createBot(v: BotDialogValue): Promise<void> {
-  const r = await act(() => api.create({ name: v.name, model: v.model, effort: v.effort, instructions: v.instructions, approval: v.approval, build_access: v.buildAccess, encrypt: v.encrypt }));
+  const r = await act(() => api.create({ name: v.name, model: v.model, effort: v.effort, instructions: v.instructions, approval: v.approval, build_access: v.buildAccess, encrypt: v.encrypt, preset: v.preset || "" }));
   const id = r?.id;
   if (id && (v.imessage || v.imessageTo)) await act(() => api.settings(id, { name: v.name, imessage_handle: v.imessage, imessage_to: v.imessageTo }));
   if (id && v.profile) await act(() => api.profile(id, v.profile));

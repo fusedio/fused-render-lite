@@ -10,14 +10,16 @@ import { useSyncExternalStore } from "react";
 import { api, apiHooks, type Bot, type BotEvent, type ImessageState, type SlowCall, type UsageSummary } from "../lib/api";
 import { loadSeen, newMarkFor, saveSeen, unreadOf, unviewedOf } from "../lib/unread";
 import { notifyEvents, updateTitle } from "../lib/notify";
+import type { NewBotPick } from "../lib/presets";
 
 export { SLOW_MS, STALL_MS } from "../lib/api";
 
 // ------------------------------------------------------------------ shape ----
 export interface Toast { id: number; text: string; label: string; dot: string; ts: number; out: boolean }
 export interface BuildsChip { n: string; live: boolean; warn: boolean; fresh: boolean; title: string; hidden: boolean }
-/** A dialog another module asked for. Known kinds: newBot, settings, routines, skills, usage (dialogs/Dialogs.tsx owns them). */
-export interface DialogReq { kind: "newBot" | "settings" | "routines" | "skills" | "usage" | (string & {}); id?: string | null; [k: string]: unknown }
+/** A dialog another module asked for. Known kinds: newBot, settings, routines, skills, usage (dialogs/Dialogs.tsx owns them).
+ *  newBot without `pick` is the preset chooser (#pmodal); with `pick` it is the bot dialog filled in from that pick. */
+export interface DialogReq { kind: "newBot" | "settings" | "routines" | "skills" | "usage" | (string & {}); id?: string | null; pick?: NewBotPick; [k: string]: unknown }
 /** The bot context menu (components/BotMenu.tsx): openMenu(id, x, y, full, live, alignRight) in OpenBot. */
 export interface MenuReq { id: string; x: number; y: number; full?: boolean; live?: boolean; alignRight?: boolean }
 export type PanelName = "builds" | "apps";

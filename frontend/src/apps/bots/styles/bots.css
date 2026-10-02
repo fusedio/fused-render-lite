@@ -126,6 +126,7 @@ main > section { min-width: 0; }
 #fmodal .frow { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
 #fmodal .frow button { width: 56px; height: 56px; padding: 4px; border-radius: 50%; background: none; outline: 2px solid transparent; outline-offset: 3px; transition: .15s; }
 #fmodal #fcolors button { width: 34px; height: 34px; }
+#fmodal #fbrands { gap: 8px; } #fmodal #fbrands button { width: 40px; height: 40px; padding: 2px; }
 #fmodal .frow button svg { width: 100%; height: 100%; overflow: visible; display: block; }
 #fmodal .frow button[aria-pressed="true"] { outline-color: var(--text); } #fmodal .frow button:hover { transform: translateY(-2px); }
 #fmodal .row { align-self: stretch; }
@@ -449,6 +450,7 @@ body.sideapp .preview :is(.shotwrap, .toast, .cap, .info) { display: none; }
 .info .note { text-align: center; padding: 28px 12px 8px; font-size: 13px; line-height: 1.5; }
 .info .rt { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); }
 .info .rt:first-of-type { border-top: none; }
+.info .rt > a:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .info .rt span { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .info .rt small { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .info .rt.off { opacity: .55; }
@@ -456,6 +458,11 @@ body.sideapp .preview :is(.shotwrap, .toast, .cap, .info) { display: none; }
 .info a:hover, .info .lnk:hover { text-decoration: underline; background: none; }
 .info .fine { font-size: 11px; opacity: .75; }
 /* Inbox: one small card per artifact the bot produced (saved result, download, built app). */
+.info .inbox .cardrow { display: flex; align-items: center; margin: 0 -8px; }
+.info .inbox .cardrow .card { flex: 1; min-width: 0; margin: 0; }
+.info .rt .dl, .info .inbox .cardrow .dl { flex: none; width: 24px; height: 24px; margin-left: 2px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); text-decoration: none; font-size: 13px; opacity: 0; }
+.info .rt:hover .dl, .info .inbox .cardrow:hover .dl, .info .rt .dl:focus-visible, .info .inbox .cardrow .dl:focus-visible { opacity: 1; }
+.info .rt .dl:hover, .info .inbox .cardrow .dl:hover { background: var(--raised); color: var(--text); text-decoration: none; }
 .info .inbox .card { display: flex; gap: 10px; align-items: center; padding: 7px 8px; margin: 0 -8px; border-radius: 8px; color: var(--text); text-decoration: none; }
 .info .inbox .card:hover { background: var(--raised); text-decoration: none; }
 .info .inbox .card .ico { flex: none; width: 30px; height: 30px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 600; letter-spacing: .03em; color: var(--muted); }
@@ -620,7 +627,24 @@ body:is(.lcol, .lfit) .bots .botfoot { justify-content: center; padding: 8px 0 1
 #vpanel .winacts .kebab { display: inline-flex; align-items: center; padding: 4px 7px; }
 #vpanel .winacts .kebab svg { width: 16px; height: 16px; }
 #vpanel iframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
-.agrid { flex: 1; overflow: auto; padding: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; align-content: start; }
+.ascroll { flex: 1; overflow: auto; display: flex; flex-direction: column; }
+/* Starter apps: the apps OpenBot ships (starters/<key>), one small row above the gallery with an Install button each. */
+.astrip { padding: 14px 18px 0; display: flex; flex-direction: column; gap: 8px; }
+.astrip .ahd { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.astrip .ahd small { color: var(--muted); font-size: 11px; }
+.astrip .srow { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; }
+.scard .ico.ph { display: inline-flex; align-items: center; justify-content: center; background: var(--raised); color: var(--muted); font-size: 13px; }
+.scard { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
+.scard .ico { width: 28px; height: 28px; border-radius: 8px; flex: none; object-fit: cover; }
+.scard .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.scard .txt b { font-weight: 400; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scard .txt small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scard .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--inset); color: var(--muted); white-space: nowrap; flex: none; }
+.scard .badge.setup { background: rgba(240, 162, 50, .18); color: #c97a0a; }
+.scard .badge.ready { background: rgba(47, 143, 88, .18); color: #2f8f58; }
+.scard button { white-space: nowrap; flex: none; font-size: 11.5px; }
+.scard button[disabled] { opacity: .6; }
+.agrid { padding: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; align-content: start; }
 .agrid .empty { grid-column: 1 / -1; }
 .appcard { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; color: inherit; text-decoration: none; transition: transform .12s, box-shadow .12s, border-color .12s; }
 .appcard:hover { transform: translateY(-2px); border-color: var(--muted); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
@@ -637,6 +661,20 @@ body:is(.lcol, .lfit) .bots .botfoot { justify-content: center; padding: 8px 0 1
 /* Apps panel: dropping a zip anywhere on it imports the app (apps.js → importapp.py). */
 #apanel.drag { outline: 2px dashed var(--muted); outline-offset: -6px; }
 #apanel.busy .agrid { opacity: .5; pointer-events: none; }
+/* New-bot chooser: one card per preset (brand avatar, name, playbook count) plus Blank; the bot dialog follows with the pick filled in. */
+#pmodal .box { width: 480px; }
+#pmodal .psearch { display: block; position: relative; margin-top: 12px; }
+#pmodal .psearch input { width: 100%; box-sizing: border-box; background: var(--inset); border: none; border-radius: 12px; padding: 9px 12px 9px 34px; font: inherit; font-size: 13px; color: var(--text); }
+#pmodal .psearch input::placeholder { color: var(--muted); }
+#pmodal .psearch svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
+#pmodal .pgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px -8px 0; padding: 2px 8px 6px; max-height: 56vh; overflow: auto; }
+#pnone { margin-top: 10px; }
+#pmodal .pcard { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 6px 10px; border-radius: 14px; background: var(--inset); border: 2px solid transparent; color: var(--text); cursor: pointer; transition: .15s; }
+#pmodal .pcard:hover { border-color: var(--accent); transform: translateY(-2px); }
+#pmodal .pcard .av { width: 48px; height: 48px; margin-bottom: 4px; }
+#pmodal .pcard b { font-size: 13px; font-weight: 500; }
+#pmodal .pcard small { font-size: 11px; color: var(--muted); }
+#bmodal .preset { font-size: 11px; margin: -6px 0 10px; line-height: 1.4; }
 
 /* ==================================================================== Render App port adjustments ==== */
 /* React mounts into #root between <body> and OpenBot's <main>/#banner; body's flex column must see them directly. */

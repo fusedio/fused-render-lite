@@ -14,20 +14,25 @@ const KIND_LABEL: Record<string, string> = { save: "saved", download: "download"
 const ext = (n: string) => (/\.([a-z0-9]{1,5})$/i.exec(n)?.[1] || "").toUpperCase();
 
 // Inbox: what this bot produced for you (save results, downloads, built apps), newest first, one card each.
-// Cards link straight to the file on disk; "Open folder" reveals the bot's Inbox in Finder.
+// OpenBot opens a card's file in the explorer (/explorer/view/<path>); lite has no file explorer (that route opens
+// the chat here), so a card opens the raw file inline in a new tab instead (the browser shows what it can: images,
+// PDFs, text). A small ↓ beside each file card keeps the raw download. Built-app cards open the app, as before.
+// "Open folder" reveals the bot's Inbox in Finder.
 function InboxCard({ a }: { a: Artifact }) {
   const build = a.kind === "build";
   const sub = build ? "Built app" : `${KIND_LABEL[a.kind] || a.kind}${a.size ? " · " + fmtBytes(a.size) : ""}`;
   return (
-    <a className="card" href={build ? a.link || "#" : rawFileUrl(a.path)} download={build ? undefined : a.name}
-      target={build ? "_blank" : undefined} title={a.task || ""}>
-      <span className="ico">{build ? "⧉" : ext(a.name) || "•"}</span>
-      <span className="body">
-        <span className="nm">{build ? a.title || a.name : a.name}</span>
-        <span className="sub">{sub}{a.task ? " · " + a.task.slice(0, 60) : ""}</span>
-      </span>
-      <small>{fmtWhenShort(a.ts)}</small>
-    </a>
+    <span className="cardrow">
+      <a className="card" href={build ? a.link || "#" : rawFileUrl(a.path)} target="_blank" rel="noopener" title={a.task || ""}>
+        <span className="ico">{build ? "⧉" : ext(a.name) || "•"}</span>
+        <span className="body">
+          <span className="nm">{build ? a.title || a.name : a.name}</span>
+          <span className="sub">{sub}{a.task ? " · " + a.task.slice(0, 60) : ""}</span>
+        </span>
+        <small>{fmtWhenShort(a.ts)}</small>
+      </a>
+      {build ? null : <a className="dl" href={rawFileUrl(a.path)} download={a.name} title={`Download ${a.name}`} onClick={(e) => e.stopPropagation()}>↓</a>}
+    </span>
   );
 }
 
@@ -99,7 +104,13 @@ function Info({ b }: { b: Bot }) {
       {files.length ? (
         <section>
           <h4>Attached files</h4>
-          {files.map((d) => <div key={d.path} className="rt"><a href={rawFileUrl(d.path)} download={d.name} title={`${d.kind} · ${d.size} bytes`}>{d.name}</a></div>)}
+          {/* Same two links as an Inbox card: the name opens the file inline in a new tab, ↓ downloads it. */}
+          {files.map((d) => (
+            <div key={d.path} className="rt">
+              <a href={rawFileUrl(d.path)} target="_blank" rel="noopener" title={`${d.kind} · ${d.size} bytes`}>{d.name}</a>
+              <a className="dl" href={rawFileUrl(d.path)} download={d.name} title={`Download ${d.name}`}>↓</a>
+            </div>
+          ))}
         </section>
       ) : null}
       <Routines b={b} />

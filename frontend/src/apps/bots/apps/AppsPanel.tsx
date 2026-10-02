@@ -1,7 +1,7 @@
 // #apanel (OpenBot index.html + apps.js): a gallery of every fused app the builds have produced under the apps root,
 // shown while ui.panel === "apps". Each card is a live, scaled-down render of the app's entry page (a sandboxed lazy
 // iframe with _preview=1); clicking it opens the app full-size inside this page (#vpanel, AppViewer), with modifier
-// clicks keeping the plain /render link (new tab). Upload: a zipped fused app (Finder "Compress", a .fused export),
+// clicks keeping the plain /render link (new tab). Above the gallery, the starter apps strip (StartersStrip.tsx). Upload: a zipped fused app (Finder "Compress", a .fused export),
 // by button or dropped anywhere on the panel, is unpacked into a new folder (POST /api/apps/import). Esc steps back one
 // level: app → gallery → bots (never while the build dialog is open).
 import { useEffect, useRef, useState, type DragEvent, type MouseEvent } from "react";
@@ -10,6 +10,8 @@ import { errMsg, showBanner, useBotsSelector } from "../state/store";
 import { isBuildDialogOpen, newBuild } from "../builds/builds";
 import { agoShort, appEmbed, appOpenUrl, closeApps, closeView, getViewedApp, useAppsRoot, viewApp } from "./apps";
 import { AppViewer } from "./AppViewer";
+import { StartersStrip } from "./StartersStrip";
+import { needsStatus, starterRows, withStatus, type StarterRow } from "./starters";
 
 const UPLOAD_MAX = 64 * 1024 * 1024;
 const fileB64 = (f: File) => new Promise<string>((ok, no) => {
@@ -47,21 +49,40 @@ export function AppsPanel() {
   const [drag, setDrag] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null), fileRef = useRef<HTMLInputElement>(null);
   const seq = useRef(0);
+  const [starters, setStarters] = useState<StarterRow[]>([]);
+
+  // The starters list loads after the gallery (the two calls are chained, never in flight together); the slow status
+  // call follows only when some installed starter has a setup tool. A failed status leaves every badge at "Installed".
+  const loadStarters = async (mine: number): Promise<void> => {
+    let rows: StarterRow[];
+    try { rows = starterRows((await api.starters()).starters); }
+    catch { rows = []; }
+    if (mine !== seq.current) return;
+    setStarters(rows);
+    if (!needsStatus(rows)) return;
+    try {
+      const r = await api.starterStatus();
+      if (mine === seq.current) setStarters((cur) => withStatus(cur, r?.ready));
+    } catch { /* badge stays at "Installed" */ }
+  };
 
   const loadApps = async (): Promise<AppRow[] | null> => {
     const mine = ++seq.current;
+    let out: AppRow[] | null;
     try {
       const rows = (await api.apps()).apps || [];
       if (mine === seq.current) setGrid({ kind: "rows", rows });
-      return rows;
+      out = rows;
     } catch (e) {
       if (mine === seq.current) setGrid({ kind: "error", msg: errMsg(e) });
-      return null;
+      out = null;
     }
+    await loadStarters(mine);  // after the gallery
+    return out;
   };
 
-  // Opening lists the folder; closing (Back, Esc, another panel taking the slot) closes the viewer and drops the
-  // gallery's iframes so idle apps stop running.
+  // Opening lists the folder; closing (Back, Esc, another panel taking the slot) closes the viewer, drops the
+  // gallery's iframes so idle apps stop running, and hides the starter strip.
   const wasOpen = useRef(false);
   useEffect(() => {
     if (open) { wasOpen.current = true; void loadApps(); return; }
@@ -69,6 +90,7 @@ export function AppsPanel() {
     seq.current++;
     closeView();
     setGrid({ kind: "blank" });
+    setStarters([]);
   }, [open]);
 
   useEffect(() => {
@@ -118,12 +140,15 @@ export function AppsPanel() {
             <button id="anew" className="primary" onClick={() => { closeApps(); void newBuild(); }}>New build</button>
           </span>
         </div>
-        <div className="agrid" id="agrid">
-          {!open || grid.kind === "blank" ? null
-            : grid.kind === "looking" ? <div className="empty">Looking for apps…</div>
-            : grid.kind === "error" ? <div className="empty">Could not read the apps folder.<br />{grid.msg}</div>
-            : !grid.rows.length ? <div className="empty">No apps yet.<br />Start one with New build; it shows up here when Claude has written its page.</div>
-            : grid.rows.map((a) => <Card key={a.dir} a={a} />)}
+        <div className="ascroll">
+          <StartersStrip rows={open ? starters : []} apps={grid.kind === "rows" ? grid.rows : []} reloadApps={loadApps} />
+          <div className="agrid" id="agrid">
+            {!open || grid.kind === "blank" ? null
+              : grid.kind === "looking" ? <div className="empty">Looking for apps…</div>
+              : grid.kind === "error" ? <div className="empty">Could not read the apps folder.<br />{grid.msg}</div>
+              : !grid.rows.length ? <div className="empty">No apps yet.<br />Start one with New build; it shows up here when Claude has written its page.</div>
+              : grid.rows.map((a) => <Card key={a.dir} a={a} />)}
+          </div>
         </div>
       </div>
       <AppViewer />

@@ -1,4 +1,5 @@
-// #bmodal (OpenBot dialogs.js botDialog): shared by "+ New bot" (create) and Settings (edit). The form is a snapshot
+// #bmodal (OpenBot dialogs.js botDialog): shared by "+ New bot" (create, after the preset chooser: a preset fills in
+// name, model, instructions, face and the "Comes with N playbooks" note; a blank starter its name and face) and Settings (edit). The form is a snapshot
 // of the bot as the dialog opened (later polls never reset what you typed). Save stays greyed until something
 // differs from that snapshot; Create is always live. The backdrop with unsaved edits asks first; Cancel and Escape
 // (in Name) are immediate; Enter in Name is OK.
@@ -7,6 +8,7 @@ import { Face } from "../components/Face";
 import { api, type Bot, type ChromeProfile, type Face as FaceT } from "../lib/api";
 import { faceOf } from "../lib/face";
 import { imessageStatus } from "../lib/live";
+import { newBotInit, type NewBotPick } from "../lib/presets";
 import { act, getState, useBotsSelector } from "../state/store";
 import type { BotDialogValue } from "./actions";
 import { askConfirm, pickFace } from "./ask";
@@ -20,17 +22,20 @@ export const EFFORTS: [string, string][] = [["low", "Low · quickest"], ["medium
 export interface BotDialogProps {
   /** The bot being edited; absent for "+ New bot". */
   bot?: Bot;
+  /** "+ New bot": what the preset chooser picked (a preset or a blank starter). */
+  pick?: NewBotPick;
   onClose: (v: BotDialogValue | null) => void;
 }
 
-export function BotDialog({ bot, onClose }: BotDialogProps) {
+export function BotDialog({ bot, pick, onClose }: BotDialogProps) {
   const editing = !!bot;
-  const [title] = useState(() => (bot ? `Settings · ${bot.name}` : "New bot"));
+  const [fresh] = useState(() => (pick ? newBotInit(pick) : null));
+  const [title] = useState(() => (bot ? `Settings · ${bot.name}` : fresh?.title || "New bot"));
   // What the dialog opened with (OpenBot's botDialog arguments).
   const [init] = useState(() => bot
     ? { name: bot.name, model: bot.model || "sonnet", effort: bot.effort || "low", instructions: bot.instructions || "", memory: bot.memory || "",
         approval: bot.approval || "ask", buildAccess: bot.build_access || "scoped", encrypt: !!bot.encrypt, imessage: bot.imessage || "", imessageTo: bot.imessage_to || "" }
-    : { name: `Bot ${getState().bots.length + 1}`, model: "sonnet", effort: "low", instructions: "", memory: "",
+    : { name: fresh?.name || `Bot ${getState().bots.length + 1}`, model: fresh?.model || "sonnet", effort: "low", instructions: fresh?.instructions || "", memory: "",
         approval: "ask", buildAccess: "scoped", encrypt: false, imessage: "", imessageTo: "" });
   const [name, setName] = useState(init.name);
   const [model, setModel] = useState(init.model);
@@ -44,13 +49,13 @@ export function BotDialog({ bot, onClose }: BotDialogProps) {
   const [imessageTo, setImessageTo] = useState(init.imessageTo);
   const [profile, setProfile] = useState("");
   const [profiles, setProfiles] = useState<ChromeProfile[]>([]);
-  const [face, setFace] = useState<FaceT | null | undefined>(bot?.face);
+  const [face, setFace] = useState<FaceT | null | undefined>(bot ? bot.face : fresh?.face);
   const imsgState = useBotsSelector((s) => s.imessage);
 
   // The avatar subject: the face is hashed from the id (or, for a new bot, the name it opened with) until one is picked.
   const bm = useMemo(() => ({ id: bot?.id, name: init.name, face }), [bot?.id, init.name, face]);
   const read = (): BotDialogValue => ({ name: name.trim(), model, effort, instructions, memory, approval, buildAccess, encrypt, profile,
-    face: faceOf(bm), imessage: imessage.trim(), imessageTo: imessageTo.trim() });  // the face shown is the face kept
+    face: faceOf(bm), imessage: imessage.trim(), imessageTo: imessageTo.trim(), preset: fresh?.preset || "" });  // the face shown is the face kept
   const [initial] = useState(() => JSON.stringify(read()));
   const okDisabled = editing && JSON.stringify(read()) === initial;
 
@@ -98,6 +103,8 @@ export function BotDialog({ bot, onClose }: BotDialogProps) {
           <label className="field">Name<input id="bmname" ref={nameRef} placeholder="e.g. LinkedIn scout" value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") ok(); if (e.key === "Escape") onClose(null); }} /></label>
+          {/* "Comes with N playbooks: …" for a preset bot */}
+          <p className="muted preset" id="bmpreset" style={{ display: fresh?.presetNote ? "" : "none" }}>{fresh?.presetNote || ""}</p>
           <div className="pair">
             <label className="field">Model
               <select id="bmmodel" title="Applies from the next task" value={model} onChange={(e) => setModel(e.target.value)}>

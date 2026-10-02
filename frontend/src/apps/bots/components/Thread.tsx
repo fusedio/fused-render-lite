@@ -19,6 +19,7 @@ import {
 import { END_GAP, gapOf, evBox, pinToEnd, restoreAnchor, topVisible, updateToBottom, type Anchor } from "./threadDom";
 
 const EMPTY: BotEvent[] = [];
+const NO_SEQS: ReadonlySet<number> = new Set();
 
 // ---- the bubble's markup (built as escaped strings: it shares one innerHTML with the markdown) ----
 const REACT_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/></svg>';
@@ -77,7 +78,7 @@ function body({ e, botId, reaction, live, chosen, appsRoot, onBeside }: RowProps
     return (
       <div className={`msg approval${live ? "" : " settled"}`} data-seq={e.seq} title={title}>
         {e.text}
-        <div className="btns"><button className="primary" data-approve="1">Approve</button><button data-deny="1">Deny</button></div>
+        <div className="btns"><button className="primary" data-approve="1" disabled={!live}>Approve</button><button data-deny="1" disabled={!live}>Deny</button></div>
       </div>
     );
   }
@@ -93,7 +94,7 @@ function body({ e, botId, reaction, live, chosen, appsRoot, onBeside }: RowProps
       const proposed = !e.app?.dir
         ? `<div class="proposed"><span class="ico">⧉</span><div class="txt"><b>${esc(o.name)}</b><small>${esc(o.kind === "use" ? "Existing app" : "New app · Claude builds it in a few minutes")}${o.spec ? " · " + esc(o.spec.replace(/\s+/g, " ").slice(0, 140)) : ""}</small></div></div>`
         : "";
-      const opts = options.map((x, i) => `<button class="opt${chosen != null && optionKey(x) === chosen ? " chosen" : ""}" data-opt="${esc(x)}"><kbd>${String.fromCharCode(65 + i)}</kbd><span>${esc(x)}</span></button>`).join("");
+      const opts = options.map((x, i) => `<button class="opt${chosen != null && optionKey(x) === chosen ? " chosen" : ""}" data-opt="${esc(x)}"${live ? "" : " disabled"}><kbd>${String.fromCharCode(65 + i)}</kbd><span>${esc(x)}</span></button>`).join("");
       return <><HtmlMsg className={cls} title={title} seq={e.seq} html={md(e.text) + proposed + (opts ? `<div class="opts">${opts}</div>` : "")} />{offerCard}</>;
     }
     return (
@@ -102,7 +103,7 @@ function body({ e, botId, reaction, live, chosen, appsRoot, onBeside }: RowProps
         {options.length ? (
           <div className="opts">
             {options.map((x, i) => (
-              <button key={i} className={`opt${chosen != null && optionKey(x) === chosen ? " chosen" : ""}`} data-opt={x}>
+              <button key={i} className={`opt${chosen != null && optionKey(x) === chosen ? " chosen" : ""}`} data-opt={x} disabled={!live}>
                 <kbd>{String.fromCharCode(65 + i)}</kbd><span>{x}</span>
               </button>
             ))}
@@ -182,6 +183,16 @@ export function Thread({ b, threadRef, searchQ, onSearchCount, onReact, onReply 
 
   // ---- cards, reactions, the New rule ----
   const live = b ? liveCards(evs, b) : new Set<number>();
+  // Cards settled on the first click, before the round trip: the poll that confirms the reply can lag, and every extra
+  // click in that window would otherwise send another approve. Released when the send settles, so the next render
+  // recomputes `settled` from the events and a failed send reopens the card.
+  const [held, setHeld] = useState<ReadonlySet<number>>(NO_SEQS);
+  const settleNow = (btn: Element, send: () => Promise<unknown>) => {
+    const seq = Number(btn.closest(".msg")?.getAttribute("data-seq"));
+    if (!Number.isFinite(seq)) { void send(); return; }
+    setHeld((h) => new Set(h).add(seq));
+    void send().finally(() => setHeld((h) => { if (!h.has(seq)) return h; const n = new Set(h); n.delete(seq); return n.size ? n : NO_SEQS; }));
+  };
   const mark = S.newMark?.id === botId ? S.newMark.seq : null;
   const firstNew = firstNewIndex(evs, mark);  // first shown message you have not seen
   const rxs = b?.reactions || {};
@@ -260,10 +271,10 @@ export function Thread({ b, threadRef, searchQ, onSearchCount, onReact, onReply 
       return;
     }
     const opt = t.closest(".msg.question:not(.settled) .opt");
-    if (opt && sel) { const text = opt.getAttribute("data-opt") || ""; void act(() => api.send(sel, text)); return; }
-    const ok = t.closest("[data-approve]"), no = t.closest("[data-deny]");
+    if (opt && sel) { const text = opt.getAttribute("data-opt") || ""; settleNow(opt, () => act(() => api.send(sel, text))); return; }
+    const ok = t.closest(".msg.approval:not(.settled) [data-approve]"), no = t.closest(".msg.approval:not(.settled) [data-deny]");
     if ((!ok && !no) || !sel) return;
-    void act(() => api.send(sel, ok ? "approve" : "deny"));
+    settleNow((ok || no)!, () => act(() => api.send(sel, ok ? "approve" : "deny")));
   };
 
   let content: JSX.Element | JSX.Element[];
@@ -283,7 +294,7 @@ export function Thread({ b, threadRef, searchQ, onSearchCount, onReact, onReply 
       const card = e.role === "approval" || e.role === "question";
       return (
         <Row key={`${botId}:${e.seq}`} e={e} botId={botId} day={sessionBreak(evs[i - 1], e)} isNew={i === firstNew}
-          reaction={ACTABLE.has(e.role) ? rxs[e.seq] || "" : ""} live={card && live.has(e.seq)}
+          reaction={ACTABLE.has(e.role) ? rxs[e.seq] || "" : ""} live={card && live.has(e.seq) && !held.has(e.seq)}
           chosen={e.role === "question" ? chosenOption(evs, e.seq) : null} appsRoot={appsRoot} onBeside={onBeside} />
       );
     });

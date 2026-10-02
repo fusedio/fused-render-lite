@@ -1,15 +1,17 @@
-// The modal host: routes the store's ui.dialog request (newBot, settings, routines, skills, usage) to its dialog,
+// The modal host: routes the store's ui.dialog request (newBot → preset chooser → bot dialog, settings, routines,
+// skills, usage) to its dialog,
 // and always mounts the two imperative layers above them (the face picker and the confirm). Each request mounts a
 // fresh dialog, so forms start clean (Advanced collapsed, add forms empty) exactly as OpenBot reset them per open.
 //
 // For the bot menu / chat header: openDialog({kind: "settings" | "routines" | "skills", id}) or the helpers re-exported
 // below (exportBot, deleteBot, cloneBot), askConfirm, pickFace.
 import { useEffect, useRef } from "react";
-import { closeDialog, getState, poll, select, useBotsSelector, type DialogReq } from "../state/store";
+import { closeDialog, getState, openDialog, poll, select, useBotsSelector, type DialogReq } from "../state/store";
 import { createBot, saveSettings } from "./actions";
 import { BotDialog } from "./BotDialog";
 import { Confirm } from "./Confirm";
 import { FacePicker } from "./FacePicker";
+import { PresetPicker } from "./PresetPicker";
 import { RoutinesDialog } from "./Routines";
 import { SkillsDialog } from "./Skills";
 import { UsageDialog } from "./Usage";
@@ -39,7 +41,9 @@ export function Dialogs() {
   }, [needDetail, b?.id]);
 
   let dialog = null;
-  if (req?.kind === "newBot") dialog = <BotDialog key={key} onClose={(v) => { closeDialog(); if (v) void createBot(v); }} />;
+  // "+ New bot": the preset chooser first; a pick reopens the slot as the bot dialog filled in from it.
+  if (req?.kind === "newBot" && !req.pick) dialog = <PresetPicker key={key} onDone={(p) => { if (p) openDialog({ kind: "newBot", pick: p }); else closeDialog(); }} />;
+  else if (req?.kind === "newBot" && req.pick) dialog = <BotDialog key={key} pick={req.pick} onClose={(v) => { closeDialog(); if (v) void createBot(v); }} />;
   else if (b && !needDetail) {
     if (req?.kind === "settings") { const bid = b.id; dialog = <BotDialog key={key} bot={b} onClose={(v) => { closeDialog(); if (v) void saveSettings(bid, v); }} />; }
     else if (req?.kind === "routines") dialog = <RoutinesDialog key={key} b={b} onClose={closeDialog} />;

@@ -67,7 +67,8 @@ export interface Routine {
 /** Bot.skills(): one playbook file. `name` is the file stem (the rid in /skills calls). */
 export interface Skill { name: string; title: string; trigger: string; body: string }
 
-export interface Face { shape?: string; color?: string }
+/** `icon`: a brand key (lib/face.ts BRANDS) for a preset bot's disc avatar; "" or absent for a blob face. */
+export interface Face { shape?: string; color?: string; icon?: string }
 
 export interface Bot {
   id: string;
@@ -135,6 +136,14 @@ export interface StatusReply { bots: Bot[]; ts: number; usage: UsageSummary | nu
 export interface AppRow { folder: string; dir: string; name: string; desc: string; tools: unknown; skill: unknown; icon: string | null; mtime: number }
 export interface BuildRow { entryId: string; name: string; dir: string; createdAt: number; doneAt?: number }
 export interface ChromeProfile { dir: string; name: string; email: string }
+/** GET /api/bots/presets: a site the bot knows. `skills` are the playbook titles it comes with. */
+export interface Preset { key: string; name: string; color: string; order: number; model: string; instructions: string; apps: string[]; skills: string[] }
+/** GET /api/apps/starters: an app that ships with the Render App, with its install state under the apps root. */
+export interface Starter {
+  key: string; name: string; desc: string; version: string; tools: number; icon: string; setup_tool: string; ready_key: string;
+  installed: boolean; dir: string; installed_version: string; update: boolean;
+}
+export interface StarterInstallReply { ok: true; key: string; dir: string; installed: boolean; existed: boolean; name: string }
 
 export interface Ok { ok: true }
 
@@ -189,7 +198,8 @@ const get = <T>(url: string, label?: string) => request<T>("GET", url, undefined
 const post = <T>(url: string, body: unknown = {}, label?: string) => request<T>("POST", url, body, label);
 
 // ------------------------------------------------------------------ routes (§3) ----
-export interface NewBotBody { name: string; model?: string; effort?: string; instructions?: string; approval?: string; build_access?: string; encrypt?: boolean }
+/** `preset`: a preset key ("" for none); the backend copies its playbooks and sets its face. */
+export interface NewBotBody { name: string; model?: string; effort?: string; instructions?: string; approval?: string; build_access?: string; encrypt?: boolean; preset?: string }
 export interface SettingsBody {
   name?: string; model?: string; effort?: string; instructions?: string; memory?: string; approval?: string;
   build_access?: string; encrypt?: boolean; imessage_handle?: string; imessage_to?: string;
@@ -208,6 +218,7 @@ export const api = {
     get<StatusReply>(`${B}?cursors=${encodeURIComponent(JSON.stringify(p.cursors))}&shot_for=${encodeURIComponent(p.shot_for)}&fast=${p.fast ? 1 : 0}`, "status"),
   create: (body: NewBotBody) => post<{ ok: true; id: string }>(B, body, "create"),
   profiles: () => get<{ ok: true; profiles: ChromeProfile[] }>(`${B}/profiles`, "profiles"),
+  presets: () => get<{ ok: true; presets: Preset[] }>(`${B}/presets`, "presets"),
   usage: () => get<UsageSummary>(`${B}/usage`, "usage"),
   imessage: () => get<ImessageState>(`${B}/imessage`, "imessage"),
   /** Also answers approvals ("approve"/"deny"), questions and offers. */
@@ -241,6 +252,11 @@ export const api = {
   importApp: (name: string, data: string) => post<{ dir: string; folder: string; files: number; fusedApp: boolean }>("/api/apps/import", { name, data }, "importapp"),
   mkdirApp: (dir: string) => post<{ dir: string; existed: boolean }>("/api/apps/mkdir", { dir }, "mkbuild"),
   revealApp: (dir: string) => post<{ dir: string }>("/api/apps/reveal", { dir }, "revealapp"),
+  starters: () => get<{ root: string; starters: Starter[] }>("/api/apps/starters", "starters"),
+  starterInstall: (key: string) => post<StarterInstallReply>(`/api/apps/starters/${encodeURIComponent(key)}/install`, {}, "starter_install"),
+  starterUpdate: (key: string) => post<StarterInstallReply>(`/api/apps/starters/${encodeURIComponent(key)}/update`, {}, "starter_update"),
+  /** Slow (runs each installed starter's setup tool): call after the strip is drawn. null = could not tell. */
+  starterStatus: () => get<{ ok: true; ready: Record<string, boolean | null>; why: Record<string, string> }>("/api/apps/starters/status", "starter_status"),
 };
 
 // ------------------------------------------------------------------ URL builders ----
@@ -254,3 +270,5 @@ export const stepThumbUrl = (botId: string, thumb: string): string =>
 export const rawFileUrl = (path: string): string => "/api/fs/raw?path=" + encodeURIComponent(path);
 /** An app folder's icon (404 when it has none). */
 export const appIconUrl = (dir: string): string => "/api/apps/icon?dir=" + encodeURIComponent(dir);
+/** A starter app's icon (OpenBot's rawUrl("starters/<key>/<icon>")). */
+export const starterIconUrl = (key: string): string => `/api/apps/starters/${encodeURIComponent(key)}/icon`;
