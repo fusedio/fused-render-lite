@@ -562,6 +562,22 @@ Argent over CDP; OpenBot open in FusedRender.app in the next tab):
   dangling `SSL_CERT_FILE` was repaired (STATUS 0.11.0); the rebuilt bundle
   checks cleanly.
 
+Second round, checked live in the FusedBot 0.11.0 bundle (run from the DMG
+with its own home, driven through Chrome over CDP): the new-bot chooser with
+the four blanks and all 25 presets; a GitHub preset bot (brand face, 6
+playbooks copied, read-only instructions prefilled, "created … Comes with 6
+github playbooks" line, greeting); the Starter apps strip; Apple Notes
+Install → copied to `~/Fused/app/apple-notes`, viewer opened, badge
+"Installed"; "Pin to menu bar" from the viewer's ⋯ → `dock.json` written and
+the menu-bar dock rebuilt within one tick ("Pinned | Apple Notes | Recent
+bots | GitHub bot | Recent apps | …"); `/favicon.ico` is the FusedBot PNG;
+the menu-bar cloud icon shows. Not clicked (AppKit cannot be driven from
+here): the dock's items themselves — a bot item selecting its bot in an open
+window (`WindowManager.show_bot`), an app item opening `/render`
+(`show_url`) — a pinned *bot* in the dock, the `?bot=` boot deep link; and
+the Google starters' "Needs setup → Ready" badge (needs a service-account
+key).
+
 Not exercised live: dictation (needs a microphone grant), iMessage (needs
 Full Disk Access), Chrome profile import and encryption at rest (unit
 tested in browser.py).

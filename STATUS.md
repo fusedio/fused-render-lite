@@ -127,6 +127,23 @@ entry (`bots.html`).
   drops urllib's global opener, and the launcher repairs the environment
   before its first request. The same frozen store would have broken hub
   metadata and model downloads from the server process.
+- **Presets**: "+" first asks what kind of bot. 25 presets ship under
+  `fused_render_app/bots/presets/<key>/` (LinkedIn, YouTube, X, Reddit,
+  Instagram, Facebook, TikTok, Gmail, Calendar, Slack, GitHub, Hacker News,
+  Amazon, News, Indeed, Maps, Notion, Google Docs, Google Sheets, Linkme,
+  ShopMy, LTK, Amazon Associates, Twitch, Apple Notes) plus four named blank
+  bots; a preset bot gets the site's brand mark as its avatar, read-only
+  standing instructions and 4-6 playbooks copied into its Skills.
+  `GET /api/bots/presets`, `POST /api/bots {preset}`.
+- **Starter apps**: three complete fused apps ship under
+  `fused_render_app/bots/starters/` (Apple Notes, Google Docs Tabs, Google
+  Sheets Tabs, each with mcp.toml tools). The Apps panel lists them in a row
+  above the gallery with Install / Update / Open and an Installed / Needs
+  setup / Ready badge; the Google Docs, Google Sheets and Apple Notes presets
+  install theirs when a bot is made from them. `/api/apps/starters*`.
+- **Inbox and attached files** open the file in a new tab with a ↓ download
+  beside each (lite has no file explorer, so the raw file is shown inline);
+  approval and question cards settle on the first click.
 - **Name**: the app is FusedBot (bundle `FusedBot.app`, DMG
   `FusedBot-<ver>.dmg`; window titles, main menu, menu-bar title, page title,
   update banner, TCC prompts and notification fallback all say FusedBot);
