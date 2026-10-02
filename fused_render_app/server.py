@@ -2,6 +2,7 @@
 
 Pages
   GET  /, /index.html       the FusedBot (bots) page (static/shell-dist/bots.html)
+  GET  /onboarding          the first-run setup wizard (same page; `/` redirects here on a fresh install)
   GET  /dock                the menu-bar tray (static/shell-dist/dock.html; menubar_dock.py)
   GET  /favicon.ico         the 64 px FusedBot icon (static/fusedbot-icon-64.png)
   GET  /tasks, /chat, /explorer/*   fused-render's React shell (static/shell-dist/lite.html)
@@ -31,6 +32,8 @@ API (the six supported fused.* calls, plus what the shell needs)
                                                404 when no update manager runs (dev server, CLI)
   GET  /api/prefs, /api/config, /api/current-apps, POST /api/current-apps/*   what the React shell reads
   /api/bots/*, /api/apps/*  Browser Bots (bots/routes.py, docs/BOT-APP.md §3)
+  GET  /api/onboarding, /api/onboarding/models; POST /api/onboarding/complete|dismiss|opened|stage
+                            the setup wizard's flag and stages (onboarding.py)
   GET  /api/dock                               the menu-bar dock: {pinned, recent_bots, recent_apps, tilesize}
   POST /api/dock/open {kind, id|dir}, /home, /reveal {dir}, /pin {dir, pinned}, /order {dirs},
        /pin-bot {id, pinned}, /size {tilesize}  the tray's actions (bots/dock_routes.py)
@@ -91,6 +94,7 @@ from fused_render_app.routes import schedule as schedule_routes
 from fused_render_app.routes import tasks as tasks_routes
 from fused_render_app.bots import routes as bots_routes  # noqa: E402
 from fused_render_app.bots import dock_routes  # noqa: E402
+from fused_render_app import onboarding  # noqa: E402
 from fused_render_app.routes import claude_health as claude_health_routes  # noqa: E402
 import fused_render_app.bots.registry as bots_registry  # noqa: E402
 
@@ -113,6 +117,8 @@ AI_ROUTER.include_router(claude_artifacts_routes.router)
 AI_ROUTER.include_router(bots_routes.router)
 # The menu-bar dock's lists and the apps' "Pin to menu bar" (bots/dock.py).
 AI_ROUTER.include_router(dock_routes.router)
+# The first-run setup wizard's flag and stages (onboarding.py): /api/onboarding/*.
+AI_ROUTER.include_router(onboarding.router)
 # Claude Code health, install, sign-in and doctor (routes/claude_health.py):
 # /api/claude/*, read by the wizard's Claude step and anything that asks first.
 AI_ROUTER.include_router(claude_health_routes.router)
@@ -231,6 +237,19 @@ class Handler(BaseHTTPRequestHandler):
         route = url.path
         try:
             if route in ("/", "/index.html"):
+                # A fresh install's first load lands on the setup wizard
+                # (onboarding.py): only from the bare front door — a deep
+                # link (`/?bot=…` from the dock) is honoured — and only while
+                # the wizard has never been on screen, so leaving it never
+                # bounces back in. Server-side, not in the page: the flag is
+                # the server's, and a redirect cannot race the page's own
+                # first fetch of it.
+                if not url.query and onboarding.should_auto_show():
+                    return self._send(307, b"", "text/plain", {"Location": onboarding.PATH})
+                return self._bots_page()
+            if route == onboarding.PATH:
+                # The wizard: the bots page, which routes on `location.pathname`
+                # (frontend/src/bots.tsx). A refresh mid-wizard stays on it.
                 return self._bots_page()
             if route == "/dock":
                 return self._dock_page()
@@ -419,6 +438,9 @@ class Handler(BaseHTTPRequestHandler):
             "cache_dir": paths.home(),
             "native_dir_picker": False,
             "render_app": True,
+            # The first-run wizard's flags and stage statuses (onboarding.py);
+            # the bots page reads them to draw the wizard's pills.
+            "onboarding": onboarding.snapshot(),
         }
 
     def _shell_page(self) -> None:
@@ -1053,6 +1075,10 @@ def make_server(port: int = 0, host: str = "127.0.0.1") -> Server:
             claude_health.adopt(bin_path, source="candidate")
     except Exception:  # noqa: BLE001 — no CLI is the chat's problem, not the server's
         logger.debug("claude CLI not resolved at startup", exc_info=True)
+    # An install that already has bots predates the setup wizard: mark it
+    # completed before the first request, or an upgrade would greet a
+    # returning user with a first-run screen (onboarding.py).
+    onboarding.seed_for_existing_users()
     write_server_json(srv.server_address[1], host)
     return srv
 

@@ -92,6 +92,14 @@ def _no_real_claude_cli(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_onboarding_redirect(monkeypatch):
+    """A fresh tmp home has never seen the setup wizard, so `GET /` would
+    307 to /onboarding for every test (onboarding.py). Forced off here;
+    tests/test_onboarding.py deletes the variable to exercise the rule."""
+    monkeypatch.setenv("FUSED_RENDER_ONBOARDING", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_task_threads(monkeypatch):
     """No test starts the scheduled-messages loop, the Tasks change-watcher
     or a queue manager that outlives it (fused-render's `_no_schedule_loop_
