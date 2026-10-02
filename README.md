@@ -145,6 +145,7 @@ the one local server.
 | in a window | what happens |
 | --- | --- |
 | New Window (⌘N), Dock click | a new Browser Bots window (a Dock click focuses the front one if any) |
+| Home (title-bar house, ⌘⇧H) | this window goes to the bots page (`/`); nothing happens if it is already there |
 | `target=_blank`, `window.open`, ⌘-click / middle-click on an app link | a new window (`window.open` returns a live handle) |
 | a link to another site | the default browser |
 | `<a download>`, `Content-Disposition: attachment`, a type WebKit can't show | saved to `~/Downloads` (Finder-style `name 2` on collision) |
@@ -152,16 +153,19 @@ the one local server.
 | `getUserMedia`, `navigator.geolocation`, `Notification` from the app's own page | granted; the system prompts still apply |
 | ⌘C/⌘V/⌘X/⌘Z/⌘A, ⌘W, ⌘R, ⌘[ ⌘], ⌘P, ⌘M | the Edit / File / View / Window menus |
 
-The title bar ends in one button, Open in Browser (View → Open in Browser
-⌘⇧L). Window → Tasks (⌘⇧T) opens the Tasks page. Closing the last window does
-not quit. The menu-bar item is a small dock: pinned bots and pinned apps
-first, then the three most recently used bots, then the three most recently
-changed apps (each section skipped when empty), then "Open FusedBot",
-"Tasks", "Open in browser", "Open app logs" and "Quit". A bot item selects
-that bot in a FusedBot window; an app item opens the app in its own window.
-Bots are pinned from the sidebar, apps from the app viewer's ⋯ menu ("Pin to
-menu bar"); the list refreshes every 5 s. `FUSED_RENDER_APP_NO_BROWSER=1`
-suppresses the startup window.
+The title bar ends in Open in Browser (View → Open in Browser ⌘⇧L) and
+Home (View → Home ⌘⇧H), which takes that window back to the bots page.
+Window → Tasks (⌘⇧T) opens the Tasks page. Closing the last window does
+not quit. A click on the menu-bar item drops a Dock-like glass tray of
+tiles: Home, pinned bots and pinned apps, then up to three recently used bots
+and three recently changed apps. A bot tile selects that bot in a FusedBot
+window; an app tile opens the app in its own window. Right-click a tile to
+keep it in or remove it from the tray, show an app in Finder, or open either
+in the browser; drag the separator to resize the tiles. Right-click the
+menu-bar item for "Open FusedBot", "Tasks…", "Open in Browser", "Open App
+Logs" and "Quit FusedBot". Bots can also be pinned from the sidebar, apps
+from the app viewer's ⋯ menu ("Pin to menu bar").
+`FUSED_RENDER_APP_NO_BROWSER=1` suppresses the startup window.
 
 The app posts macOS notifications for background work (model downloads,
 environment installs, AI jobs): one banner per job, replaced in place by the
@@ -340,6 +344,7 @@ fused_render_app/
   cli.py          `fused-render-app [--port] [--no-browser]` (dev server)
   macapp.py       macOS shell: server thread, menu-bar item, windows
   mainwindow.py   the windows: NSWindow + WKWebView, delegates (popups, downloads, dialogs), main menu
+  menubar_dock.py the menu-bar tray: glass NSPanel + WKWebView on /dock, tile and utility menus
   window_policy.py  pure-Python navigation/download decisions mainwindow.py enacts
   appfile.py, container.py, localapps.py  .fused (v2 container, v1 zip) and folder apps, for POST /api/open
   env.py          uv lookup/download, per-app `uv sync`, running a .py in its venv

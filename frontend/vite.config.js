@@ -39,9 +39,12 @@ export default defineConfig({
       // Tasks page and the Claude chat. fused-render's own two entries
       // (index.html, lan.html) stay in the tree verbatim, unbuilt.
       // Browser Bots (bots.html -> src/bots.tsx) is the second: the page `/` serves (docs/BOT-APP.md §4).
+      // The menu-bar Dock tray (dock.html -> src/dock/dock.ts) is the third: the page `/dock` serves to the
+      // native panel (no React, no Tailwind: Render App's old dock.html, ported to bots and apps).
       input: {
         lite: fileURLToPath(new URL("./lite.html", import.meta.url)),
         bots: fileURLToPath(new URL("./bots.html", import.meta.url)),
+        dock: fileURLToPath(new URL("./dock.html", import.meta.url)),
       },
       output: {
         // Third-party deps change far less often than the app itself — their

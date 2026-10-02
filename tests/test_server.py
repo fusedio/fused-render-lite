@@ -33,9 +33,11 @@ def q(**kw):
 def test_bots_page_and_removed_pages(client):
     from fused_render_app import server
 
-    # `/` is the bots page: the built file when it exists, else a 503 saying how to build it
-    built = os.path.isfile(os.path.join(server.STATIC_DIR, "shell-dist", "bots.html"))
-    for route in ("/", "/index.html"):
+    # `/` is the bots page and `/dock` the menu-bar tray: the built file when
+    # it exists, else a 503 saying how to build it (tests/test_bots_dock.py
+    # covers `/dock` both ways).
+    for route, name in (("/", "bots.html"), ("/index.html", "bots.html"), ("/dock", "dock.html")):
+        built = os.path.isfile(os.path.join(server.STATIC_DIR, "shell-dist", name))
         status, headers, body = client.get(route)
         if built:
             assert status == 200
@@ -43,9 +45,9 @@ def test_bots_page_and_removed_pages(client):
             assert status == 503 and b"Run scripts/build_shell.sh" in body
         assert headers["Content-Type"].startswith("text/html")
     # The old product surface is gone: the `.fused` opener, the showcase home,
-    # the old dock page, the launcher and its settings page. (`/api/dock` is
-    # back, as the FusedBot menu-bar dock's lists: tests/test_bots_dock.py.)
-    for route in ("/open?_file=/nope/x.fused", "/api/showcase", "/dock", "/launcher",
+    # the launcher and its settings page. (`/dock` and `/api/dock` are back,
+    # as the FusedBot menu-bar tray: tests/test_bots_dock.py.)
+    for route in ("/open?_file=/nope/x.fused", "/api/showcase", "/launcher",
                   "/settings", "/api/launcher"):
         assert client.get(route)[0] == 404, route
 

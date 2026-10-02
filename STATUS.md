@@ -161,12 +161,16 @@ entry (`bots.html`).
   `.icns` — plus the 64 px favicon (`/favicon.ico`, bots.html) and the
   menu-bar template `static/menubar.png` / `menubar@2x.png` from
   `static/menubar.svg`.
-- **Menu-bar dock**: the menu-bar item lists Pinned (pinned bots, then apps
-  pinned from the app viewer's ⋯ "Pin to menu bar"), Recent bots (3) and
-  Recent apps (3) above Open FusedBot / Tasks / Open in browser / Open app
-  logs / Quit; a bot opens selected in a FusedBot window, an app in its own.
-  `bots/dock.py`, `GET /api/dock`, `POST /api/dock/pin`; app pins in
-  `~/.fused-render-app/bots/dock.json`.
+- **Menu-bar dock**: Render App's floating glass tray is back
+  (`menubar_dock.py`, page `/dock` built from `frontend/`), its tiles now a
+  Home tile, pinned bots, pinned apps, then up to 3 recent bots and 3 recent
+  apps; a bot opens selected in a FusedBot window, an app in its own.
+  Right-click on a tile: Open, Keep in / Remove from Dock, Show in Finder,
+  Open in Browser. Right-click on the status item: Open FusedBot / Tasks /
+  Open in Browser / Open App Logs / Quit (also the fallback menu if the tray
+  cannot be built). Tile size from the separator drag is saved.
+  `bots/dock.py`, `GET /api/dock`, `POST /api/dock/{open,home,reveal,pin,order,pin-bot,size}`;
+  app pins and tile size in `~/.fused-render-app/bots/dock.json`.
 
 ## 0.10.3
 

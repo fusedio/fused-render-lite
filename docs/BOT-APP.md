@@ -11,8 +11,8 @@ the OpenBot UI, behaviour for behaviour, as React + shadcn, on a Python
 backend that lives inside the Render App server process. The platform stays
 (server, `_web` router shim, AI relay, Claude tasks cluster, `env`/uv,
 capture, native window shell, updater, skills). The product surface goes
-(showcase, dock, launcher, hotkey, settings page, `/open` flows, editlink,
-Edit/Home title-bar buttons). Package, bundle and release pipeline keep their
+(showcase, the `.fused` dock, launcher, hotkey, settings page, `/open` flows,
+editlink, the Edit title-bar button). Package, bundle and release pipeline keep their
 names.
 
 ## 1. Layout
@@ -397,15 +397,18 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
   dock / launcher / settings / open routes and their imports; `start_ai` adds
   `bots.registry.start()` (scheduler + iMessage) and `stop_ai` adds
   `bots.registry.shutdown()` (stop every bot's Chrome).
-- `macapp.py`: startup window → `/`; drop the old menu-bar Dock tray (the
-  `.fused` recents), the launcher panel, the global hotkey, `dock_store`
-  recording; the menu-bar item becomes the bots/apps dock described below
-  (pinned → recent bots → recent apps → Open FusedBot / Tasks / Open in
-  browser / Open app logs / Quit). Finder-open of `.fused` goes (the document
-  type stays registered for now; opening one shows the bot app).
-- `mainwindow.py`: drop the Edit and Home title-bar buttons and menu items
-  (keep Open in Browser, Tasks ⌘⇧T, Edit menu, Window menu); the window title
-  is "FusedBot" (`APP_NAME`); `show_url(path)` / `show_bot(bid)` for the dock.
+- `macapp.py`: startup window → `/`; drop the launcher panel, the global
+  hotkey, `dock_store` recording; the menu-bar Dock tray stays, its tiles
+  now bots and apps instead of `.fused` recents (described below). Finder-open
+  of `.fused` goes (the document type stays registered for now; opening one
+  shows the bot app).
+- `mainwindow.py`: drop the Edit title-bar button and menu item (keep Open
+  in Browser, Tasks ⌘⇧T, Edit menu, Window menu). The title bar ends in Open
+  in Browser and Home (SF Symbol `house`, View → Home ⌘⇧H): Home takes that
+  window to the bots page `/` in place, does nothing when it is already
+  there, and opens a window when none is key; the window keeps the saved
+  frame it was opened with. The window title is "FusedBot" (`APP_NAME`);
+  `show_url(path)` / `show_bot(bid)` for the dock.
 - Name: the product is **FusedBot** (bundle `FusedBot.app`, DMG
   `FusedBot-<ver>.dmg`, icon `static/fusedbot-icon*.png` from
   `fusedbot-icon.svg`, template menu-bar icon `menubar.png`/`@2x`); the
@@ -413,33 +416,47 @@ semantics, `fused_ai.text(prompt, system_prompt, model, effort)` per step.
   their Render App names, and an installed `RenderApp.app` keeps its path on
   update.
 
-### Menu-bar dock (`bots/dock.py`, `bots/dock_routes.py`, `macapp.py`)
+### Menu-bar dock (`menubar_dock.py`, `bots/dock.py`, `bots/dock_routes.py`, `macapp.py`)
 
-The FusedBot menu-bar item is a small dock above its fixed items:
+A left click on the FusedBot menu-bar item drops a floating, macOS-Dock-like
+glass tray of tiles under it (fisheye magnification, names beneath):
 
 ```
-Pinned                 (disabled header)
-   <pinned bots, by name>     e.g. "Scout · running"
-   <pinned apps, pin order>
-──────────
-Recent bots
-   <3 most recently updated bots, not pinned>
-──────────
-Recent apps
-   <3 most recently changed apps, not pinned>
-──────────
-Open FusedBot
-Tasks
-Open in browser
-Open app logs
-Quit
+[Home] [pinned bots, by name] [pinned apps, pin order] │ [≤3 recent bots] [≤3 recent apps]
 ```
 
-An empty section is left out. A bot title is its name, plus ` · <status>`
-when it is not idle; titles are unique across the menu (rumps keys items by
-title), so a repeat gets ` (2)`, ` (3)`… and long names are capped at 40
-characters. `hidden` bots are never listed.
+Home opens FusedBot. A pinned section or a recent one that is empty is left
+out, and the separator shows only when both sides have tiles. A bot tile is
+its avatar face with a dot while its status is not idle; an app tile is the
+app's `icon.svg` / `icon.png` (via `GET /api/apps/icon?dir=`) when it has
+one. `hidden` bots are never listed. ⎋ or a click anywhere outside the
+tray dismisses it.
 
+- **Clicks.** A bot tile selects that bot in a FusedBot window: an open
+  bots-page window is pointed at it in place (`?bot=` rewritten plus the
+  page's own `fused:urlchange` listener, no reload), else a new window opens
+  on `/?bot=<id>`, which the page reads at boot. An app tile raises a window
+  already on `/render?path=<dir>/index.html` (spelled like the page's "Open
+  in tab") or opens one. The tray closes first either way.
+- **Tile menu (right-click).** A native `NSMenu` laid out like the Dock's:
+  the name (checked while a bot is busy), Open, then Options ▸ with Keep in
+  Dock / Remove from Dock, Show in Finder (apps only) and Open in Browser
+  (the same `/?bot=<id>` or `/render?path=…` in the default browser).
+- **Status-item right-click (or ⌃-click).** The utility menu: Open
+  FusedBot, Tasks…, Open in Browser, Open App Logs, Quit FusedBot (⌘Q). If
+  the tray cannot be built, rumps's plain menu with those same items stays
+  on the status item, so Quit is never lost.
+- **Tile size.** Dragging the separator up or down resizes the tiles, like
+  the Dock; the size (16–128 px, default 52) is saved in `dock.json`.
+- **Panel.** A borderless, non-activating `NSPanel` hangs under the status
+  item and holds a fixed 1400×520 transparent `WKWebView` canvas (the
+  `/dock` page) above a native glass view (`NSGlassEffectView` on macOS 26,
+  `NSVisualEffectView` before) sized to the tray rect the page reports. The
+  page lays the tray out and reports it (`size` / `tray` / `resize` / `menu`
+  script messages); the panel frames that region, slides it in and out on
+  its own timer, and tells the page where the status item is (`dockAnchor`),
+  when it is shown (`dockShown`, which re-reads `GET /api/dock`) and when a
+  tile menu closes (`dockMenuClosed`).
 - **Sources.** Bots are read from disk (`store.list_ids` + each `bot.json`);
   a bot the registry already built is read from memory so its live status
   shows. The dock never constructs a `Bot` (that writes `bot.json` and loads
@@ -448,38 +465,53 @@ characters. `hidden` bots are never listed.
   `Bot.__init__` would reset it. Bot recency is `meta.updated`. Apps are the
   APPS scan (`apptools.list_apps` over `<workspace>/app`), recency is the
   app's `index.html` mtime.
-- **Pins.** A bot's pin is the sidebar's own (`bot.json` `pinned`). App pins
-  live in `<home>/bots/dock.json` as `{"pinned_apps": [<real dir>, …]}` in
-  pin order, set from the app viewer's ⋯ menu ("Pin to menu bar" / "Unpin
+- **Pins.** A bot's pin is the sidebar's own (`bot.json` `pinned`, written
+  through the registry's Bot exactly like the flag route), so Keep in Dock on
+  a bot pins it in the sidebar too. App pins live in `<home>/bots/dock.json`
+  as `{"pinned_apps": [<real dir>, …], "tilesize": <px>}` in pin order, set
+  from the tile menu or the app viewer's ⋯ menu ("Pin to menu bar" / "Unpin
   from menu bar", which reads `GET /api/dock` as it opens). Only a folder
   under the apps root with an `index.html` can be pinned; a pinned folder
   that disappears is no longer listed, and unpinning it still tidies
   `dock.json`.
-- **Clicks.** A bot item selects that bot in a FusedBot window: an open
-  bots-page window is pointed at it in place (`?bot=` rewritten plus the
-  page's own `fused:urlchange` listener, no reload), else a new window opens
-  on `/?bot=<id>`, which the page reads at boot. An app item raises a window
-  already on `/render?path=<dir>/index.html` (spelled like the page's "Open
-  in tab") or opens one.
-- **Refresh.** rumps has no "menu will open" hook: the menu is built at
-  startup, again once the server is up, and on a 5-second `rumps.Timer`. Each
-  tick computes `dock_menu_items(entries())` and rebuilds only when that list
-  changed, so an unchanged dock costs a few stats and small reads and never
-  churns an open menu. A failing refresh logs once (then every 120th time)
-  and keeps the last menu.
-- **HTTP.** `GET /api/dock` returns `{pinned, recent_bots, recent_apps}`.
-  A bot row is `{kind: "bot", id, name, face, status, updated, pinned}`; an
-  app row is `{kind: "app", dir, name, icon, mtime}`. `POST /api/dock/pin`
-  takes `{dir, pinned}`, needs `X-Fused: 1`, and returns
-  `{ok, pinned_apps}`. A `dir` outside the apps root, or not an app folder
-  when pinning, gets a 400.
-- **Tests.** `tests/test_bots_dock.py` covers the store, the ordering,
-  limits and exclusions of `entries()`, the menu layout and unique titles,
-  and both routes through the real server.
+- **HTTP** (reads are GETs; every POST needs `X-Fused: 1`; a bad request is
+  a 400 `{error}`):
+
+  | Route | Body | Reply |
+  |---|---|---|
+  | `GET /api/dock` | | `{pinned, recent_bots, recent_apps, tilesize}` |
+  | `POST /api/dock/open` | `{kind: "bot", id}` or `{kind: "app", dir}` | `{ok, native: true}` in the app, else `{ok, native: false, view}` |
+  | `POST /api/dock/home` | | `{ok, native: true}` in the app, else `{ok, native: false, view: "/"}` |
+  | `POST /api/dock/reveal` | `{dir}` | `{ok}` after `open -R` (apps root only) |
+  | `POST /api/dock/pin` | `{dir, pinned}` | `{ok, pinned_apps}` |
+  | `POST /api/dock/order` | `{dirs}`, the pinned apps left to right after a drag | `{ok, pinned_apps}`; unpinned dirs ignored, omitted pinned ones kept at the end |
+  | `POST /api/dock/pin-bot` | `{id, pinned}` | `{ok, id, pinned}` |
+  | `POST /api/dock/size` | `{tilesize}` | `{ok, tilesize}`, clamped to 16–128 |
+
+  A bot row is `{kind: "bot", id, name, face, status, running, updated,
+  pinned}` (`running`: status is not idle); an app row is `{kind: "app", dir,
+  name, icon, pinned, mtime}` (`icon`: the folder has an icon file). `native`
+  says whether the macOS app took the action through
+  `server.native_hooks["dock_open"]` / `["show_home"]` (macapp.py installs
+  them; each closes the tray first); in a plain browser `view` is the page
+  to go to instead. An unknown kind or bot, or a `dir` outside the apps root
+  or not an app folder, gets a 400. `GET /dock` serves the built
+  `static/shell-dist/dock.html`, with the same 503 as `/` when the shell is
+  not built.
+- **Dev.** `FUSED_RENDER_APP_DOCK_SHOW=1` shows the tray once the server is
+  ready and makes `kill -USR1 <pid>` show it again, so a script can
+  screenshot it without clicking.
+- **Tests.** `tests/test_bots_dock.py` covers the store, the tile size, bot
+  pins, the ordering, limits and exclusions of `entries()`, every route
+  through the real server (open and home with and without the native hooks,
+  reveal's root guard) and `/dock` built or not. The panel itself is
+  AppKit-only and untested, like `mainwindow.py`.
 - Deleted (UI surfaces only): `showcase.py`, `showcase/`, `dock_store.py`,
-  `menubar_dock.py`, `launcher.py`, `launcher_panel.py`, `hotkey.py`,
+  `launcher.py`, `launcher_panel.py`, `hotkey.py`,
   `editlink.py`, `icon_color.py`, `static/{index,open,dock,launcher,settings}.html`,
   their tests (`test_showcase`, `test_dock`, `test_launcher`, `test_editlink`).
+  `menubar_dock.py` was deleted and came back as the bots/apps tray; its page
+  is now built from `frontend/` instead of `static/dock.html`.
   KEPT as plumbing: `appfile.py`, `container.py`, `localapps.py` (the task
   peek's `current_apps` and `app_dir_for` use it), `/api/open` (and
   `test_server.py::test_open_run_and_fs`, which covers `/render`, `/api/run`

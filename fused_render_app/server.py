@@ -2,6 +2,7 @@
 
 Pages
   GET  /, /index.html       the FusedBot (bots) page (static/shell-dist/bots.html)
+  GET  /dock                the menu-bar tray (static/shell-dist/dock.html; menubar_dock.py)
   GET  /favicon.ico         the 64 px FusedBot icon (static/fusedbot-icon-64.png)
   GET  /tasks, /chat, /explorer/*   fused-render's React shell (static/shell-dist/lite.html)
   GET  /render?path=<abs>   an app page with runtime.js injected into <head>
@@ -30,8 +31,9 @@ API (the six supported fused.* calls, plus what the shell needs)
                                                404 when no update manager runs (dev server, CLI)
   GET  /api/prefs, /api/config, /api/current-apps, POST /api/current-apps/*   what the React shell reads
   /api/bots/*, /api/apps/*  Browser Bots (bots/routes.py, docs/BOT-APP.md §3)
-  GET  /api/dock                               the menu-bar dock: {pinned, recent_bots, recent_apps}
-  POST /api/dock/pin        {dir, pinned}      -> {ok, pinned_apps}   (bots/dock_routes.py)
+  GET  /api/dock                               the menu-bar dock: {pinned, recent_bots, recent_apps, tilesize}
+  POST /api/dock/open {kind, id|dir}, /home, /reveal {dir}, /pin {dir, pinned}, /order {dirs},
+       /pin-bot {id, pinned}, /size {tilesize}  the tray's actions (bots/dock_routes.py)
   fused.daemon (background_routes.py, copied from fused-render):
   GET  /api/apps/background/status?html=       {running, autostart, pid, version, engine_id, protocol}
   POST /api/apps/background/start|stop|restart {html}     /autostart {html, autostart}
@@ -119,12 +121,15 @@ MAX_DROP_BYTES = 1024 * 1024 * 1024
 _HEAD_RE = re.compile(r"<head[^>]*>", re.I)
 
 #: What the native shell (macapp.py) plugs in, callable from the HTTP thread:
-#:   "show_home":     () -> None       focus a Browser Bots window, or open one (non-blocking)
+#:   "show_home":     () -> None       close the tray, focus a FusedBot window or open one (non-blocking)
+#:   "dock_open":     (kind, key) -> None   close the tray; "bot" + id shows that bot, "app" + dir
+#:                                      opens the app in its window (non-blocking)
 #:   "relaunch":      () -> None       quit and respawn from the bundle on disk (after an update)
 #:   "open_files":    () -> set[str]   app files with a window open right now
 #:   "focus_or_open": (file) -> None   raise that window or open a new one (non-blocking)
-#: Absent in a CLI run and in tests. Only "relaunch" is read here today
-#: (POST /api/update/relaunch).
+#: Absent in a CLI run and in tests. Read by POST /api/update/relaunch
+#: ("relaunch") and the tray's POST /api/dock/open, /api/dock/home
+#: (bots/dock_routes.py).
 native_hooks: dict = {}
 
 mimetypes.add_type("application/javascript", ".mjs")
@@ -223,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route in ("/", "/index.html"):
                 return self._bots_page()
+            if route == "/dock":
+                return self._dock_page()
             if route.startswith("/static/"):
                 return self._static(route[len("/static/"):])
             if route == "/render":
@@ -427,11 +434,20 @@ class Handler(BaseHTTPRequestHandler):
     def _bots_page(self) -> None:
         """`/` and `/index.html`: the Browser Bots page, built from `frontend/`
         into `static/shell-dist/bots.html`. Not built: a 503 HTML page saying how."""
-        path = os.path.join(STATIC_DIR, "shell-dist", "bots.html")
+        self._built_page("bots.html", "FusedBot page")
+
+    def _dock_page(self) -> None:
+        """`/dock`: the menu-bar tray (menubar_dock.py loads it into its
+        panel), built from `frontend/` into `static/shell-dist/dock.html`.
+        Not built: the same 503 page as `/`."""
+        self._built_page("dock.html", "FusedBot dock page")
+
+    def _built_page(self, name: str, what: str) -> None:
+        path = os.path.join(STATIC_DIR, "shell-dist", name)
         if not os.path.isfile(path):
             return self._html("<!doctype html><meta charset=\"utf-8\"><title>FusedBot</title>"
-                              "<p>FusedBot page not built "
-                              "(fused_render_app/static/shell-dist/bots.html missing). "
+                              f"<p>{what} not built "
+                              f"(fused_render_app/static/shell-dist/{name} missing). "
                               "Run scripts/build_shell.sh.</p>", 503)
         with open(path, "r", encoding="utf-8") as f:
             self._html(f.read())
