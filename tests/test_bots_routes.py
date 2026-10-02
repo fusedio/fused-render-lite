@@ -106,7 +106,7 @@ def test_settings_flag_react(client, ws):
     st, out = j(client.post(f"/api/bots/{bid}/flag", {"pinned": True, "hidden": False, "face": {"shape": "blob", "color": "#f00"}}))
     assert st == 200
     s = one(status(client), bid)
-    assert s["pinned"] is True and s["hidden"] is False and s["face"] == {"shape": "blob", "color": "#f00"}
+    assert s["pinned"] is True and s["hidden"] is False and s["face"] == {"shape": "blob", "color": "#f00", "icon": ""}
     st, out = j(client.post(f"/api/bots/{bid}/react", {"seq": 1, "emoji": "👍"}))
     assert st == 200 and out["reactions"] == {"1": "👍"}
     st, out = j(client.post(f"/api/bots/{bid}/react", {"seq": 1, "emoji": ""}))

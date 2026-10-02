@@ -48,6 +48,16 @@ def _apps():
     return apps
 
 
+def _presets():
+    from fused_render_app.bots import presets
+    return presets
+
+
+def _starters():
+    from fused_render_app.bots import starters
+    return starters
+
+
 def _handled(fn):
     """ValueError/RuntimeError -> 400 (404 for an unknown bot), plus the slow-call log."""
     @functools.wraps(fn)
@@ -173,7 +183,11 @@ def bots_create(body: dict = Body(...), x_fused: str | None = Header(default=Non
     if guard is not None:
         return guard
     bm = _botmod()
-    b = registry.create(body.get("name") or "", body.get("model") or "", body.get("effort") or "", body.get("instructions") or "")
+    preset = body.get("preset") or ""
+    if not isinstance(preset, str):
+        raise ValueError("preset must be a preset key")
+    b = registry.create(body.get("name") or "", body.get("model") or "", body.get("effort") or "", body.get("instructions") or "",
+                        preset=preset)
     if body.get("approval") in ("ask", "auto"):
         b.meta["approval"] = body["approval"]
     if body.get("build_access") in bm.BUILD_MODES:
@@ -190,6 +204,14 @@ def bots_create(body: dict = Body(...), x_fused: str | None = Header(default=Non
 @_handled
 def bots_profiles():
     return {"ok": True, "profiles": _botmod().chrome_profiles()}
+
+
+@router.get("/api/bots/presets")
+@_handled
+def bots_presets():
+    """The "+" chooser's catalog (OpenBot `presets`): playbooks as titles only."""
+    return {"ok": True, "presets": [{**{k: v for k, v in p.items() if k != "skills"}, "skills": [s["title"] for s in p["skills"]]}
+                                    for p in _presets().presets()]}
 
 
 @router.get("/api/bots/usage")
@@ -336,7 +358,8 @@ def _flag(bid, body):
             b.meta["hidden"] = bool(body["hidden"])
         face = body.get("face")
         if isinstance(face, dict):
-            b.meta["face"] = {"shape": str(face.get("shape", "")), "color": str(face.get("color", ""))}
+            b.meta["face"] = {"shape": str(face.get("shape", "")), "color": str(face.get("color", "")),
+                              "icon": str(face.get("icon", ""))}
         b.save()
     return {"ok": True}
 
@@ -577,3 +600,58 @@ def apps_icon(dir: str = Query(default="")):  # noqa: A002 — the query key
             with open(p, "rb") as f:
                 return Response(f.read(), media_type=mime, headers={"Cache-Control": "no-cache"})
     return _error("no icon", 404)
+
+
+# --------------------------------------------------------- starter apps ---
+# Apps that ship inside the package (bots/starters/<key>), installed into the
+# apps root on demand (docs §5). Exact paths, all of them more specific than
+# any other /api/apps route, so nothing above shadows them.
+@router.get("/api/apps/starters")
+@_handled
+def apps_starters():
+    return _starters().list_state(bpaths.apps_root())
+
+
+@router.get("/api/apps/starters/status")
+@_handled
+def apps_starters_status():
+    """Each installed starter's setup tool, run through the app-tool runner (8 s cap each)."""
+    ready, why = _starters().status(bpaths.apps_root())
+    return {"ok": True, "ready": ready, "why": why}
+
+
+def _starter_install(key, x_fused, update):
+    guard = _require_fused(x_fused)
+    if guard is not None:
+        return guard
+    return {"ok": True, **_starters().install(key, bpaths.apps_root(), update=update)}
+
+
+@router.post("/api/apps/starters/{key}/install")
+@_handled
+def apps_starter_install(key: str, x_fused: str | None = Header(default=None)):
+    """Copy the starter into the apps root; an existing folder is left alone (`existed`)."""
+    return _starter_install(key, x_fused, False)
+
+
+@router.post("/api/apps/starters/{key}/update")
+@_handled
+def apps_starter_update(key: str, x_fused: str | None = Header(default=None)):
+    """Replace the installed copy's shipped files; its .fused/, .venv and extra files stay."""
+    return _starter_install(key, x_fused, True)
+
+
+@router.get("/api/apps/starters/{key}/icon")
+@_handled
+def apps_starter_icon(key: str):
+    st = _starters()
+    s = st.get(key)  # catalog lookup: the URL segment never becomes a path on its own
+    if not s or not s["icon"]:
+        return _error("no icon", 404)
+    base = os.path.realpath(st.STARTERS_DIR)
+    p = os.path.realpath(os.path.join(s["src"], s["icon"]))
+    if not p.startswith(base + os.sep) or not os.path.isfile(p):
+        return _error("no icon", 404)
+    mime = "image/svg+xml" if p.endswith(".svg") else "image/png"
+    with open(p, "rb") as f:
+        return Response(f.read(), media_type=mime, headers={"Cache-Control": "max-age=3600"})

@@ -1859,8 +1859,15 @@ def _write_new_meta(bid, meta):
     store.write_meta(bid, meta)
 
 
-def create(name="", model="", effort="", instructions=""):
-    """A new bot: bot.json, a `created` line, the greeting (background). Returns the Bot."""
+def create(name="", model="", effort="", instructions="", preset=""):
+    """A new bot: bot.json, a `created` line, the greeting (background). Returns the Bot.
+    With `preset` (a key under bots/presets/) its playbooks, brand face, standing
+    rules and starter apps are applied before the greeting, so it introduces them."""
+    preset = (preset or "").strip()
+    if preset:
+        from fused_render_app.bots import presets as presets_mod
+        if presets_mod.get(preset) is None:  # refuse before bot.json exists: no orphan bot
+            raise ValueError(f"unknown preset {preset!r}")
     bid = uuid.uuid4().hex[:8]
     n = len(_list_ids())
     meta = {"id": bid, "name": name or f"Bot {n}", "model": model if model in MODELS else DEFAULT_MODEL,
@@ -1868,7 +1875,9 @@ def create(name="", model="", effort="", instructions=""):
             "created": time.time(), "task": "", "step": 0, "url": None, "title": None}
     _write_new_meta(bid, meta)
     b = _registry().get(bid)
-    b.emit("system", f"{meta['name']} created.")
+    if preset:
+        presets_mod.apply_preset(b, preset)  # before the greeting, so it introduces the playbooks it has
+    b.emit("system", f"{meta['name']} created." + (f" Comes with {len(b.skills())} {b.meta['preset']} playbooks." if preset else ""))
     b.greet()
     return b
 

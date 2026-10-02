@@ -82,8 +82,8 @@ def loaded() -> list:
         return list(_bots.values())
 
 
-def create(name="", model="", effort="", instructions=""):
-    return _botmod().create(name, model, effort, instructions)
+def create(name="", model="", effort="", instructions="", preset=""):
+    return _botmod().create(name, model, effort, instructions, preset=preset)
 
 
 def clone(src_id, name=""):

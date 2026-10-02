@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 uv.lock
+# The Browser Bots starter apps ship their lockfiles (bots/starters.py copies them into ~/Fused/app).
+!fused_render_app/bots/starters/**/uv.lock
 build/
 dist/
 .fused/
